@@ -35,7 +35,9 @@ belongs at `~/.pi/agent/extensions/<name>.ts`.
 [small model](#small-model) for side tasks, `claude-tools.ts` translates
 between Pi's and Claude Code's tool names and inputs, `overlay.ts` draws the
 overlays, `meter.ts` draws the bars of the status line, `transcript.ts`
-turns the conversation into text for `/btw` and `/goal`, and `qr.ts` draws the QR code of `/remote-control`. `web_search` comes from the npm package `pi-web-access`; see
+turns the conversation into text for `/btw` and `/goal`, `qr.ts` draws the
+QR code of `/remote-control`, and `claude-login.ts` has Claude Code renew its
+login once it has run out. `web_search` comes from the npm package `pi-web-access`; see
 [Web search](#web-search).
 
 ## Set up Pi
@@ -250,6 +252,14 @@ from Pi's own Anthropic login in `~/.pi/agent/auth.json`, otherwise from Claude
 Code's `~/.claude/.credentials.json`. It is never refreshed here and never
 written to the cache.
 
+Claude Code renews its token only when it makes a request, so after hours
+without a prompt neither token is valid. The extension then starts a short
+Claude Code process that asks for its usage (no model request, nothing
+persisted); Claude Code renews the token under its own lock before it sends
+that request, and the limits come back with the next fetch. A renewal runs at
+most every five minutes, shared with [Remote Control](#claude-remote-control);
+after one that leaves no valid token the wait doubles, up to an hour.
+
 Other extensions get the answer through Pi's event bus: `claude-usage:source`
 carries a source with the latest answer and a refresh under the same
 two-minute rule, and `claude-usage:changed` follows every new one.
@@ -263,7 +273,7 @@ time of the next attempt.
 | :-------------------------- | :----------------------------------------- |
 | `loading…`                  | The first answer is on its way             |
 | `⚠ rate limited (HTTP 429)` | The endpoint turned the request away       |
-| `⚠ no valid OAuth token`    | No unexpired token in either file          |
+| `⚠ no valid OAuth token`    | No unexpired token in either file, and Claude Code could not renew its login: run `claude`, then `/login` |
 | `⚠ HTTP 401`                | The endpoint rejected the token            |
 | `⚠ endpoint unreachable`    | Offline, or no answer within 10 seconds    |
 
@@ -815,7 +825,9 @@ and you can work on from there while Pi keeps running on your machine.
   fails. The extension then starts a short Claude Code process that asks for
   its usage (no model request, nothing persisted); Claude Code renews the token
   under its own lock before it sends that request, and the connection is
-  renewed with it — at most every five minutes. The session log notes such a
+  renewed with it — at most every five minutes, and after a renewal that
+  fails the wait doubles, up to an hour. The status line
+  ([claude-usage](#claude-usage)) shares the renewal. The session log notes such a
   renewal (`Remote Control had Claude Code renew the claude.ai login …`), a
   renewal that keeps failing for five minutes with its reason, and the
   reconnect after it.

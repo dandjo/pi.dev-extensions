@@ -11,7 +11,8 @@
  * The endpoint is rate-limited per account, so all pi sessions share one answer through CACHE_FILE: whichever
  * session takes the lock asks, at most every USAGE_TTL_MS, and the others read the file. The OAuth access token is
  * read from pi's auth.json (falling back to Claude Code's credentials), never written to the cache, and never
- * refreshed here: rotating it would invalidate the refresh token behind the owning app's back.
+ * refreshed here: rotating it would invalidate the refresh token behind the owning app's back. When neither is valid,
+ * Claude Code is asked to renew its own (lib/claude-login.ts), as it runs out after hours without a prompt.
  *
  * The rows reach statusline.ts through the event bus ("statusline:section"); without it this file does nothing.
  * Other extensions read the answer through the event bus as well: "claude-usage:source" carries a ClaudeUsageSource,
@@ -23,6 +24,7 @@ import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
 import { mkdir, open, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { renewClaudeLogin } from "./lib/claude-login.ts";
 import { BAR_WIDTH, LABEL_WIDTH, meter, separator } from "./lib/meter.ts";
 import type { StatuslineSection } from "./statusline.ts";
 
@@ -162,7 +164,8 @@ function parseUsage(json: any): UsageSnapshot {
 }
 
 async function fetchUsage(): Promise<{ snapshot: UsageSnapshot } | { error: string }> {
-	const token = await readAccessToken();
+	let token = await readAccessToken();
+	if (!token && (await renewClaudeLogin())) token = await readAccessToken();
 	if (!token) return { error: "no valid OAuth token" };
 	let res: Response;
 	try {

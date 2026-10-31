@@ -51,7 +51,7 @@
  *   model ends the connection. Pi's own Anthropic login (~/.pi/agent/auth.json) is the fallback. Claude Code renews the
  *   token only when it makes a request, so after hours without a prompt it has run out and the four-hourly renewal of
  *   the worker credential fails; then a short Claude Code process is asked for its usage, which renews the token under
- *   Claude Code's own lock (renewClaudeLogin). A renewal that keeps failing for five minutes goes into the session log
+ *   Claude Code's own lock (lib/claude-login.ts). A renewal that keeps failing for five minutes goes into the session log
  *   with its reason, and so does the reconnect after it.
  * - What the app sees: the conversation so far, then every user prompt, assistant message (text, thinking, tool calls
  *   under Claude Code's tool names) and tool result, and a result after each run. Permission prompts do not exist in
@@ -102,6 +102,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import type { BtwAsk } from "./btw.ts";
 import type { ClaudeUsageSource, UsageSnapshot } from "./claude-usage.ts";
 import type { SubagentView } from "./subagents.ts";
+import { renewClaudeLogin } from "./lib/claude-login.ts";
 import { claudeToolName, toClaudeInput, toClaudeResponse } from "./lib/claude-tools.ts";
 import { frame } from "./lib/overlay.ts";
 import { encodeQr, renderQr } from "./lib/qr.ts";
@@ -115,9 +116,6 @@ const TOKEN_REFRESH_BUFFER_MS = 300_000;
 const RECOVERY_BACKOFF_MS = [2_000, 5_000, 10_000, 30_000, 60_000];
 /** A credential renewal that keeps failing this long is noted in the session log, with its reason. */
 const OFFLINE_NOTE_MS = 5 * 60_000;
-/** Claude Code is asked to renew its run-out login at most this often (renewClaudeLogin). */
-const LOGIN_RENEW_INTERVAL_MS = 5 * 60_000;
-const LOGIN_RENEW_TIMEOUT_MS = 30_000;
 /** A running subagent's progress goes to the app at most this often. */
 const TASK_PROGRESS_MS = 3_000;
 /** A parked connection no runtime takes over within this time (the extension is gone after /reload) is closed. */
@@ -255,7 +253,7 @@ function claudeDir(): string {
 
 /**
  * The claude.ai access token: Claude Code's first (it carries the sessions scope), then Pi's own Anthropic login. Claude
- * Code renews its token only when it makes a request (see renewClaudeLogin). Never printed, never written anywhere.
+ * Code renews its token only when it makes a request (see lib/claude-login.ts). Never printed, never written anywhere.
  */
 async function readAccessToken(): Promise<Token | null> {
 	const now = Date.now() + 60_000;
@@ -279,72 +277,6 @@ async function readAccessToken(): Promise<Token | null> {
 }
 
 const LOGIN_HINT = "Remote Control needs a claude.ai login: run `claude`, then /login, and try /remote-control again.";
-
-/** The part of the Agent SDK's query that renewClaudeLogin uses. */
-interface ClaudeSdk {
-	query(args: { prompt: AsyncIterable<never>; options: Json }): {
-		usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET(opts?: { skipBehaviors?: boolean }): Promise<unknown>;
-		close(): void;
-	};
-}
-
-let loginRenewal: Promise<boolean> | null = null;
-let loginRenewalAt = 0;
-
-/**
- * Has Claude Code renew its run-out claude.ai login. Claude Code renews the token only when it makes a request, and the
- * claude-sdk provider ends its processes when they idle, so after about eight hours without a prompt the token has run
- * out. Pi never refreshes it itself: that would rotate Claude Code's refresh token behind its back. A short Claude Code
- * process (Agent SDK, no prompt, no settings, nothing persisted) is asked for its usage instead (get_usage): a request
- * without a model call, which Claude Code sends only after renewing the token under its own lock. At most every
- * LOGIN_RENEW_INTERVAL_MS; true when Claude Code's token is valid afterwards.
- */
-function renewClaudeLogin(): Promise<boolean> {
-	if (loginRenewal) return loginRenewal;
-	if (Date.now() - loginRenewalAt < LOGIN_RENEW_INTERVAL_MS) return Promise.resolve(false);
-	loginRenewalAt = Date.now();
-	const renewal = (async () => {
-		const sdk = (await import(pathToFileURL(path.join(SDK_DIR, "sdk.mjs")).href)) as ClaudeSdk;
-		const idle: AsyncIterable<never> = { [Symbol.asyncIterator]: () => ({ next: () => new Promise<IteratorResult<never>>(() => {}) }) };
-		const env: Record<string, string | undefined> = {
-			...process.env,
-			// The subscription login, as the claude-sdk provider runs Claude Code; and usage counts as nonessential traffic.
-			ANTHROPIC_API_KEY: undefined,
-			ANTHROPIC_AUTH_TOKEN: undefined,
-			CLAUDE_CODE_USE_BEDROCK: undefined,
-			CLAUDE_CODE_USE_VERTEX: undefined,
-			CLAUDE_CODE_USE_FOUNDRY: undefined,
-			CLAUDECODE: undefined,
-			CLAUDE_CODE_ENTRYPOINT: undefined,
-			CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: undefined,
-		};
-		const q = sdk.query({
-			prompt: idle,
-			options: { cwd: os.tmpdir(), tools: [], mcpServers: {}, settingSources: [], strictMcpConfig: true, persistSession: false, env, stderr: () => {} },
-		});
-		try {
-			await Promise.race([
-				q.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET({ skipBehaviors: true }),
-				new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), LOGIN_RENEW_TIMEOUT_MS).unref?.()),
-			]);
-		} catch {
-			// whether the token is valid now decides
-		} finally {
-			try {
-				q.close();
-			} catch {
-				// already gone
-			}
-		}
-		return (await readAccessToken())?.source === "claude-code";
-	})()
-		.catch(() => false)
-		.finally(() => {
-			if (loginRenewal === renewal) loginRenewal = null;
-		});
-	loginRenewal = renewal;
-	return renewal;
-}
 
 function clock(ms: number): string {
 	return new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
