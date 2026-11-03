@@ -30,6 +30,7 @@ belongs at `~/.pi/agent/extensions/<name>.ts`.
 | `diff.ts`                  | `/diff`: a panel beside the conversation with the changes and each turn's edits           | git                                                              |
 | `claude-remote-control.ts` | `/remote-control`: drive the session from the Claude app and claude.ai/code               | A Claude model on the Claude Code login                          |
 | `background-agents.ts`     | The agent panel below the prompt: ↓ to the background agents, Enter opens one             | `subagents.ts`                                                   |
+| `claude-stream-only.ts`    | Keeps Claude Code on streamed responses, so a stalled one cannot leave Pi waiting         | `pi-claude-subscription`                                         |
 
 `lib/` holds the code the extensions share: `small-model.ts` picks the
 [small model](#small-model) for side tasks, `claude-tools.ts` translates
@@ -43,7 +44,7 @@ login once it has run out. `web_search` comes from the npm package `pi-web-acces
 ## Set up Pi
 
 Follow the steps in order — together they are the complete setup: Pi itself,
-the Claude subscription, all sixteen extensions, and the browser connection.
+the Claude subscription, all seventeen extensions, and the browser connection.
 Every step except the Chrome switch in step 4 is a
 shell command, so an agent can carry them out as well.
 
@@ -106,7 +107,7 @@ retrying, but the turn fails first.
 
 ### 3. Install the extensions
 
-Link all sixteen from the clone, together with the `lib/` folder they
+Link all seventeen from the clone, together with the `lib/` folder they
 share, so that `git pull` updates them:
 
 ```bash
@@ -838,6 +839,22 @@ and you can work on from there while Pi keeps running on your machine.
 - `pi-claude-subscription` 0.2.4 ships SDK 0.3.308, which reports itself as
   Claude Code 2.1.308. The bridge API is not a public interface and can change
   with any SDK release.
+
+## claude-stream-only
+
+Keeps a stalled response from hanging the run. When a streamed response
+stalls, Claude Code repeats the request without streaming and gets the answer
+as one finished message. `pi-claude-subscription` builds Pi's response from
+the stream alone, so that answer never reaches Pi: a tool call in it waits for
+Pi while Pi waits for the answer, until the run is aborted.
+
+- Sets `CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK=1` in Pi's own environment,
+  which the provider hands to every Claude Code process it starts. A stalled
+  stream then ends as a retried stream or as an error, and both reach Pi.
+- Applies to Pi alone, not to the shell. A value set before Pi starts is
+  kept.
+- Claude Code processes started before the extension was loaded keep their
+  environment; start Pi anew to apply it.
 
 ## Small model
 
