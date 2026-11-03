@@ -7,12 +7,18 @@
  *   are visible; the window follows the selection. Finished agents stay listed for 30 seconds, failed or stopped
  *   ones with a red mark. The footer reads "↓ to manage" while the panel exists.
  * - ↓ on the last line of the prompt, outside history browsing and autocomplete, selects the panel. Then ↑/↓ move
- *   (↑ from the first row returns to the prompt), Enter opens the selected agent (on `main` it returns to the
- *   prompt), x stops a running agent or clears a finished one, Esc returns to the prompt, and typing goes to the
- *   prompt. /tasks lists the agents as well.
+ *   (↑ from the first row returns to the prompt), Enter opens the selected agent (on `main` it shows the
+ *   conversation again and returns to the prompt), x stops a running agent or clears a finished one, Esc returns to
+ *   the prompt, and typing goes to the prompt. /tasks lists the agents as well.
  * - Opening an agent shows its transcript as it is written — the task, the assistant's text, its tool calls and
- *   results — in an overlay that follows the end while the agent works; ↑↓ PgUp PgDn scroll, x stops the agent,
- *   Esc returns. Subagents cannot be messaged; their report arrives in the conversation when they finish.
+ *   results — in place of the conversation above the prompt, as Claude Code does; the panel marks the agent shown
+ *   with ●. The view follows the end while the agent works and scrolls like the conversation (wheel, PgUp PgDn).
+ *   Subagents cannot be messaged, so the prompt stays with main: sending a prompt or a ! command shows the
+ *   conversation again. Their report arrives in the conversation when they finish.
+ * - The swap exchanges the children of Pi's document container (the first component of the TUI, in fullscreen the
+ *   child of the transcript's ScrollView) and restores them, and the conversation's scroll position, on return and at
+ *   session_shutdown. Pi keeps writing to its own containers meanwhile. When Pi's tree does not have that shape, the
+ *   transcript opens in an overlay instead (↑↓ PgUp PgDn scroll, x stops the agent, Esc returns).
  * - The transcript is read from the agent's session file under ~/.pi/agent/subagents/<session id>/. The panel
  *   replaces the editor with a subclass of Pi's own, so another extension that replaces the editor wins over it.
  * - Scheduled tasks (scheduled-tasks.ts, scheduled-tasks:state) are listed below the agents with their schedule and
@@ -23,6 +29,8 @@
 
 import { type ExtensionAPI, type ExtensionContext, CustomEditor, getAgentDir, getMarkdownTheme } from "@earendil-works/pi-coding-agent";
 import {
+	type Component,
+	isViewportTUI,
 	Key,
 	type KeybindingsManager,
 	Markdown,
@@ -179,6 +187,7 @@ export default function (pi: ExtensionAPI) {
 	let viewing: string | null = null;
 	let widgetShown = false;
 	let widgetTui: TUI | null = null;
+	let editorTui: TUI | null = null;
 	let ticker: NodeJS.Timeout | null = null;
 
 	const agentRows = (): Row[] => {
@@ -210,8 +219,10 @@ export default function (pi: ExtensionAPI) {
 						const index = panelLines[event.y];
 						if (index === undefined) return undefined;
 						if (event.type === "click") {
-							if (index === 0) blur();
-							else openEntry(entries()[index - 1]);
+							if (index === 0) {
+								showMain();
+								blur();
+							} else openEntry(entries()[index - 1]);
 						}
 						return { handled: true };
 					},
@@ -238,13 +249,14 @@ export default function (pi: ExtensionAPI) {
 
 	function hint(list: Entry[]): string | undefined {
 		if (list.length === 0) return undefined;
-		if (selected < 0) return "↓ to manage";
-		if (selected === 0) return "↑/↓ to select · Enter to return";
+		if (selected < 0) return viewing ? "↓ to manage · ↓ Enter for main" : "↓ to manage";
+		if (selected === 0) return viewing ? "↑/↓ to select · Enter to view main" : "↑/↓ to select · Enter to return";
 		const entry = list[selected - 1];
 		if (entry?.kind === "scheduled") return "Enter to view · x to delete";
 		const running = list.filter((e) => e.kind === "agent" && e.row.status === "running").length;
 		const stopAll = running > 1 ? " · x on each to stop" : "";
-		return entry?.row.status === "running" ? `Enter to view · x to stop${stopAll}` : "Enter to view · x to clear";
+		const view = entry?.row.agentId === viewing ? "" : "Enter to view · ";
+		return entry?.row.status === "running" ? `${view}x to stop${stopAll}` : `${view}x to clear`;
 	}
 
 	function onScheduled(data: unknown): void {
@@ -271,7 +283,8 @@ export default function (pi: ExtensionAPI) {
 			const finishedAt = v.status === "running" ? undefined : (old?.finishedAt ?? now);
 			rows.set(v.agentId, { ...v, finishedAt });
 		}
-		for (const id of rows.keys()) if (!seen.has(id)) rows.delete(id);
+		// The agent shown keeps its row, so the panel and its main row stay reachable.
+		for (const id of rows.keys()) if (!seen.has(id) && id !== viewing) rows.delete(id);
 		refresh();
 	}
 
@@ -372,8 +385,10 @@ export default function (pi: ExtensionAPI) {
 			return true;
 		}
 		if (matchesKey(data, Key.enter)) {
-			if (selected === 0) blur();
-			else openEntry(list[selected - 1]);
+			if (selected === 0) {
+				showMain();
+				blur();
+			} else openEntry(list[selected - 1]);
 			return true;
 		}
 		if (data === "x" && selected > 0) {
@@ -389,6 +404,7 @@ export default function (pi: ExtensionAPI) {
 				pi.events.emit("subagents:stop", row.agentId);
 				ctx?.ui.notify(`Stopping agent ${row.type} (${row.agentId}).`, "info");
 			} else {
+				if (row.agentId === viewing) showMain();
 				rows.delete(row.agentId);
 				selected = Math.max(0, selected - 1);
 			}
@@ -410,6 +426,7 @@ export default function (pi: ExtensionAPI) {
 			private readonly kb: KeybindingsManager,
 		) {
 			super(tui, theme, kb, { embedWorkingStatus: true });
+			editorTui = tui;
 		}
 
 		handleInput(data: string): void {
@@ -427,7 +444,186 @@ export default function (pi: ExtensionAPI) {
 		}
 	}
 
-	// --- transcript overlay ------------------------------------------------------------------------------------------------------
+	// --- transcript in the main view ----------------------------------------------------------------------------------------------
+
+	/** The transcript's ScrollView in fullscreen, as far as the swap uses it. */
+	interface ScrollLike {
+		readonly scrollTop: number;
+		readonly isFollowingEnd: boolean;
+		readonly viewportHeight: number;
+		scrollTo(top: number): void;
+		scrollToEnd(): void;
+		updateLayout(contentHeight: number, viewportHeight: number, requestRender: () => void): void;
+	}
+
+	/** Pi's document container: header, loaded resources, and the conversation, in that order. */
+	type DocumentContainer = Component & { children: Component[]; mouseLayout?: unknown };
+
+	interface Swap {
+		agentId: string;
+		tui: TUI;
+		doc: DocumentContainer;
+		/** The document's own children, back in place on return. */
+		saved: Component[];
+		scroll?: ScrollLike;
+		/** The conversation's scroll position when the agent was opened. */
+		scrollState?: { top: number; following: boolean };
+		component: AgentView;
+		timer: NodeJS.Timeout | null;
+	}
+
+	let swap: Swap | null = null;
+
+	/**
+	 * The document container, the first component of the TUI in both modes, and in fullscreen the transcript's
+	 * ScrollView around it. Undefined when Pi's tree does not have that shape.
+	 */
+	function documentOf(tui: TUI): { doc: DocumentContainer; scroll?: ScrollLike } | undefined {
+		const doc = (tui as unknown as { children?: Component[] }).children?.[0] as DocumentContainer | undefined;
+		if (!doc || !Array.isArray(doc.children) || doc.children.length < 3) return undefined;
+		if (!isViewportTUI(tui)) return { doc };
+		const scroll = scrollViewOf((tui as unknown as { layoutRoot?: unknown }).layoutRoot, doc, 0);
+		return scroll ? { doc, scroll } : undefined;
+	}
+
+	/** Finds the ScrollView whose child is doc in Pi's layout, which diff.ts may have split. */
+	function scrollViewOf(node: unknown, doc: Component, depth: number): ScrollLike | undefined {
+		if (!node || typeof node !== "object" || depth > 8) return undefined;
+		const n = node as { children?: unknown[]; entries?: Array<{ component?: unknown }>; scrollToEnd?: unknown; updateLayout?: unknown };
+		if (typeof n.scrollToEnd === "function" && typeof n.updateLayout === "function" && "scrollTop" in n) {
+			return n.children?.[0] === doc ? (node as ScrollLike) : undefined;
+		}
+		for (const entry of n.entries ?? []) {
+			const found = scrollViewOf(entry.component, doc, depth + 1);
+			if (found) return found;
+		}
+		return undefined;
+	}
+
+	function stateLine(current: Row, theme: Theme): string {
+		if (current.status === "running") return theme.fg("warning", `running · ${elapsed(Date.now() - current.startedAt)}`);
+		if (current.status === "completed") return theme.fg("success", `✔ completed · ${elapsed(current.durationMs ?? 0)}`);
+		return theme.fg("error", `${current.status === "aborted" ? "stopped" : "✘ failed"}${current.error ? ` · ${current.error.split("\n")[0]}` : ""}`);
+	}
+
+	function usageLine(current: Row, theme: Theme): string {
+		return theme.fg("dim", `${compact(current.tokens)} tokens · ${current.toolCount} tool${current.toolCount === 1 ? "" : "s"} · ${current.model.split("/").at(-1)}`);
+	}
+
+	/** An agent's transcript in place of the conversation: a header, then what its session file holds so far. */
+	class AgentView implements Component {
+		/** The width of the last render, which is the transcript's content width. */
+		width = 80;
+		private file: string | undefined;
+		private cache: { width: number; size: number; lines: string[] } | undefined;
+
+		constructor(
+			readonly row: Row,
+			private readonly sessionId: string,
+		) {
+			this.file = sessionFileOf(sessionId, row.agentId);
+		}
+
+		private size(): number {
+			try {
+				return this.file ? statSync(this.file).size : -1;
+			} catch {
+				return -1;
+			}
+		}
+
+		/** True when the session file changed since the last render. */
+		changed(): boolean {
+			if (!this.file) this.file = sessionFileOf(this.sessionId, this.row.agentId);
+			return this.size() !== (this.cache?.size ?? -2);
+		}
+
+		render(width: number): string[] {
+			this.width = width;
+			const theme = ctx?.ui.theme;
+			if (!theme) return [];
+			const inner = Math.max(1, width - 2);
+			const size = this.size();
+			if (!this.cache || this.cache.width !== inner || this.cache.size !== size) {
+				const body = this.file ? transcriptLines(this.file, inner, theme) : [theme.fg("dim", "The agent has not started writing yet.")];
+				this.cache = { width: inner, size, lines: body.map((line) => ` ${line}`) };
+			}
+			const current = rows.get(this.row.agentId) ?? this.row;
+			const head = [
+				`${theme.fg("accent", "●")} ${theme.bold(current.type)} ${theme.fg("dim", "›")} ${current.description || current.agentId}`,
+				`${stateLine(current, theme)}  ${usageLine(current, theme)}`,
+				theme.fg("dim", "Prompts go to main · ↓ then Enter on main shows the conversation again"),
+			];
+			return ["", ...head.map((line) => truncateToWidth(` ${line}`, width, "…")), "", ...this.cache.lines];
+		}
+
+		invalidate(): void {
+			this.cache = undefined;
+		}
+	}
+
+	/** Shows the agent's transcript where the conversation is; false when Pi's tree is not the expected one. */
+	function showAgent(row: Row): boolean {
+		const tui = editorTui ?? widgetTui;
+		if (!ctx || !tui) return false;
+		const component = new AgentView(row, ctx.sessionManager.getSessionId());
+		if (swap) {
+			if (swap.agentId === row.agentId) return true;
+			swap.doc.children = [component];
+		} else {
+			const found = documentOf(tui);
+			if (!found) return false;
+			const scroll = found.scroll;
+			swap = {
+				agentId: row.agentId,
+				tui,
+				doc: found.doc,
+				saved: found.doc.children,
+				scroll,
+				scrollState: scroll ? { top: scroll.scrollTop, following: scroll.isFollowingEnd } : undefined,
+				component,
+				timer: null,
+			};
+			found.doc.children = [component];
+		}
+		const current = swap;
+		current.agentId = row.agentId;
+		current.component = component;
+		current.doc.mouseLayout = undefined;
+		if (current.timer) clearInterval(current.timer);
+		current.timer = setInterval(() => {
+			if (swap === current && current.component === component && component.changed()) tui.requestRender();
+		}, TRANSCRIPT_POLL_MS);
+		current.timer.unref?.();
+		current.scroll?.scrollToEnd();
+		viewing = row.agentId;
+		refresh();
+		tui.requestRender(!current.scroll);
+		return true;
+	}
+
+	/** Puts the conversation back where the agent's transcript is, at the scroll position it had. */
+	function showMain(): void {
+		const current = swap;
+		if (!current) return;
+		swap = null;
+		if (current.timer) clearInterval(current.timer);
+		const added = current.doc.children.filter((child) => child !== current.component);
+		current.doc.children = [...current.saved, ...added];
+		current.doc.mouseLayout = undefined;
+		const { scroll, scrollState } = current;
+		if (scroll && scrollState) {
+			if (scrollState.following) scroll.scrollToEnd();
+			else {
+				// The ScrollView still measures the agent's transcript: give it the conversation's height before scrolling.
+				scroll.updateLayout(current.doc.render(current.component.width).length, scroll.viewportHeight, () => current.tui.requestRender());
+				scroll.scrollTo(scrollState.top);
+			}
+		}
+		if (viewing === current.agentId) viewing = null;
+		refresh();
+		current.tui.requestRender(!scroll);
+	}
 
 	async function openAgent(row: Row): Promise<void> {
 		if (!ctx) return;
@@ -437,6 +633,17 @@ export default function (pi: ExtensionAPI) {
 			ctx.ui.notify(`Agent ${row.type} ${row.agentId}: ${row.status}${file ? ` — transcript at ${file}` : ""}`, "info");
 			return;
 		}
+		if (showAgent(row)) {
+			blur();
+			return;
+		}
+		await openOverlay(row, sessionId);
+	}
+
+	// --- transcript overlay, when the main view cannot be swapped ------------------------------------------------------------------
+
+	async function openOverlay(row: Row, sessionId: string): Promise<void> {
+		if (!ctx) return;
 		viewing = row.agentId;
 		refresh();
 		try {
@@ -473,9 +680,8 @@ export default function (pi: ExtensionAPI) {
 							const max = Math.max(0, lines.length - rowsAvail);
 							if (follow) offset = max;
 							offset = Math.min(offset, max);
-							const state = current.status === "running" ? theme.fg("warning", `running · ${elapsed(Date.now() - current.startedAt)}`) : current.status === "completed" ? theme.fg("success", `✔ completed · ${elapsed(current.durationMs ?? 0)}`) : theme.fg("error", `${current.status === "aborted" ? "stopped" : "✘ failed"}${current.error ? ` · ${current.error.split("\n")[0]}` : ""}`);
 							const head = [
-								truncateToWidth(`${state}  ${theme.fg("dim", `${compact(current.tokens)} tokens · ${current.toolCount} tool${current.toolCount === 1 ? "" : "s"} · ${current.model.split("/").at(-1)}`)}`, Math.max(1, width - 4), "…"),
+								truncateToWidth(`${stateLine(current, theme)}  ${usageLine(current, theme)}`, Math.max(1, width - 4), "…"),
 								"",
 							];
 							const more = lines.length > rowsAvail ? `  ${offset + 1}–${Math.min(lines.length, offset + rowsAvail)}/${lines.length}` : "";
@@ -538,6 +744,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("session_shutdown", () => {
+		showMain();
 		if (ticker) clearInterval(ticker);
 		ticker = null;
 		if (ctx?.mode === "tui") ctx.ui.setEditorComponent(undefined);
@@ -546,6 +753,14 @@ export default function (pi: ExtensionAPI) {
 		widgetTui = null;
 		ctx?.ui.setStatus(STATUS_KEY, undefined);
 		ctx = null;
+	});
+
+	// The prompt stays with main: what is sent from it shows the conversation again.
+	pi.on("input", (event) => {
+		if (event.source === "interactive") showMain();
+	});
+	pi.on("user_bash", () => {
+		showMain();
 	});
 
 	pi.events.on("subagents:state", onState);

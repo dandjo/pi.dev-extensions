@@ -523,7 +523,7 @@ Without `subagents.ts` it does nothing.
 
 The agent panel below the prompt, after Claude Code's: while subagents run in
 the background, the panel lists them, ↓ from the prompt moves into it, and
-Enter opens an agent's live transcript.
+Enter shows an agent's live transcript in place of the conversation.
 
 - The panel appears under the editor as soon as a background agent runs: a
   `main` row, then one row per agent with its type, description, elapsed time,
@@ -534,26 +534,40 @@ Enter opens an agent's live transcript.
 - ↓ on the last line of the prompt (not while browsing history or with the
   autocomplete open) selects the `main` row; the footer then says what the
   keys do. ↑/↓ move, ↑ from `main` returns to the prompt, Enter opens the
-  selected agent (on `main` it returns to the prompt), `x` stops a running
+  selected agent (on `main` it shows the conversation again and returns to
+  the prompt), `x` stops a running
   agent or clears a finished one, Esc returns to the prompt, and any typed
   character goes into the prompt. `/tasks` offers the same list as a dialog.
-- An open agent shows its transcript in an overlay as it is written: the task,
-  the assistant's text, each tool call as one line, and the first lines of
-  each result. The view follows the end while the agent works; ↑↓ PgUp PgDn
-  scroll, End follows again, `x` stops the agent, Esc returns. The viewed
-  agent is marked `●` in the panel and `main` becomes `◯`, as in Claude Code.
-  Subagents cannot be messaged — Pi runs them as one-shot processes — so
-  their report arrives in the conversation when they finish.
+- An open agent replaces the conversation above the prompt, as in Claude
+  Code; the prompt and the panel stay where they are. The view shows the
+  agent's type, task, state, tokens, and model, then its transcript as it is
+  written: the task, the assistant's text, each tool call as one line, and
+  the first lines of each result. It follows the end while the agent works
+  and scrolls like the conversation (wheel, PgUp PgDn), beside the
+  [diff](#diff) panel too. The viewed agent is marked `●` in the panel and
+  `main` becomes `◯`; ↓ Enter (`main`) shows the conversation again, at the
+  scroll position it had.
+- Subagents cannot be messaged — Pi runs them as one-shot processes — so the
+  prompt stays with `main`: sending a prompt or a `!` command while an agent
+  is shown brings the conversation back, with the new message in it. The
+  agent's report arrives in the conversation when it finishes.
 - Foreground subagents (without `run_in_background`) are not listed: they
   block the prompt, and their tool call shows their progress.
 - Scheduled tasks ([scheduled-tasks](#scheduled-tasks)) are listed below the
   agents, marked `↻`, with their prompt, schedule, and next run, and the panel
   also appears while only tasks are scheduled. Enter opens the task in the
   task manager, `x` deletes it.
-- In fullscreen mode a click on a row opens it, a click on `main` returns to
-  the prompt, and a click on `↓ to manage` in the footer moves into the panel.
+- In fullscreen mode a click on a row opens it, a click on `main` shows the
+  conversation and returns to the prompt, and a click on `↓ to manage` in the
+  footer moves into the panel.
 - The transcript comes from the agent's session file in
-  `~/.pi/agent/subagents/<session id>/`. The panel's keys come from a subclass
+  `~/.pi/agent/subagents/<session id>/`. The swap exchanges the children of
+  Pi's document container (the first component of its TUI, in fullscreen the
+  content of the transcript's scroll view) and puts them back on return and
+  when the session ends; Pi keeps writing to its own containers meanwhile.
+  This is not a documented extension interface: when a Pi update changes that
+  tree, the transcript opens in an overlay instead (↑↓ PgUp PgDn scroll, `x`
+  stops the agent, Esc returns). The panel's keys come from a subclass
   of Pi's own editor set with `setEditorComponent`; an extension that replaces
   the editor as well wins over it, and the panel then has no keys.
 
