@@ -404,8 +404,8 @@ JSON on stdin, exit code 2 blocks, one JSON object on stdout decides.
 - Sources: `~/.claude/settings.json`; the project's `.claude/settings.json`
   and `.claude/settings.local.json` once Pi trusts the project; and
   `hooks/hooks.json` of every Claude Code plugin in
-  `~/.pi/agent/claude-plugins/<plugin>/`, with `CLAUDE_PLUGIN_ROOT` set to
-  the plugin and `CLAUDE_PLUGIN_DATA` to
+  `~/.pi/agent/claude-plugins/<plugin>/` (a directory or a link to one), with
+  `CLAUDE_PLUGIN_ROOT` set to the plugin and `CLAUDE_PLUGIN_DATA` to
   `~/.pi/agent/plugin-data/<plugin>`. `disableAllHooks: true` in a settings
   file turns them all off. The files are read again before every prompt.
 - Events: `SessionStart` (at start, resume, `/new`, fork, reload, and after

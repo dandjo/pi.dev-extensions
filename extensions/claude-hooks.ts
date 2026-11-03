@@ -5,8 +5,8 @@
  * Hooks come from
  * - ~/.claude/settings.json (CLAUDE_CONFIG_DIR is honoured),
  * - <project>/.claude/settings.json and .claude/settings.local.json, only once the project is trusted in Pi,
- * - hooks/hooks.json of every Claude Code plugin in ~/.pi/agent/claude-plugins (one directory per plugin), with
- *   CLAUDE_PLUGIN_ROOT pointing at the plugin.
+ * - hooks/hooks.json of every Claude Code plugin in ~/.pi/agent/claude-plugins (one directory per plugin, or a link
+ *   to one), with CLAUDE_PLUGIN_ROOT pointing at the plugin.
  * `disableAllHooks: true` in one of the settings files turns them all off.
  *
  * Events, and the Pi event each one runs at:
@@ -31,7 +31,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import {
@@ -135,10 +135,18 @@ function readJson(file: string): any {
 	}
 }
 
+/** The directories in dir, links to directories included. */
 function listDirs(dir: string): string[] {
+	const linkedDir = (name: string) => {
+		try {
+			return statSync(path.join(dir, name)).isDirectory();
+		} catch {
+			return false;
+		}
+	};
 	try {
 		return readdirSync(dir, { withFileTypes: true })
-			.filter((entry) => entry.isDirectory())
+			.filter((entry) => entry.isDirectory() || (entry.isSymbolicLink() && linkedDir(entry.name)))
 			.map((entry) => entry.name)
 			.sort();
 	} catch {
