@@ -1,7 +1,8 @@
 /**
- * Background agents: Claude Code's agent panel below the prompt. While subagents (subagents.ts) run in the
- * background, a panel under the editor lists them; ↓ from the prompt moves into it, Enter opens an agent's live
- * transcript, x stops it (https://code.claude.com/docs/en/sub-agents).
+ * Background agents: Claude Code's agent panel below the prompt. While subagents (subagents.ts) run, in the background
+ * or in the foreground, a panel under the editor lists them; ↓ from the prompt moves into it, Enter opens an agent's
+ * live transcript, x stops it, and Ctrl+B moves a foreground agent to the background
+ * (https://code.claude.com/docs/en/sub-agents).
  *
  * - The panel shows a `main` row and one row per agent: name, description, elapsed time, tokens. At most five rows
  *   are visible; the window follows the selection. Finished agents stay listed for 30 seconds, failed or stopped
@@ -10,6 +11,9 @@
  *   (↑ from the first row returns to the prompt), Enter opens the selected agent (on `main` it shows the
  *   conversation again and returns to the prompt), x stops a running agent or clears a finished one, Esc returns to
  *   the prompt, and typing goes to the prompt. /tasks lists the agents as well.
+ * - Ctrl+B, while a foreground agent runs, moves it to the background, as in Claude Code: the agent selected in the
+ *   panel, or else every foreground agent. Its Agent call returns at once, the conversation goes on, and the report
+ *   arrives as a message when the agent finishes. Without a foreground agent, Ctrl+B stays the editor's cursor left.
  * - Opening an agent shows its transcript as it is written — the task, the assistant's text, its tool calls and
  *   results — in place of the conversation above the prompt, as Claude Code does; the panel marks the agent shown
  *   with ●. The view follows the end while the agent works and scrolls like the conversation (wheel, PgUp PgDn).
@@ -249,14 +253,30 @@ export default function (pi: ExtensionAPI) {
 
 	function hint(list: Entry[]): string | undefined {
 		if (list.length === 0) return undefined;
-		if (selected < 0) return viewing ? "↓ to manage · ↓ Enter for main" : "↓ to manage";
+		const toBackground = list.some((e) => e.kind === "agent" && isForeground(e.row)) ? " · ctrl+b to run in background" : "";
+		if (selected < 0) return `${viewing ? "↓ to manage · ↓ Enter for main" : "↓ to manage"}${toBackground}`;
 		if (selected === 0) return viewing ? "↑/↓ to select · Enter to view main" : "↑/↓ to select · Enter to return";
 		const entry = list[selected - 1];
 		if (entry?.kind === "scheduled") return "Enter to view · x to delete";
 		const running = list.filter((e) => e.kind === "agent" && e.row.status === "running").length;
 		const stopAll = running > 1 ? " · x on each to stop" : "";
 		const view = entry?.row.agentId === viewing ? "" : "Enter to view · ";
+		if (entry && isForeground(entry.row)) return `${view}x to stop · ctrl+b to run in background${stopAll}`;
 		return entry?.row.status === "running" ? `${view}x to stop${stopAll}` : `${view}x to clear`;
+	}
+
+	function isForeground(row: Row): boolean {
+		return row.status === "running" && !row.background;
+	}
+
+	/** Ctrl+B: the foreground agent selected in the panel, or else every foreground agent, goes to the background. */
+	function moveToBackground(): boolean {
+		const foreground = agentRows().filter(isForeground);
+		if (foreground.length === 0) return false;
+		const entry = selected > 0 ? entries()[selected - 1] : undefined;
+		const chosen = entry?.kind === "agent" && isForeground(entry.row) ? [entry.row] : foreground;
+		for (const row of chosen) pi.events.emit("subagents:background", row.agentId);
+		return true;
 	}
 
 	function onScheduled(data: unknown): void {
@@ -277,7 +297,6 @@ export default function (pi: ExtensionAPI) {
 		const now = Date.now();
 		const seen = new Set<string>();
 		for (const v of data as SubagentView[]) {
-			if (!v.background && v.status === "running") continue; // foreground agents block the prompt; the tool call shows them
 			seen.add(v.agentId);
 			const old = rows.get(v.agentId);
 			const finishedAt = v.status === "running" ? undefined : (old?.finishedAt ?? now);
@@ -430,6 +449,7 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		handleInput(data: string): void {
+			if (matchesKey(data, Key.ctrl("b")) && moveToBackground()) return;
 			if (selected >= 0 && panelKey(data, this.kb)) return;
 			if ((matchesKey(data, Key.down) || this.kb.matches(data, "tui.editor.cursorDown")) && this.atPromptEnd() && focusPanel()) return;
 			super.handleInput(data);
@@ -690,7 +710,7 @@ export default function (pi: ExtensionAPI) {
 								width,
 								`${current.type} › ${current.description || row.agentId}`,
 								[...head, ...viewport(lines, offset, rowsAvail)],
-								`↑↓ PgUp PgDn scroll · End follow · ${current.status === "running" ? "x stop · " : ""}Esc back${more}`,
+								`↑↓ PgUp PgDn scroll · End follow · ${current.status === "running" ? "x stop · " : ""}${isForeground(current) ? "ctrl+b background · " : ""}Esc back${more}`,
 							);
 						},
 						handleInput(data: string): void {
@@ -704,6 +724,10 @@ export default function (pi: ExtensionAPI) {
 									pi.events.emit("subagents:stop", row.agentId);
 									tui.requestRender();
 								}
+								return;
+							}
+							if (matchesKey(data, Key.ctrl("b"))) {
+								if (isForeground(rows.get(row.agentId) ?? row)) pi.events.emit("subagents:background", row.agentId);
 								return;
 							}
 							const lines = body(cache?.width ?? 80);
@@ -770,15 +794,15 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("tasks", {
-		description: "List the background agents of this session and open one",
+		description: "List the agents of this session and open one",
 		handler: async (_args, command) => {
 			const list = agentRows();
 			if (list.length === 0) {
-				command.ui.notify("No background agents right now.", "info");
+				command.ui.notify("No agents right now.", "info");
 				return;
 			}
 			const labels = list.map((r) => `${r.type} — ${r.description || r.agentId} (${statusText(r)})`);
-			const answer = await command.ui.select("Background agents", labels);
+			const answer = await command.ui.select("Agents", labels);
 			const index = answer ? labels.indexOf(answer) : -1;
 			if (index >= 0) await openAgent(list[index]);
 		},

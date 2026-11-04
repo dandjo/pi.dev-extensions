@@ -29,7 +29,7 @@ belongs at `~/.pi/agent/extensions/<name>.ts`.
 | `scheduled-tasks.ts`       | `/loop`, `/cron`, and the cron tools: prompts on a schedule within the session            | —                                                                |
 | `diff.ts`                  | `/diff`: a panel beside the conversation with the changes and each turn's edits           | git                                                              |
 | `claude-remote-control.ts` | `/remote-control`: drive the session from the Claude app and claude.ai/code               | A Claude model on the Claude Code login                          |
-| `background-agents.ts`     | The agent panel below the prompt: ↓ to the background agents, Enter opens one             | `subagents.ts`                                                   |
+| `background-agents.ts`     | The agent panel below the prompt: ↓ to the agents, Enter opens one, Ctrl+B to background  | `subagents.ts`                                                   |
 | `claude-stream-only.ts`    | Keeps Claude Code on streamed responses, so a stalled one cannot leave Pi waiting         | `pi-claude-subscription`                                         |
 
 `lib/` holds the code the extensions share: `small-model.ts` picks the
@@ -193,6 +193,8 @@ Start Pi in a project, or run `/reload` in a running session:
   subagent; `/agents` lists the agent types.
 - "Run `sleep 60` in a background agent" shows the agent panel below the
   prompt; ↓ selects it and Enter opens the agent's transcript.
+- "Run `sleep 60` in a subagent" lists the foreground agent in the panel as
+  well; Ctrl+B moves it to the background, and its report arrives later.
 - `/btw what was my first request?` answers in an overlay.
 - `/diff` in a git project opens the diff panel beside the conversation.
 - `/rc` shows a link and a QR code, and the session appears under Code in the
@@ -480,8 +482,11 @@ final report comes back.
   `opus`, `haiku`, and `fable`, and a default model.
 - Several `Agent` calls in one response run in parallel.
   `run_in_background: true` returns at once; the report arrives later as a
-  message that starts a turn, and the footer counts the running agents.
-  `resume` with an agent ID continues that subagent with its history.
+  message that starts a turn, and the footer counts the running agents. A
+  running foreground subagent can be moved to the background (Ctrl+B in
+  [background-agents](#background-agents)); its `Agent` call then returns at
+  once in the same way. `resume` with an agent ID continues that subagent
+  with its history.
 - Subagent sessions are stored in `~/.pi/agent/subagents/<session id>/` and
   deleted after 30 days. `/agents` lists the agent types and this session's
   subagents; `/agents stop <id>` stops a background one.
@@ -489,7 +494,9 @@ final report comes back.
   instructions in it carry no authority.
 - The running and recently finished subagents are published on the event bus
   (`subagents:state`), where [background-agents](#background-agents) reads
-  them; `subagents:stop` with an agent ID stops one.
+  them; `subagents:stop` with an agent ID stops one, and
+  `subagents:background` with an agent ID moves a running foreground one to
+  the background.
 - Other extensions extend the `Agent` tool through the event bus: they emit
   `subagents:provider` with a `SubagentsProvider` — agent directories, a
   translation of tool names, model families, a default model, limits — at load
@@ -521,11 +528,12 @@ Without `subagents.ts` it does nothing.
 
 ## background-agents
 
-The agent panel below the prompt, after Claude Code's: while subagents run in
-the background, the panel lists them, ↓ from the prompt moves into it, and
-Enter shows an agent's live transcript in place of the conversation.
+The agent panel below the prompt, after Claude Code's: while subagents run, in
+the background or in the foreground, the panel lists them, ↓ from the prompt
+moves into it, Enter shows an agent's live transcript in place of the
+conversation, and Ctrl+B moves a foreground agent to the background.
 
-- The panel appears under the editor as soon as a background agent runs: a
+- The panel appears under the editor as soon as a subagent runs: a
   `main` row, then one row per agent with its type, description, elapsed time,
   and tokens. At most five rows are visible; the window follows the selection,
   with `↑ N more` and `↓ N more` for the rest. Finished agents stay 30
@@ -551,8 +559,13 @@ Enter shows an agent's live transcript in place of the conversation.
   prompt stays with `main`: sending a prompt or a `!` command while an agent
   is shown brings the conversation back, with the new message in it. The
   agent's report arrives in the conversation when it finishes.
-- Foreground subagents (without `run_in_background`) are not listed: they
-  block the prompt, and their tool call shows their progress.
+- Foreground subagents (without `run_in_background`) are listed too; their
+  tool call still shows their progress in the conversation. Ctrl+B moves them
+  to the background, as in Claude Code: the one selected in the panel, or else
+  every foreground agent. Its `Agent` call returns at once, the conversation
+  goes on, and the report arrives as a message when the agent finishes. While
+  one runs, the footer adds `ctrl+b to run in background`; without a
+  foreground agent, Ctrl+B stays the editor's cursor left.
 - Scheduled tasks ([scheduled-tasks](#scheduled-tasks)) are listed below the
   agents, marked `↻`, with their prompt, schedule, and next run, and the panel
   also appears while only tasks are scheduled. Enter opens the task in the
@@ -789,8 +802,9 @@ and you can work on from there while Pi keeps running on your machine.
 - Background tasks: subagents appear in the app's task list as Claude Code's
   tasks do — started, progress (tool calls, tokens, the last tool) at most
   every three seconds, and how they ended — and the app's stop button stops a
-  running one. Moving a running foreground agent to the background (Claude
-  Code's Ctrl+B) is not supported; Pi cannot.
+  running one. Moving a running foreground agent to the background from the
+  app (Claude Code's Ctrl+B) is not supported yet; in the terminal, Ctrl+B
+  does it ([background-agents](#background-agents)).
 - Transport: the Claude Agent SDK's bridge module
   (`@anthropic-ai/claude-agent-sdk/bridge`, marked alpha), which
   `pi-claude-subscription` installs under `~/.pi/agent/npm`. It creates the

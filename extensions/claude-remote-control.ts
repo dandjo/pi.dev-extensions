@@ -60,8 +60,8 @@
  *   it (btw:ask) the way /btw does, and the answer goes back as Claude Code's ({ response, synthetic: false }).
  * - Background tasks: Pi's subagents go to the app as Claude Code's task events (task_started, task_progress at most
  *   every few seconds, task_notification) and the live background ones as background_tasks_changed; the app's stop
- *   button (stop_task) stops one (subagents:stop). Moving a running foreground agent to the background
- *   (background_tasks, Claude Code's Ctrl+B) is not supported: Pi cannot.
+ *   button (stop_task) stops one (subagents:stop). Moving a running foreground agent to the background from the app
+ *   (background_tasks, Claude Code's Ctrl+B) is not supported yet; in the terminal, Ctrl+B in background-agents.ts does it.
  * - AskUserQuestion: the app answers a question only through a pending permission request, as Claude Code sends it
  *   (can_use_tool with requires_user_interaction); without one it reports "your answer could not be sent". So while
  *   ask-user-question.ts has its dialog open (ask-user-question:open), the questions go to the app as such a request

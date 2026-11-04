@@ -15,7 +15,9 @@
  *   provider; a family the current model belongs to keeps the current model), else a provider's default, else the
  *   current model, at the parent's thinking level unless the definition sets effort.
  * - run_in_background: true (or background: true in the definition) returns at once; the report arrives later as a
- *   message that starts a turn. resume: <agentId> continues an earlier subagent with its full history.
+ *   message that starts a turn. A foreground subagent can be moved to the background while it runs (Ctrl+B in
+ *   background-agents.ts): its Agent call then returns at once in the same way. resume: <agentId> continues an earlier
+ *   subagent with its full history.
  * - Subagent sessions live in ~/.pi/agent/subagents/<parent session id>/ and are removed after 30 days.
  * - /agents lists the agent types and this session's subagents; /agents stop <id> stops a background one.
  *
@@ -23,8 +25,9 @@
  * behave as Claude Code does inside a subagent.
  *
  * Other extensions follow the subagents through the event bus: "subagents:state" carries a SubagentView[] of the
- * running and recently finished ones whenever something changes, "subagents:request" asks for it, and
- * "subagents:stop" with an agentId stops a running one (background-agents.ts shows the panel below the prompt).
+ * running and recently finished ones whenever something changes, "subagents:request" asks for it, "subagents:stop"
+ * with an agentId stops a running one, and "subagents:background" with an agentId moves a running foreground one to the
+ * background (background-agents.ts shows the panel below the prompt).
  *
  * Providers extend the Agent tool through the event bus as well, whatever the load order: an extension emits
  * "subagents:provider" with a SubagentsProvider at load and again on every "subagents:provider-request".
@@ -121,6 +124,8 @@ interface Running {
 	proc: ChildProcess;
 	abort: AbortController;
 	background: boolean;
+	/** Moves a foreground subagent to the background: its Agent call returns at once. */
+	detach?: () => void;
 }
 
 /** What other extensions see of a subagent ("subagents:state" on the event bus). */
@@ -844,6 +849,9 @@ export default function (pi: ExtensionAPI) {
 	pi.events.on("subagents:stop", (agentId) => {
 		if (typeof agentId === "string") running.get(agentId)?.abort.abort();
 	});
+	pi.events.on("subagents:background", (agentId) => {
+		if (typeof agentId === "string") running.get(agentId)?.detach?.();
+	});
 
 	function register(ctx: ExtensionContext): void {
 		const agents = discoverAgents(ctx.cwd, ctx.isProjectTrusted());
@@ -919,15 +927,25 @@ export default function (pi: ExtensionAPI) {
 				}
 
 				const own = new AbortController();
-				const linked = background ? own.signal : signal ? AbortSignal.any([signal, own.signal]) : own.signal;
+				// A foreground subagent stops with the Agent call, until it is moved to the background.
+				const forward = () => own.abort();
+				if (!background) {
+					if (signal?.aborted) own.abort();
+					else signal?.addEventListener("abort", forward, { once: true });
+				}
 				const entry: Partial<Running> = { abort: own, background };
+				const detached = background
+					? undefined
+					: new Promise<"detached">((resolve) => {
+							entry.detach = () => resolve("detached");
+						});
 				const run = runChild(
 					meta,
 					promptFile,
 					params.prompt,
 					trusted,
 					parentSession,
-					linked,
+					own.signal,
 					(details) => {
 						if (!background) onUpdate?.({ content: [{ type: "text", text: `${details.toolCount} tool calls…` }], details });
 						publish();
@@ -940,6 +958,7 @@ export default function (pi: ExtensionAPI) {
 						publish();
 					},
 				).then((result) => {
+					signal?.removeEventListener("abort", forward);
 					running.delete(meta.agentId);
 					result.details.notes = notes.length ? notes : undefined;
 					finished.push(result.details);
@@ -948,39 +967,49 @@ export default function (pi: ExtensionAPI) {
 					return result;
 				});
 
-				if (background) {
+				/** Reports the subagent once it finishes, as a message that starts a turn, and returns the Agent call now. */
+				const inBackground = (text: string): AgentToolResult<RunDetails> => {
 					run.then(({ details }) => {
 						pi.sendMessage(
 							{ customType: "subagent", content: report(details, true), display: true, details },
 							{ triggerTurn: true, deliverAs: "followUp" },
 						);
 					});
+					const current = entry.details;
 					const launched: RunDetails = {
 						agentId: meta.agentId,
 						type: meta.type,
 						description: meta.description,
 						status: "background",
-						model: meta.model,
-						toolCalls: [],
-						toolCount: 0,
-						turns: 0,
-						tokens: 0,
-						cost: 0,
-						startedAt: Date.now(),
+						model: current?.model ?? meta.model,
+						toolCalls: current ? current.toolCalls.slice(-50) : [],
+						toolCount: current?.toolCount ?? 0,
+						turns: current?.turns ?? 0,
+						tokens: current?.tokens ?? 0,
+						cost: current?.cost ?? 0,
+						startedAt: current?.startedAt ?? Date.now(),
 						notes,
 					};
 					return {
-						content: [
-							{
-								type: "text",
-								text: `Agent ${meta.agentId} (${meta.type}) is running in the background. You will be notified when it finishes; do not poll for it. Continue with other work, or end your turn if there is nothing else to do.${notes.length ? `\n${notes.join("\n")}` : ""}`,
-							},
-						],
+						content: [{ type: "text", text: `${text}${notes.length ? `\n${notes.join("\n")}` : ""}` }],
 						details: launched,
 					};
-				}
+				};
+				const later =
+					"You will be notified when it finishes; do not poll for it. Continue with other work, or end your turn if there is nothing else to do.";
 
-				const result = await run;
+				if (background) return inBackground(`Agent ${meta.agentId} (${meta.type}) is running in the background. ${later}`);
+
+				const outcome = await Promise.race([run, detached!]);
+				if (outcome === "detached") {
+					signal?.removeEventListener("abort", forward);
+					background = true;
+					entry.background = true;
+					backgroundIds.add(meta.agentId);
+					publish();
+					return inBackground(`The user moved agent ${meta.agentId} (${meta.type}) to the background; it keeps running. ${later}`);
+				}
+				const result = outcome;
 				const out: AgentToolResult<RunDetails> = {
 					content: [{ type: "text", text: report(result.details, false) }],
 					details: result.details,
