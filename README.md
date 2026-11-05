@@ -6,8 +6,8 @@ subscription, shows a status line with the subscription limits, searches and
 reads the web, reads Claude Code's memory, titles every session, lets
 sessions message each other, runs Claude Code's hooks, brings over Claude
 Code's subagents, questions, side questions, goals, loops, scheduled prompts,
-diff view, agent panel, and Remote Control for the Claude app, and controls
-your Chrome.
+diff view, agent panel, and Remote Control for the Claude app, reads and
+changes OpenProject, and controls your Chrome.
 
 The repository mirrors `~/.pi/agent/`: a file at `extensions/<name>.ts`
 belongs at `~/.pi/agent/extensions/<name>.ts`.
@@ -17,6 +17,7 @@ belongs at `~/.pi/agent/extensions/<name>.ts`.
 | `statusline.ts`            | Replaces Pi's footer with a Claude Code style status line, for any provider               | —                                                                |
 | `claude-usage.ts`          | Adds the Claude subscription limits and usage credits to the status line                  | `statusline.ts`, a Claude subscription login (Pi or Claude Code) |
 | `web-tools.ts`             | Adds `web_fetch`: reads a page locally and lets a small model answer from it              | —                                                                |
+| `openproject.ts`           | Adds `openproject`: reads and changes OpenProject through its API v3, as you              | An OpenProject API token in `OPENPROJECT_API_TOKEN`              |
 | `claude-memory.ts`         | Puts Claude Code's auto memory of the current project into the system prompt              | Claude Code memory under `~/.claude/projects/`                   |
 | `session-title.ts`         | Names each session after its first prompt and shows it in the terminal title              | —                                                                |
 | `session-socket.ts`        | Lets sessions message each other and your Claude Code sessions, as Claude Code does       | Linux or macOS                                                   |
@@ -44,7 +45,7 @@ login once it has run out. `web_search` comes from the npm package `pi-web-acces
 ## Set up Pi
 
 Follow the steps in order — together they are the complete setup: Pi itself,
-the Claude subscription, all seventeen extensions, and the browser connection.
+the Claude subscription, all eighteen extensions, and the browser connection.
 Every step except the Chrome switch in step 4 is a
 shell command, so an agent can carry them out as well.
 
@@ -107,7 +108,7 @@ retrying, but the turn fails first.
 
 ### 3. Install the extensions
 
-Link all seventeen from the clone, together with the `lib/` folder they
+Link all eighteen from the clone, together with the `lib/` folder they
 share, so that `git pull` updates them:
 
 ```bash
@@ -142,6 +143,9 @@ Then add web search, pinned to the tested version, and configure it as
 ```bash
 pi install npm:pi-web-access@0.44.0
 ```
+
+For OpenProject, set the instance and your API token as
+[openproject](#openproject) describes.
 
 ### 4. Connect your Chrome
 
@@ -182,6 +186,7 @@ Start Pi in a project, or run `/reload` in a running session:
 - The footer shows the status line with your subscription limits.
 - "Search the web for …" answers through `web_search`.
 - "Read https://… and tell me …" answers through `web_fetch`.
+- "Which statuses does OpenProject have?" answers through `openproject`.
 - A few seconds after the first prompt, the terminal title reads
   `π - <session title> - <directory>`.
 - With Pi running in a second terminal, `/peers` lists that session, and
@@ -300,6 +305,45 @@ enters the conversation, not the page.
   Markdown itself.
 - The page counts as untrusted data: the small model is told to ignore
   instructions in it.
+
+## openproject
+
+Registers `openproject`, a tool that calls the
+[API v3](https://www.openproject.org/docs/api/) of an OpenProject instance as
+you: work packages, comments, relations, time entries, versions, projects, and
+whatever else the API offers, read and written with your permissions.
+
+- The instance comes from `~/.pi/agent/openproject.json`, as
+  `{"url": "https://openproject.example.com"}`. Without the file the tool is not
+  registered.
+- The token is a personal API token (in OpenProject: My account → Access
+  tokens → API token) in the environment variable `OPENPROJECT_API_TOKEN`,
+  read at every call. Pi must start with it set: export it in your shell
+  profile or in `~/.pam_environment`, which applies only after the next
+  login.
+- The token goes only to the configured instance. Paths and links outside its
+  `/api/v3` are refused, a redirect to another host (attachment storage) is
+  followed without the token, and the token never appears in a result.
+- No MCP: OpenProject's own MCP server (`/mcp`, since 17.2) is an Enterprise
+  add-on from the Professional plan up and answers "MCP server is not
+  available" without it. The API needs no add-on.
+- Responses are folded before they reach the model. A single work package
+  shrinks to about a seventh of its size, a list of them to about a tenth:
+  - A link becomes `"Title <href>"`. Templated and representation links,
+    empty fields, and embedded copies of linked resources are left out.
+  - Formatted texts keep their raw Markdown.
+  - The actions you may take on the requested resource are listed under
+    `_actions` as `"METHOD href"`.
+  - A work package in a list keeps only `self` and its data links (status,
+    assignee, project, …); its sub-resources are reachable from its id.
+  - `raw: true` returns the response unchanged.
+- Output over 50 KB is cut and the full response saved to a temp file. Binary
+  content, such as an attachment download, is saved to a temp file (mode 600)
+  up to 100 MB.
+- Writes need no confirmation. The tool's guidelines tell the model to write
+  only what you asked for, to send a PATCH with the `lockVersion` of a fresh
+  GET, and to validate an unclear payload against the form endpoint first.
+- Bodies are JSON only, so attachments cannot be uploaded.
 
 ## claude-memory
 
