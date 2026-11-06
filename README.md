@@ -7,7 +7,8 @@ reads the web, reads Claude Code's memory, titles every session, lets
 sessions message each other, runs Claude Code's hooks, brings over Claude
 Code's subagents, questions, side questions, goals, loops, scheduled prompts,
 diff view, agent panel, and Remote Control for the Claude app, reads and
-changes OpenProject and GitLab, and controls your Chrome.
+changes OpenProject and GitLab, controls your Chrome, and keeps requests
+alive through network trouble.
 
 The repository mirrors `~/.pi/agent/`: a file at `extensions/<name>.ts`
 belongs at `~/.pi/agent/extensions/<name>.ts`.
@@ -33,6 +34,7 @@ belongs at `~/.pi/agent/extensions/<name>.ts`.
 | `claude-remote-control.ts` | `/remote-control`: drive the session from the Claude app and claude.ai/code               | A Claude model on the Claude Code login                          |
 | `background-agents.ts`     | The agent panel below the prompt: ↓ to the agents, Enter opens one, Ctrl+B to background  | `subagents.ts`                                                   |
 | `claude-stream-only.ts`    | Keeps Claude Code on streamed responses, so a stalled one cannot leave Pi waiting         | `pi-claude-subscription`                                         |
+| `network-resilience.ts`    | Claude Code's handling of dropped connections: stall notice, restart, network wait        | —                                                                |
 
 `lib/` holds the code the extensions share: `small-model.ts` picks the
 [small model](#small-model) for side tasks, `claude-tools.ts` translates
@@ -46,7 +48,7 @@ login once it has run out. `web_search` comes from the npm package `pi-web-acces
 ## Set up Pi
 
 Follow the steps in order — together they are the complete setup: Pi itself,
-the Claude subscription, all nineteen extensions, and the browser connection.
+the Claude subscription, all twenty extensions, and the browser connection.
 Every step except the Chrome switch in step 4 is a
 shell command, so an agent can carry them out as well.
 
@@ -109,7 +111,7 @@ retrying, but the turn fails first.
 
 ### 3. Install the extensions
 
-Link all nineteen from the clone, together with the `lib/` folder they
+Link all twenty from the clone, together with the `lib/` folder they
 share, so that `git pull` updates them:
 
 ```bash
@@ -988,6 +990,47 @@ Pi while Pi waits for the answer, until the run is aborted.
   kept.
 - Claude Code processes started before the extension was loaded keep their
   environment; start Pi anew to apply it.
+
+## network-resilience
+
+Keeps a request alive through network trouble the way Claude Code does. Pi on
+its own retries three times within 14 seconds and shows nothing while a
+request hangs. Through `pi-claude-subscription`, Claude Code's own retries stay
+invisible too, because the provider drops their messages: Pi says "Working…"
+for as long as Claude Code retries, twenty minutes and more when its connects
+time out.
+
+- After 20 seconds without stream data, the working message counts the wait
+  and says whether the API host answers, as Claude Code's "Waiting for API
+  response · check your network" does. The check is a TCP connect to the
+  model's API host (`api.anthropic.com` for `claude-sdk`), through
+  `HTTPS_PROXY` when one is set.
+- While the host does not answer, the message names the cause in Claude
+  Code's words ("no route to api.anthropic.com (ENETUNREACH) · check your
+  connection or VPN"), and the footer shows `⚠ offline`.
+- A request that gets no data after the network came back, after the machine
+  woke from sleep, or after the network interfaces changed (a VPN coming up,
+  Wi-Fi to cable) is aborted 10 seconds later and the run resumes: a note in
+  the transcript tells the model the response was lost. The same happens to a
+  request silent for 5 minutes while the host answers. At most three restarts
+  follow each other without a response in between.
+- Before every request that follows a connection error, Pi's own retries
+  included, the host is checked. While it does not answer, Pi waits and checks
+  every 3 seconds instead of spending its retries, for up to 30 minutes per
+  outage; Esc interrupts the wait.
+- When Pi gives up on a transient error, the run continues with Claude Code's
+  backoff (4, 8, 16, then 32 seconds) until ten requests in a row have failed,
+  with the attempt and the countdown in the working message. Usage limits,
+  login, request, and context errors are never retried.
+- Settings, all optional, go into `~/.pi/agent/network-resilience.json`:
+  `noticeSeconds` (20), `graceSeconds` (10), `stallSeconds` (300; 0 turns
+  the silence restart off), `maxRestarts` (3), `maxAttempts` (10),
+  `offlineWaitMinutes` (30; 0 turns the waiting off), and `probeHost`
+  (`host:port` to check instead of the API host).
+- When the API delivers data while the check fails, the check does not
+  reflect your network, behind a proxy Pi does not know of, for example.
+  Checking then stops until Pi restarts, and restarts after a disruption
+  follow the 10 seconds alone. Set `probeHost` to a host that answers.
 
 ## Small model
 
