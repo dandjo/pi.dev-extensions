@@ -14,9 +14,12 @@
  *   and a description in a list is cut. The pagination headers become a line above the body. File contents and
  *   GraphQL answers are returned as they are, job logs without their colour codes (unless raw is set), and binary
  *   content (artifacts, archives) is saved to a temp file. A cut job log keeps its end.
+ * - files uploads local files as multipart/form-data (a project avatar, a markdown upload); the fields of body go
+ *   along as form fields. Files go, like the token, only to the configured instance.
  */
 
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
 import os from "node:os";
@@ -40,6 +43,24 @@ const DEFAULT_TOKEN_ENV = "GITLAB_TOKEN";
 const REQUEST_TIMEOUT_MS = 30_000;
 const MAX_REDIRECTS = 5;
 const MAX_DOWNLOAD_BYTES = 100 * 1024 * 1024;
+const MAX_UPLOAD_BYTES = 100 * 1024 * 1024;
+/** Content types of uploaded files by extension; anything else goes as application/octet-stream. */
+const UPLOAD_TYPES: Record<string, string> = {
+	".png": "image/png",
+	".jpg": "image/jpeg",
+	".jpeg": "image/jpeg",
+	".gif": "image/gif",
+	".webp": "image/webp",
+	".svg": "image/svg+xml",
+	".ico": "image/x-icon",
+	".pdf": "application/pdf",
+	".txt": "text/plain",
+	".md": "text/markdown",
+	".csv": "text/csv",
+	".json": "application/json",
+	".zip": "application/zip",
+	".gz": "application/gzip",
+};
 /** A description in a list item is cut to this many characters. */
 const LIST_DESCRIPTION_CHARS = 400;
 const USER_AGENT = "pi-gitlab/1.0 (+https://pi.dev)";
@@ -140,6 +161,68 @@ function requestUrl(instance: Instance, target: string, query: Record<string, un
 	return url;
 }
 
+/** A request body and its content type. */
+interface Payload {
+	contentType: string;
+	data: string | Uint8Array;
+}
+
+/** Appends a form field the way GitLab reads it, like appendParam: arrays as key[], objects as key[sub]. */
+function formFields(key: string, value: unknown, out: Array<[string, string]>): void {
+	if (value === undefined || value === null) return;
+	if (Array.isArray(value)) {
+		for (const item of value) formFields(`${key}[]`, item, out);
+	} else if (typeof value === "object") {
+		for (const [sub, item] of Object.entries(value)) formFields(`${key}[${sub}]`, item, out);
+	} else {
+		out.push([key, String(value)]);
+	}
+}
+
+/** A local path with ~ expanded, resolved against the working directory. */
+function localPath(file: string): string {
+	const trimmed = file.trim();
+	if (trimmed === "~" || trimmed.startsWith("~/")) return path.join(os.homedir(), trimmed.slice(1));
+	return path.resolve(trimmed);
+}
+
+/** A multipart/form-data body with the fields of body and the given files (form field name → local path). */
+function multipart(fields: Record<string, unknown> | undefined, files: Record<string, string>): Payload {
+	const boundary = `pi-gitlab-${randomBytes(16).toString("hex")}`;
+	const quoted = (text: string) => text.replace(/["\r\n]/g, (c) => encodeURIComponent(c));
+	const parts: Uint8Array[] = [];
+	const pairs: Array<[string, string]> = [];
+	for (const [key, value] of Object.entries(fields ?? {})) formFields(key, value, pairs);
+	for (const [name, value] of pairs) {
+		parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="${quoted(name)}"\r\n\r\n${value}\r\n`));
+	}
+	let total = 0;
+	for (const [name, file] of Object.entries(files)) {
+		const resolved = localPath(file);
+		let size: number;
+		try {
+			const stat = statSync(resolved);
+			if (!stat.isFile()) throw new Error("not a regular file");
+			size = stat.size;
+		} catch (error) {
+			throw new Error(`files.${name}: ${resolved} cannot be read (${error instanceof Error ? error.message : String(error)})`);
+		}
+		total += size;
+		if (total > MAX_UPLOAD_BYTES) throw new Error(`files: more than ${formatSize(MAX_UPLOAD_BYTES)} to upload`);
+		const fileName = path.basename(resolved);
+		const type = UPLOAD_TYPES[path.extname(fileName).toLowerCase()] ?? "application/octet-stream";
+		parts.push(
+			Buffer.from(
+				`--${boundary}\r\nContent-Disposition: form-data; name="${quoted(name)}"; filename="${quoted(fileName)}"\r\nContent-Type: ${type}\r\n\r\n`,
+			),
+			readFileSync(resolved),
+			Buffer.from("\r\n"),
+		);
+	}
+	parts.push(Buffer.from(`--${boundary}--\r\n`));
+	return { contentType: `multipart/form-data; boundary=${boundary}`, data: Buffer.concat(parts) };
+}
+
 /**
  * One HTTP request through node:http(s), as a Response. Not fetch: it adds Sec-Fetch-Mode: cors to every request, and
  * GitLab answers that with 406 on downloads such as repository archives.
@@ -148,7 +231,7 @@ function request(
 	url: URL,
 	method: string,
 	headers: Record<string, string>,
-	body: string | undefined,
+	body: string | Uint8Array | undefined,
 	signal: AbortSignal,
 ): Promise<Response> {
 	return new Promise((resolve, reject) => {
@@ -176,7 +259,7 @@ async function send(
 	token: string,
 	method: string,
 	url: URL,
-	body: unknown,
+	payload: Payload | undefined,
 	signal: AbortSignal | undefined,
 ): Promise<{ response: Response; url: URL }> {
 	const timeout = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
@@ -185,10 +268,10 @@ async function send(
 	for (let hop = 0; ; hop++) {
 		const headers: Record<string, string> = { Accept: ACCEPT, "User-Agent": USER_AGENT };
 		if (current.origin === instance.origin) headers["PRIVATE-TOKEN"] = token;
-		if (body !== undefined) headers["Content-Type"] = "application/json";
+		if (payload !== undefined) headers["Content-Type"] = payload.contentType;
 		let response: Response;
 		try {
-			response = await request(current, method, headers, body === undefined ? undefined : JSON.stringify(body), abort);
+			response = await request(current, method, headers, payload?.data, abort);
 		} catch (error) {
 			if (abort.aborted) throw error;
 			throw new Error(`${current.origin} is unreachable: ${error instanceof Error ? error.message : String(error)}`);
@@ -374,7 +457,14 @@ const Params = Type.Object({
 	body: Type.Optional(
 		Type.Object({}, {
 			additionalProperties: true,
-			description: "JSON body for POST and PUT; for /api/graphql {\"query\": \"…\", \"variables\": {…}}",
+			description: "JSON body for POST and PUT; for /api/graphql {\"query\": \"…\", \"variables\": {…}}; with files, its fields go as form fields",
+		}),
+	),
+	files: Type.Optional(
+		Type.Object({}, {
+			additionalProperties: Type.String(),
+			description:
+				"Local files to upload with POST or PUT as multipart/form-data, form field name → path, e.g. {\"avatar\": \"~/logo.png\"} for PUT /projects/{id} or {\"file\": \"./diagram.png\"} for POST /projects/{id}/uploads",
 		}),
 	),
 	raw: Type.Optional(
@@ -411,7 +501,9 @@ export default function (pi: ExtensionAPI) {
 			"avatar URLs, and the _links of list items are left out, a user inside another resource or a list reads " +
 			"\"Name (@username, id N)\", and a description in a list is cut; raw: true returns it unfolded. Tokens and " +
 			"secret CI/CD variable values are always masked. File contents come as they are, job logs without colour " +
-			"codes; binary content such as artifacts is saved to a temp file. Output over " +
+			"codes; binary content such as artifacts is saved to a temp file. files uploads local files as multipart/form-data, " +
+			"e.g. a project avatar (PUT /projects/{id}, files {\"avatar\": path}) or an image for markdown (POST " +
+			"/projects/{id}/uploads, files {\"file\": path}). Output over " +
 			`${formatSize(DEFAULT_MAX_BYTES)} is truncated (a job log keeps its end) and the full response saved to a ` +
 			"temp file.",
 		promptSnippet: "Read and change GitLab issues, merge requests, pipelines, jobs, and repositories (REST v4, GraphQL)",
@@ -421,6 +513,7 @@ export default function (pi: ExtensionAPI) {
 			"gitlab: list projects with simple=true unless their settings matter; a full project list exceeds the output limit after about twenty projects.",
 			"gitlab: a description in a list is cut; GET the single issue or merge request before quoting or changing its description.",
 			"gitlab: send POST, PUT, or DELETE only for changes the user asked for.",
+			"gitlab: upload a local file with files, e.g. a project avatar as PUT /projects/{id} with files {\"avatar\": \"/path/logo.png\"}; upload only files the user named for that purpose.",
 		],
 		parameters: Params,
 		annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
@@ -438,8 +531,17 @@ export default function (pi: ExtensionAPI) {
 			if (params.body !== undefined && (method === "GET" || method === "DELETE")) {
 				throw new Error(`a ${method} request takes no body; send its parameters as query`);
 			}
+			const files = params.files as Record<string, string> | undefined;
+			if (files !== undefined && method !== "POST" && method !== "PUT") throw new Error("files are uploaded with POST or PUT");
 			const target = requestUrl(instance, params.path, params.query as Record<string, unknown> | undefined);
-			const { response, url } = await send(instance, token, method, target, params.body, signal);
+			if (files !== undefined && target.pathname === instance.graphql) throw new Error("files cannot go to /api/graphql");
+			const payload: Payload | undefined =
+				files !== undefined && Object.keys(files).length > 0
+					? multipart(params.body as Record<string, unknown> | undefined, files)
+					: params.body !== undefined
+						? { contentType: "application/json", data: JSON.stringify(params.body) }
+						: undefined;
+			const { response, url } = await send(instance, token, method, target, payload, signal);
 			const mask = (text: string) => text.split(token).join(REDACTED);
 
 			const graphql = target.pathname === instance.graphql;

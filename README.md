@@ -390,6 +390,13 @@ your permissions.
   - The pagination headers become a line above the body: page, total, and the
     href of the next page, which the tool takes as its path.
   - `raw: true` returns the response unfolded.
+- `files` uploads local files as `multipart/form-data` with POST or PUT,
+  form field name → path: a project avatar is `PUT /projects/{id}` with
+  `files: {"avatar": "~/logo.png"}`, an image for Markdown
+  `POST /projects/{id}/uploads` with `files: {"file": "./diagram.png"}`. The
+  fields of `body` go along as form fields (arrays as `key[]`). Like the token,
+  files go only to the configured instance, up to 100 MB in all; GET, DELETE,
+  and GraphQL take none.
 - File contents (`…/raw`) and GraphQL answers come as they are. A job log
   (`…/jobs/{id}/trace`) comes without its colour codes, and when it is cut,
   it keeps its end, where the failure is.
