@@ -7,7 +7,7 @@ reads the web, reads Claude Code's memory, titles every session, lets
 sessions message each other, runs Claude Code's hooks, brings over Claude
 Code's subagents, questions, side questions, goals, loops, scheduled prompts,
 diff view, agent panel, and Remote Control for the Claude app, reads and
-changes OpenProject, and controls your Chrome.
+changes OpenProject and GitLab, and controls your Chrome.
 
 The repository mirrors `~/.pi/agent/`: a file at `extensions/<name>.ts`
 belongs at `~/.pi/agent/extensions/<name>.ts`.
@@ -18,6 +18,7 @@ belongs at `~/.pi/agent/extensions/<name>.ts`.
 | `claude-usage.ts`          | Adds the Claude subscription limits and usage credits to the status line                  | `statusline.ts`, a Claude subscription login (Pi or Claude Code) |
 | `web-tools.ts`             | Adds `web_fetch`: reads a page locally and lets a small model answer from it              | —                                                                |
 | `openproject.ts`           | Adds `openproject`: reads and changes OpenProject through its API v3, as you              | An OpenProject API token in `OPENPROJECT_API_TOKEN`              |
+| `gitlab.ts`                | Adds `gitlab`: reads and changes GitLab through its REST API v4 and GraphQL, as you       | A GitLab personal access token in the environment                |
 | `claude-memory.ts`         | Puts Claude Code's auto memory of the current project into the system prompt              | Claude Code memory under `~/.claude/projects/`                   |
 | `session-title.ts`         | Names each session after its first prompt and shows it in the terminal title              | —                                                                |
 | `session-socket.ts`        | Lets sessions message each other and your Claude Code sessions, as Claude Code does       | Linux or macOS                                                   |
@@ -45,7 +46,7 @@ login once it has run out. `web_search` comes from the npm package `pi-web-acces
 ## Set up Pi
 
 Follow the steps in order — together they are the complete setup: Pi itself,
-the Claude subscription, all eighteen extensions, and the browser connection.
+the Claude subscription, all nineteen extensions, and the browser connection.
 Every step except the Chrome switch in step 4 is a
 shell command, so an agent can carry them out as well.
 
@@ -108,7 +109,7 @@ retrying, but the turn fails first.
 
 ### 3. Install the extensions
 
-Link all eighteen from the clone, together with the `lib/` folder they
+Link all nineteen from the clone, together with the `lib/` folder they
 share, so that `git pull` updates them:
 
 ```bash
@@ -146,6 +147,9 @@ pi install npm:pi-web-access@0.44.0
 
 For OpenProject, set the instance and your API token as
 [openproject](#openproject) describes.
+
+For GitLab, set the instance and your access token as [gitlab](#gitlab)
+describes.
 
 ### 4. Connect your Chrome
 
@@ -187,6 +191,7 @@ Start Pi in a project, or run `/reload` in a running session:
 - "Search the web for …" answers through `web_search`.
 - "Read https://… and tell me …" answers through `web_fetch`.
 - "Which statuses does OpenProject have?" answers through `openproject`.
+- "Which GitLab merge requests are assigned to me?" answers through `gitlab`.
 - A few seconds after the first prompt, the terminal title reads
   `π - <session title> - <directory>`.
 - With Pi running in a second terminal, `/peers` lists that session, and
@@ -344,6 +349,62 @@ whatever else the API offers, read and written with your permissions.
   only what you asked for, to send a PATCH with the `lockVersion` of a fresh
   GET, and to validate an unclear payload against the form endpoint first.
 - Bodies are JSON only, so attachments cannot be uploaded.
+
+## gitlab
+
+Registers `gitlab`, a tool that calls the
+[REST API v4](https://docs.gitlab.com/api/rest/) and the
+[GraphQL API](https://docs.gitlab.com/api/graphql/) of a GitLab instance as
+you: issues, merge requests, notes, pipelines, job logs, repository files,
+projects, groups, and whatever else the API offers, read and written with
+your permissions.
+
+- The instance comes from `~/.pi/agent/gitlab.json`, as
+  `{"url": "https://gitlab.example.com"}`. Without the file the tool is not
+  registered.
+- The token is a personal access token (in GitLab: User settings → Personal
+  access tokens; scope `api`, or `read_api` to read only) in the environment
+  variable `GITLAB_TOKEN`, or in the one `"tokenEnv"` in `gitlab.json` names.
+  It is read at every call. Pi must start with it set: export it in your shell
+  profile or in `~/.pam_environment`, which applies only after the next
+  login.
+- The token goes only to the configured instance, in the `PRIVATE-TOKEN`
+  header. Paths and links outside its `/api/v4` and `/api/graphql` are
+  refused, and a redirect to another host (object storage) is followed
+  without the token.
+- Secrets never reach the model, not even with `raw: true`: the token itself,
+  fields named `token` or `*_token` (`runners_token`, a newly created access
+  token), and the value of a CI/CD variable that is masked or hidden or whose
+  key names a secret (`PASSWORD`, `SECRET`, `TOKEN`, `…_KEY`, …) read
+  `[redacted]`.
+- REST JSON is folded before it reaches the model. A list of issues shrinks
+  to about a third of its size:
+  - Empty fields, avatar URLs, and the `_links` of list items are left out,
+    and so is an object of zeros only (`time_stats`).
+  - A user inside another resource or a list (author, assignees, merged_by)
+    reads `"Name (@username, id N)"`, with its state when it is not active.
+  - A description in a list is cut after 400 characters; the single issue or
+    merge request has all of it.
+  - The pagination headers become a line above the body: page, total, and the
+    href of the next page, which the tool takes as its path.
+  - `raw: true` returns the response unfolded.
+- File contents (`…/raw`) and GraphQL answers come as they are. A job log
+  (`…/jobs/{id}/trace`) comes without its colour codes, and when it is cut,
+  it keeps its end, where the failure is.
+- Output over 50 KB is cut and the full response saved to a temp file. Binary
+  content, such as artifacts and archives, is saved to a temp file (mode 600)
+  up to 100 MB.
+- GraphQL is there for what REST lacks: an issue's iteration, for one, can
+  only be set through `issueSetIteration`. A GraphQL answer with `errors`
+  counts as failed.
+- Requests go through `node:https`, not `fetch`: `fetch` sends
+  `Sec-Fetch-Mode: cors`, and GitLab answers that with 406 on downloads such
+  as repository archives.
+- Writes need no confirmation. The tool's guidelines tell the model to write
+  only what you asked for and to read a single issue or merge request before
+  changing its description.
+- Bodies are JSON only, so files cannot be uploaded. Git itself — clone,
+  fetch, push — stays with `git`.
 
 ## claude-memory
 
