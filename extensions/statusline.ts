@@ -59,8 +59,9 @@ const BORDER_LABEL = Symbol.for("pi.statusline.border-label");
 
 /**
  * Hooks the label into the top border of every prompt editor, Pi's own and the ones extensions set: all of them are
- * CustomEditors, so the hook goes on its prototype, once. Claude Code's prompt box shows its border text the same
- * way, " text " flush with the right end. Undefined when Pi's editor no longer draws its border there.
+ * CustomEditors, so the hook goes on its prototype, once. As in Claude Code's prompt box, the text sits near the
+ * right end with a stub of the line after it ("─── text ──"). Undefined when Pi's editor no longer draws its border
+ * there.
  */
 function borderLabel(): BorderLabel | undefined {
 	type Render = (this: unknown, width: number, hiddenLineCount: number) => string;
@@ -78,8 +79,10 @@ function borderLabel(): BorderLabel | undefined {
 			text = undefined;
 		}
 		if (!text || width < 30) return original.call(this, width, hiddenLineCount);
-		const shown = ` ${truncateToWidth(text, Math.floor(width / 2) - 2, "…")} `;
-		return original.call(this, width - visibleWidth(shown), hiddenLineCount) + shown;
+		const color = (this as { borderColor?: (s: string) => string }).borderColor ?? ((s: string) => s);
+		const tail = "──";
+		const shown = ` ${truncateToWidth(text, Math.floor(width / 2) - 4, "…")} `;
+		return original.call(this, width - visibleWidth(shown) - tail.length, hiddenLineCount) + shown + color(tail);
 	};
 	return label;
 }

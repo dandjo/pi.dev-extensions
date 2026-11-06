@@ -237,10 +237,11 @@ elapsed time, for any provider. Below them come the rows other extensions add
 — [claude-usage](#claude-usage) adds the subscription limits — and the
 statuses that other extensions set appear as a last line.
 
-The session name stands at the right end of the line above the prompt, as in
-Claude Code's prompt box: the name [session-title](#session-title) gives the
-session, or the one set with `/name` or `--name`, cut with `…` to half the
-width. It changes as soon as the name does, and stays away while a session has
+The session name stands in the line above the prompt, as in Claude Code's
+prompt box, set in from the right end as far as Pi sets in the working status
+from the left: `── ⠋ Working ──── … ──── <name> ──`. It is the name
+[session-title](#session-title) gives the session, or the one set with `/name`
+or `--name`, cut with `…` to half the width. It changes as soon as the name does, and stays away while a session has
 none. Every prompt editor draws it, Pi's own and the one
 [background-agents](#background-agents) sets, because the extension hooks
 `renderTopBorder` of Pi's `CustomEditor` class. That method is not a
