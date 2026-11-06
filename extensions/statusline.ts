@@ -6,6 +6,7 @@
  * Line 2: context-window usage bar, tokens in context, session cost, elapsed time
  * Then: the rows other extensions add as sections (claude-usage.ts: the Claude subscription limits)
  * Last line (optional): statuses other extensions set via ctx.ui.setStatus()
+ * Prompt: the session name at the right end of the prompt's top border, as Claude Code shows it
  *
  * Sections come through the event bus, whatever the load order: an extension emits "statusline:section" with a
  * StatuslineSection at load and again on every "statusline:section-request"; "statusline:changed" asks for a render.
@@ -15,7 +16,7 @@
  */
 
 import type { AssistantMessage } from "@earendil-works/pi-ai";
-import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
+import { CustomEditor, type ExtensionAPI, type Theme } from "@earendil-works/pi-coding-agent";
 import { type TuiMouseEvent, type TuiMouseEventResult, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import * as os from "node:os";
 import { meter, separator } from "./lib/meter.ts";
@@ -49,6 +50,40 @@ function tildify(dir: string): string {
 	return dir.startsWith(home) ? `~${dir.slice(home.length)}` : dir;
 }
 
+/** The text at the right end of the prompt's top border; one per process, since /reload evaluates this module anew. */
+interface BorderLabel {
+	text?: () => string | undefined;
+}
+
+const BORDER_LABEL = Symbol.for("pi.statusline.border-label");
+
+/**
+ * Hooks the label into the top border of every prompt editor, Pi's own and the ones extensions set: all of them are
+ * CustomEditors, so the hook goes on its prototype, once. Claude Code's prompt box shows its border text the same
+ * way, " text " flush with the right end. Undefined when Pi's editor no longer draws its border there.
+ */
+function borderLabel(): BorderLabel | undefined {
+	type Render = (this: unknown, width: number, hiddenLineCount: number) => string;
+	const proto = CustomEditor.prototype as unknown as { renderTopBorder?: Render; [BORDER_LABEL]?: BorderLabel };
+	if (proto[BORDER_LABEL]) return proto[BORDER_LABEL];
+	const original = proto.renderTopBorder;
+	if (typeof original !== "function") return undefined;
+	const label: BorderLabel = {};
+	proto[BORDER_LABEL] = label;
+	proto.renderTopBorder = function (width, hiddenLineCount) {
+		let text: string | undefined;
+		try {
+			text = label.text?.()?.trim();
+		} catch {
+			text = undefined;
+		}
+		if (!text || width < 30) return original.call(this, width, hiddenLineCount);
+		const shown = ` ${truncateToWidth(text, Math.floor(width / 2) - 2, "…")} `;
+		return original.call(this, width - visibleWidth(shown), hiddenLineCount) + shown;
+	};
+	return label;
+}
+
 export default function (pi: ExtensionAPI) {
 	const startedAt = Date.now();
 	const sections = new Map<string, StatuslineSection>();
@@ -59,11 +94,23 @@ export default function (pi: ExtensionAPI) {
 	});
 	pi.events.emit("statusline:section-request", undefined);
 
+	const label = borderLabel();
+	let requestRender: (() => void) | undefined;
+
+	pi.on("session_info_changed", () => requestRender?.());
+
+	pi.on("session_shutdown", () => {
+		if (label) label.text = undefined;
+		requestRender = undefined;
+	});
+
 	pi.on("session_start", async (_event, ctx) => {
 		if (ctx.mode !== "tui") return;
+		if (label) label.text = () => pi.getSessionName();
 
 		ctx.ui.setFooter((tui, theme, footerData) => {
 			const rerender = () => tui.requestRender();
+			requestRender = rerender;
 			const unsubBranch = footerData.onBranchChange(rerender);
 			const unsubChanged = pi.events.on("statusline:changed", rerender);
 			const timer = setInterval(rerender, TICK_MS);
@@ -74,6 +121,7 @@ export default function (pi: ExtensionAPI) {
 
 			return {
 				dispose() {
+					if (requestRender === rerender) requestRender = undefined;
 					unsubBranch();
 					unsubChanged();
 					clearInterval(timer);

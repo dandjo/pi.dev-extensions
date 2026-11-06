@@ -237,6 +237,16 @@ elapsed time, for any provider. Below them come the rows other extensions add
 — [claude-usage](#claude-usage) adds the subscription limits — and the
 statuses that other extensions set appear as a last line.
 
+The session name stands at the right end of the line above the prompt, as in
+Claude Code's prompt box: the name [session-title](#session-title) gives the
+session, or the one set with `/name` or `--name`, cut with `…` to half the
+width. It changes as soon as the name does, and stays away while a session has
+none. Every prompt editor draws it, Pi's own and the one
+[background-agents](#background-agents) sets, because the extension hooks
+`renderTopBorder` of Pi's `CustomEditor` class. That method is not a
+documented extension interface: when a Pi update removes it, the name is
+simply not shown.
+
 An extension adds rows through the event bus: it emits `statusline:section`
 with an `id` and a `render(theme)` that returns the rows, at load and again on
 every `statusline:section-request`, so the load order does not matter.
