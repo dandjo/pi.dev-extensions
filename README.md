@@ -311,9 +311,14 @@ your machine, turns its main content into Markdown, and lets the
 enters the conversation, not the page.
 
 - The request comes from your machine and network, VPN included, with the agent
-  string `pi-web-fetch/1.0`. Some sites block automated requests
-  (docs.moodle.org, Stack Overflow, npm, Reddit); the tool then says so, and the
-  browser connection can read them instead.
+  string `pi-web-fetch/1.0`. Many sites behind Cloudflare (docs.moodle.org,
+  Stack Overflow, npm, raspberrypi.com) answer every client that is not a real
+  browser with a bot challenge (`cf-mitigated: challenge`), whatever its agent
+  string. The tool then reads the page's latest raw capture from the
+  [Wayback Machine](https://web.archive.org/) instead and puts its date and
+  address above the answer; only the page's address goes to archive.org. Other
+  blocks (Reddit), and a challenged page without a capture, end in an error
+  that points to the browser connection.
 - Redirects within the same site are followed. A redirect to another site is
   reported, and the model decides whether to fetch the target.
 - Text pages only: HTML, plain text, JSON, XML. PDFs and other files are refused

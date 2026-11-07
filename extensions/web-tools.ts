@@ -3,7 +3,9 @@
  *
  * The page is fetched locally, reduced to Markdown, and a small model of the current provider (see
  * lib/small-model.ts) answers the prompt from it, so the page text never goes to another provider. Without a model,
- * or when the model fails, the Markdown itself is returned. web_search comes from the pi-web-access package.
+ * or when the model fails, the Markdown itself is returned. A page behind a Cloudflare bot challenge, which only a
+ * real browser passes, is read from its latest Wayback Machine capture instead; only its address goes to archive.org.
+ * web_search comes from the pi-web-access package.
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -19,6 +21,10 @@ const MAX_PAGE_CHARS = 100_000;
 const ANSWER_MAX_TOKENS = 4_096;
 // An honest agent string: a browser one that does not match Node's TLS fingerprint is blocked more often.
 const USER_AGENT = "Mozilla/5.0 (compatible; pi-web-fetch/1.0; +https://pi.dev)";
+// Prefix of a raw capture (id_: the page as archived, without the Wayback toolbar); the timestamp 2 picks the latest.
+const ARCHIVE_LATEST = "https://web.archive.org/web/2id_/";
+const CAPTURE = /^https?:\/\/web\.archive\.org\/web\/(\d{4})(\d{2})(\d{2})\d*id_\/(https?:\/\/.+)$/;
+const BROWSER_HINT = "read it in a real browser instead (the chrome-devtools MCP tools, if connected)";
 const SYSTEM_PROMPT = [
 	"You answer a question about a web page from its content alone.",
 	"- Use only the page content you are given. If it does not answer the question, say so.",
@@ -31,6 +37,15 @@ interface Page {
 	url: string;
 	title: string;
 	markdown: string;
+	/** Why the content does not come from url itself. */
+	note?: string;
+}
+
+/** A bot challenge that only a real browser passes, such as Cloudflare's managed challenge. */
+class ChallengeError extends Error {
+	constructor(message: string, readonly url: URL) {
+		super(message);
+	}
 }
 
 const ENTITIES: Record<string, string> = {
@@ -145,10 +160,32 @@ function sameSite(from: URL, to: URL): boolean {
 	return protocol && port && from.hostname.replace(/^www\./, "") === to.hostname.replace(/^www\./, "");
 }
 
-/** Fetches the page, following redirects within the same site; a redirect to another site is reported, not followed. */
+/** Fetches the page, falling back to its latest Wayback Machine capture when a bot challenge blocks it. */
 async function fetchPage(address: string, signal: AbortSignal | undefined): Promise<Page | { redirect: string }> {
-	let url = new URL(address);
+	const url = new URL(address);
 	if (url.protocol !== "http:" && url.protocol !== "https:") throw new Error(`only http and https URLs can be fetched, not ${url.protocol}`);
+	try {
+		return await load(url, signal);
+	} catch (error) {
+		if (!(error instanceof ChallengeError)) throw error;
+		let capture: Page | { redirect: string } | null = null;
+		try {
+			capture = await load(new URL(`${ARCHIVE_LATEST}${error.url.href}`), signal);
+		} catch (failure) {
+			if (signal?.aborted) throw failure;
+		}
+		const date = capture && "url" in capture ? CAPTURE.exec(capture.url) : null;
+		if (!capture || "redirect" in capture || !date) {
+			throw new Error(`${error.message}; the Wayback Machine has no capture of it either, ${BROWSER_HINT}`);
+		}
+		const note = `${error.url.href} answers with a bot challenge, so this comes from its Wayback Machine capture of ${date[1]}-${date[2]}-${date[3]} (${capture.url}).`;
+		return { ...capture, note };
+	}
+}
+
+/** Fetches one URL, following redirects within the same site; a redirect to another site is reported, not followed. */
+async function load(start: URL, signal: AbortSignal | undefined): Promise<Page | { redirect: string }> {
+	let url = start;
 	const timeout = AbortSignal.timeout(FETCH_TIMEOUT_MS);
 	const abort = signal ? AbortSignal.any([signal, timeout]) : timeout;
 
@@ -168,8 +205,12 @@ async function fetchPage(address: string, signal: AbortSignal | undefined): Prom
 		}
 		if (!response.ok) {
 			await response.body?.cancel().catch(() => {});
-			const blocked = [401, 403, 429].includes(response.status) ? "; the site may block automated requests, open it in the browser instead" : "";
-			throw new Error(`HTTP ${response.status} ${response.statusText} for ${url.href}${blocked}`);
+			const status = `HTTP ${response.status} ${response.statusText} for ${url.href}`;
+			if (response.headers.get("cf-mitigated") === "challenge") {
+				throw new ChallengeError(`${status}: a Cloudflare bot challenge that only a real browser passes`, url);
+			}
+			const blocked = [401, 403, 429].includes(response.status) ? `; the site may block automated requests, ${BROWSER_HINT}` : "";
+			throw new Error(`${status}${blocked}`);
 		}
 
 		const contentType = response.headers.get("content-type") ?? "";
@@ -186,7 +227,8 @@ async function fetchPage(address: string, signal: AbortSignal | undefined): Prom
 			text = new TextDecoder("utf-8").decode(body);
 		}
 		if (isHtml || (!contentType && /^\s*<(!doctype html|html)/i.test(text))) {
-			return { url: url.href, ...htmlToMarkdown(text, url.href) };
+			// A raw capture keeps the page's links as they were, so they resolve against the archived address.
+			return { url: url.href, ...htmlToMarkdown(text, CAPTURE.exec(url.href)?.[4] ?? url.href) };
 		}
 		return { url: url.href, title: "", markdown: text.trim() };
 	}
@@ -221,9 +263,10 @@ export default function (pi: ExtensionAPI) {
 				};
 			}
 			if (!page.markdown) throw new Error(`${page.url} has no readable text`);
+			const source = page.note ? `${page.note}\n\n` : "";
 
 			const fallback = (note: string) => ({
-				content: [{ type: "text" as const, text: truncated(`${note}\n\n${page.title ? `# ${page.title}\n\n` : ""}${page.markdown}`) }],
+				content: [{ type: "text" as const, text: truncated(`${source}${note}\n\n${page.title ? `# ${page.title}\n\n` : ""}${page.markdown}`) }],
 				details: { url: page.url, model: null },
 			});
 			const model = await pickSmallModel(ctx);
@@ -245,7 +288,7 @@ export default function (pi: ExtensionAPI) {
 				return fallback(`${modelLabel(model)} could not answer (${reply.errorMessage ?? "empty reply"}); the content of ${page.url} follows.`);
 			}
 			return {
-				content: [{ type: "text", text: truncated(answer) }],
+				content: [{ type: "text", text: truncated(`${source}${answer}`) }],
 				details: { url: page.url, model: modelLabel(model) },
 				usage: reply.usage,
 			};
