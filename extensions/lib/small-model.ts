@@ -17,6 +17,12 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 const REQUEST_TIMEOUT_MS = 120_000;
 
 /**
+ * Output tokens on top of the answer for a model that cannot turn thinking off (Claude Haiku 5.5, for one): its
+ * thinking counts against the output limit, and even at the lowest level it sometimes thinks for a few hundred tokens.
+ */
+const THINKING_ROOM = 4_096;
+
+/**
  * Side requests run one at a time, across every extension that loads this file. A provider that runs one process per
  * request may otherwise close the conversation's own process while it waits for tool results: pi-claude-subscription
  * keeps at most three Claude Code processes and closes the least recently used one outside a call.
@@ -69,8 +75,9 @@ function lowestThinking(model: Model<Api>): "minimal" | "low" | undefined {
 }
 
 /**
- * One request without tools or history, queued behind other side requests and cancelled after two minutes. The
- * reply's stopReason is "error" or "aborted" when it failed.
+ * One request without tools or history, queued behind other side requests and cancelled after two minutes. maxTokens
+ * is the size of the answer; a model that must think gets THINKING_ROOM on top. The reply's stopReason is "error" or
+ * "aborted" when it failed.
  */
 export function askModel(
 	ctx: ExtensionContext,
@@ -79,6 +86,8 @@ export function askModel(
 	text: string,
 	options: { maxTokens: number; signal?: AbortSignal },
 ): Promise<AssistantMessage> {
+	const reasoning = lowestThinking(model);
+	const maxTokens = options.maxTokens + (reasoning ? THINKING_ROOM : 0);
 	return oneAtATime(() => {
 		const timeout = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
 		return ctx.modelRegistry
@@ -86,8 +95,8 @@ export function askModel(
 				model,
 				{ systemPrompt, messages: [{ role: "user", content: [{ type: "text", text }], timestamp: Date.now() }] },
 				{
-					maxTokens: Math.min(options.maxTokens, model.maxTokens),
-					reasoning: lowestThinking(model),
+					maxTokens: Math.min(maxTokens, model.maxTokens),
+					reasoning,
 					signal: options.signal ? AbortSignal.any([options.signal, timeout]) : timeout,
 					cacheRetention: "none",
 					sessionId: uuidv7(),

@@ -1108,7 +1108,11 @@ model are in use:
   (`anthropic/claude-…` on OpenRouter, `us.anthropic.claude-…` on Bedrock),
   only models of the current maker qualify.
 - A current model without a price (local models, unknown prices) is kept.
-- Thinking is off, or as low as the model allows.
+- Thinking is off, or as low as the model allows. A model that cannot switch it
+  off (Claude Haiku 5.5) gets 4,096 output tokens on top of the answer's limit,
+  because its thinking counts against it. Without them, a session title
+  (100 tokens) sometimes failed with "Claude's response exceeded the 100 output
+  token maximum".
 - `PI_SMALL_MODEL=<provider>/<model-id>` overrides the choice.
 - Side requests run one at a time, across all extensions, and give up after two
   minutes. `/btw` waits its turn the same way, on the session's own model. `claude-sdk` keeps at most three Claude Code processes and closes
