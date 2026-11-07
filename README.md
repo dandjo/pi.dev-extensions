@@ -384,6 +384,16 @@ below `/api/bcf/2.1` reach the instance's BCF API (BIM topics and viewpoints).
     `/attachments` (work package, meeting, wiki page, post, activity) or to
     `/attachments` alone, which OpenProject keeps for you to claim later. Up to
     100 MB; the instance's own attachment size limit applies.
+
+  Without any of them, a POST, PATCH, or PUT sends `{}` as JSON: OpenProject
+  answers 406 "Missing content-type header" to every request but GET and
+  DELETE that has no content type, even one without a body (such as
+  `POST /notifications/read_ian`).
+- Editing a comment (`PATCH /activities/{id}`) takes the comment as a plain
+  string, `{"comment": "…"}`. OpenProject 17.8 answers 400 to the
+  `{"comment": {"raw": "…"}}` its specification documents there; creating one
+  (`POST /work_packages/{id}/activities`) takes that object. The tool's
+  description tells the model.
 - The response headers must arrive within 30 seconds; an upload and the body of
   a download get 5 minutes.
 - Writes need no confirmation. The tool's guidelines tell the model to write

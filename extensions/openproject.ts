@@ -8,7 +8,9 @@
  *   another host (attachment storage) is followed without it. The token never appears in a result.
  * - A request body is JSON (body), plain text (text, e.g. for /render/markdown), or multipart/form-data (files, for
  *   attachments: the fields of body go first, an object as a JSON part, so metadata precedes the file as OpenProject
- *   requires; without one, metadata is {"fileName": the file's name}). contentType overrides the body's type.
+ *   requires; without one, metadata is {"fileName": the file's name}). contentType overrides the body's type. A
+ *   POST, PATCH, or PUT without any of them sends {} as JSON: OpenProject answers 406 to every request but GET and
+ *   DELETE that carries no content type, even without a body.
  * - Binary downloads go to a temp dir, removed when the session ends, or to saveTo, which stays.
  * - JSON responses are folded unless raw is set: a link becomes "Title <href>"; embedded copies of linked resources,
  *   empty fields, and templated and representation links are left out; a work package in a list keeps only self and
@@ -438,7 +440,7 @@ const Params = Type.Object({
 		Type.Object({}, {
 			additionalProperties: true,
 			description:
-				"JSON body for POST, PATCH, and PUT; with files, its fields go first as form fields, an object as a JSON part (metadata)",
+				"JSON body for POST, PATCH, and PUT (without one, {} is sent); with files, its fields go first as form fields, an object as a JSON part (metadata)",
 		}),
 	),
 	text: Type.Optional(
@@ -486,7 +488,8 @@ export default function (pi: ExtensionAPI) {
 			"API token. GET reads, POST creates, PATCH updates (PUT in the BCF API), DELETE removes. Common paths: " +
 			"/work_packages (query: " +
 			"filters, sortBy, pageSize, offset = page number, select), /work_packages/{id}, /work_packages/{id}/activities " +
-			"(POST {\"comment\": {\"raw\": \"…\"}} adds a comment), /work_packages/{id}/relations, /projects, " +
+			"(POST {\"comment\": {\"raw\": \"…\"}} adds a comment; PATCH /activities/{id} with {\"comment\": \"…\"}, a plain " +
+			"string, edits one), /work_packages/{id}/relations, /projects, " +
 			"/projects/{id}/work_packages, /time_entries, /versions, /statuses, /types, /priorities, /users/me, /meetings " +
 			"(filters, pageSize), /meetings/{id}/agenda_items, /meetings/{id}/sections, /recurring_meetings, /news, " +
 			"/documents, /wiki_pages/{id}, /notifications, /queries, /grids, /file_links, /spec.json (the full API " +
@@ -542,6 +545,9 @@ export default function (pi: ExtensionAPI) {
 				payload = { contentType: params.contentType ?? "text/plain; charset=utf-8", data: params.text };
 			} else if (params.body !== undefined) {
 				payload = { contentType: params.contentType ?? "application/json", data: JSON.stringify(params.body) };
+			} else if (method !== "GET" && method !== "DELETE") {
+				// OpenProject answers 406 to every other request without a content type, even one without a body.
+				payload = { contentType: params.contentType ?? "application/json", data: "{}" };
 			}
 			const { response, url, release } = await send(instance, token, method, target, payload, upload, signal);
 			try {
