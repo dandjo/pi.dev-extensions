@@ -328,8 +328,11 @@ enters the conversation, not the page.
 
 Registers `openproject`, a tool that calls the
 [API v3](https://www.openproject.org/docs/api/) of an OpenProject instance as
-you: work packages, comments, relations, time entries, versions, projects, and
-whatever else the API offers, read and written with your permissions.
+you: work packages, comments, relations, time entries, versions, projects,
+meetings with their agenda items and sections, attachments up and down, and
+whatever else the API offers, read and written with your permissions. Paths
+below `/api/bcf/2.1` reach the instance's BCF API (BIM topics and viewpoints).
+`/spec.json` returns the instance's own description of the API v3.
 
 - The instance comes from `~/.pi/agent/openproject.json`, as
   `{"url": "https://openproject.example.com"}`. Without the file the tool is not
@@ -340,8 +343,11 @@ whatever else the API offers, read and written with your permissions.
   profile or in `~/.pam_environment`, which applies only after the next
   login.
 - The token goes only to the configured instance. Paths and links outside its
-  `/api/v3` are refused, a redirect to another host (attachment storage) is
-  followed without the token, and the token never appears in a result.
+  `/api/v3` and `/api/bcf/2.1` are refused, a redirect to another host
+  (attachment storage) is followed without the token, and the token never
+  appears in a result. API v3 gets it as a Bearer token; the BCF API accepts an
+  API token only as Basic `apikey:<token>` (Bearer there means OAuth), so its
+  requests send it that way.
 - No MCP: OpenProject's own MCP server (`/mcp`, since 17.2) is an Enterprise
   add-on from the Professional plan up and answers "MCP server is not
   available" without it. The API needs no add-on.
@@ -357,11 +363,31 @@ whatever else the API offers, read and written with your permissions.
   - `raw: true` returns the response unchanged.
 - Output over 50 KB is cut and the full response saved to a temp file. Binary
   content, such as an attachment download, is saved to a temp file (mode 600)
-  up to 100 MB.
+  up to 100 MB. The temp files of a session are removed when it ends. `saveTo`
+  keeps a GET's response instead: in a directory under the file's own name, or
+  as a new file; an existing file is never overwritten.
+- A request body is one of three:
+  - `body`, JSON, for POST, PATCH, and PUT (PUT only the BCF API uses);
+    `contentType` overrides its type, e.g. `application/hal+json` for
+    `emoji_reactions`.
+  - `text`, plain text, e.g. the Markdown that `POST /render/markdown` turns
+    into HTML.
+  - `files`, local files as multipart/form-data, form field name → path. The
+    fields of `body` go first, an object as a JSON part, so `metadata` precedes
+    the file as OpenProject requires; without it, `metadata` is
+    `{"fileName": <the file's name>}`. Upload to a container's
+    `/attachments` (work package, meeting, wiki page, post, activity) or to
+    `/attachments` alone, which OpenProject keeps for you to claim later. Up to
+    100 MB; the instance's own attachment size limit applies.
+- The response headers must arrive within 30 seconds; an upload and the body of
+  a download get 5 minutes.
 - Writes need no confirmation. The tool's guidelines tell the model to write
-  only what you asked for, to send a PATCH with the `lockVersion` of a fresh
-  GET, and to validate an unclear payload against the form endpoint first.
-- Bodies are JSON only, so attachments cannot be uploaded.
+  only what you asked for, to upload only files you named for that, to send a
+  PATCH with the `lockVersion` of a fresh GET, and to validate an unclear
+  payload against the form endpoint first.
+- Out of reach, because no API offers them: PDF, CSV, and XLS exports, a
+  meeting's iCal file, and the text of a wiki page (the API gives a wiki page's
+  title and attachments only).
 
 ## gitlab
 
