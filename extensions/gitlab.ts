@@ -40,6 +40,7 @@ import {
 	type ExtensionAPI,
 	formatSize,
 	getAgentDir,
+	getShellConfig,
 	truncateHead,
 	truncateTail,
 } from "@earendil-works/pi-coding-agent";
@@ -474,8 +475,8 @@ function parameters(instances: Instance[]) {
  * - token follows Pi's apiKey convention in models.json: a literal token, "$NAME" or "${NAME}" for an environment
  *   variable, or "!command" for the output of a shell command (a password manager); "$$" and "$!" are a literal $ and
  *   !. "tokenEnv": "NAME" is short for "token": "$NAME"; without either, the tool's default variable holds the token.
- * - Environment variables are read at every call. A command runs through /bin/sh at the first call and its token is
- *   kept for the session, until the instance rejects it (forgetToken).
+ * - Environment variables are read at every call. A command runs in Pi's shell (/bin/sh, Git Bash on Windows) at the
+ *   first call and its token is kept for the session, until the instance rejects it (forgetToken).
  * - A literal token in a config file that others can read draws a warning.
  * - An instance is named by its host plus the path it is served under (git.example.com, example.com/gitlab): the
  *   value of the tools' host parameter.
@@ -682,17 +683,36 @@ function pickInstance<T extends ConfiguredInstance>(
 /** The tokens token commands printed, by command, kept for the session until an instance rejects one. */
 const commandTokens = new Map<string, string>();
 
-/** Runs a token command through /bin/sh, as Pi does for apiKey, and returns its trimmed output. */
+/**
+ * Runs a token command in the shell Pi runs apiKey commands in, /bin/sh, on Windows the bash of getShellConfig()
+ * (Git Bash), and returns its trimmed output.
+ */
 function runTokenCommand(command: string, what: string, signal: AbortSignal | undefined): Promise<string> {
 	return new Promise((resolve, reject) => {
 		const fail = (why: string) => reject(new Error(`The token command of ${what} ${why}.`));
-		const child = spawn("/bin/sh", ["-c", command], {
-			stdio: ["ignore", "pipe", "ignore"],
+		let file = "/bin/sh";
+		let args = ["-c", command];
+		let viaStdin = false;
+		if (process.platform === "win32") {
+			try {
+				const shell = getShellConfig();
+				viaStdin = shell.commandTransport === "stdin";
+				file = shell.shell;
+				args = viaStdin ? shell.args : [...shell.args, command];
+			} catch (error) {
+				fail(`cannot run (${error instanceof Error ? error.message : String(error)})`);
+				return;
+			}
+		}
+		const child = spawn(file, args, {
+			stdio: [viaStdin ? "pipe" : "ignore", "pipe", "ignore"],
 			timeout: TOKEN_COMMAND_TIMEOUT_MS,
 			signal,
+			windowsHide: true,
 		});
+		if (viaStdin) child.stdin?.end(command);
 		const chunks: Buffer[] = [];
-		child.stdout.on("data", (chunk: Buffer) => chunks.push(chunk));
+		child.stdout?.on("data", (chunk: Buffer) => chunks.push(chunk));
 		child.on("error", (error) => (signal?.aborted ? reject(error) : fail(`cannot run (${error.message})`)));
 		child.on("close", (code, killedBy) => {
 			if (code !== 0) {

@@ -29,7 +29,7 @@
  */
 
 import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
-import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, getPowerShellConfig, getShellConfig } from "@earendil-works/pi-coding-agent";
 import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
@@ -272,6 +272,16 @@ function firstLine(text: string): string {
 
 function killTree(pid: number | undefined, signal: NodeJS.Signals): void {
 	if (!pid) return;
+	if (process.platform === "win32") {
+		// No process groups: taskkill ends the tree, by the System32 path so PATH cannot replace it.
+		const taskkill = path.join(process.env.SystemRoot || "C:\\Windows", "System32", "taskkill.exe");
+		try {
+			spawn(taskkill, ["/F", "/T", "/PID", String(pid)], { stdio: "ignore", windowsHide: true }).once("error", () => {});
+		} catch {
+			// gone
+		}
+		return;
+	}
 	try {
 		process.kill(-pid, signal);
 	} catch {
@@ -281,6 +291,18 @@ function killTree(pid: number | undefined, signal: NodeJS.Signals): void {
 			// gone
 		}
 	}
+}
+
+/**
+ * The shell of a command hook, as Claude Code runs it: bash (on Windows the bash Pi uses, Git Bash) or PowerShell (on
+ * Windows the one Pi's powershell tool uses, pwsh 7 or Windows PowerShell).
+ */
+function hookShell(powershell: boolean, command: string): [string, string[]] {
+	if (process.platform === "win32") {
+		const shell = powershell ? getPowerShellConfig() : getShellConfig();
+		return [shell.shell, powershell ? [...shell.args, command] : ["-c", command]];
+	}
+	return powershell ? ["pwsh", ["-NoProfile", "-Command", command]] : ["bash", ["-c", command]];
 }
 
 function runCommand(
@@ -294,12 +316,16 @@ function runCommand(
 	return new Promise((resolve) => {
 		const command = handler.command ?? "";
 		const exec = Array.isArray(handler.args);
-		const file = exec ? substitute(command) : handler.shell === "powershell" ? "pwsh" : "bash";
-		const argv = exec
-			? (handler.args as unknown[]).map((arg) => substitute(String(arg)))
-			: handler.shell === "powershell"
-				? ["-NoProfile", "-Command", command]
-				: ["-c", command];
+		let file: string;
+		let argv: string[];
+		try {
+			[file, argv] = exec
+				? [substitute(command), (handler.args as unknown[]).map((arg) => substitute(String(arg)))]
+				: hookShell(handler.shell === "powershell", command);
+		} catch (error) {
+			resolve({ code: null, stdout: "", stderr: "", timedOut: false, error: error instanceof Error ? error.message : String(error) });
+			return;
+		}
 		let stdout = "";
 		let stderr = "";
 		let timedOut = false;
@@ -312,7 +338,7 @@ function runCommand(
 		};
 		let child: ReturnType<typeof spawn>;
 		try {
-			child = spawn(file, argv, { cwd, env, detached: true, stdio: ["pipe", "pipe", "pipe"] });
+			child = spawn(file, argv, { cwd, env, detached: process.platform !== "win32", windowsHide: true, stdio: ["pipe", "pipe", "pipe"] });
 		} catch (error) {
 			resolve({ code: null, stdout: "", stderr: "", timedOut: false, error: error instanceof Error ? error.message : String(error) });
 			return;

@@ -467,9 +467,10 @@ written with your permissions.
   - An environment variable is read at every call. Pi must start with it set:
     export it in your shell profile or in `~/.pam_environment`, which applies
     only after the next login.
-  - A command runs through `/bin/sh` at the first call of a session, for up
-    to 30 seconds, time enough to unlock the password manager. Its token is
-    kept for the session until the instance answers 401; then it runs again.
+  - A command runs in Pi's shell (`/bin/sh`, Git Bash on Windows) at the
+    first call of a session, for up to 30 seconds, time enough to unlock the
+    password manager. Its token is kept for the session until the instance
+    answers 401; then it runs again.
   - A token written into `gitlab.json` itself draws a warning at session start
     while others can read the file: `chmod 600 ~/.pi/agent/gitlab.json`.
 - With several instances the tool takes `host`, the host of the instance
@@ -617,7 +618,7 @@ summary — not the conversation or its files.
 - Not ported: messages across machines (Remote Control, cloud), teammates and
   messages to subagents, permission-mode classes, and renaming by a peer.
   Subagent processes bind no inbox, so they never appear in the list. Tested
-  on Linux; native Windows is not supported.
+  on Linux; on native Windows the extension stays out (no tools, no warning).
 
 ## claude-hooks
 
@@ -643,7 +644,9 @@ JSON on stdin, exit code 2 blocks, one JSON object on stdout decides.
   never fire in Pi.
 - Handler types `command` and `http`, with `matcher`, `if`, `timeout`,
   `async`, `asyncRewake`, and `onFailure`. `prompt`, `agent`, and `mcp_tool`
-  hooks are skipped.
+  hooks are skipped. A command runs in `bash`, or with `"shell": "powershell"`
+  in `pwsh`; on Windows in the shells Pi itself uses there (Git Bash, and
+  PowerShell 7 or Windows PowerShell), not in WSL.
 - Tools reach hooks under Claude Code's names and input fields: `bash` as
   `Bash` with `command`; `read`, `write`, and `edit` as `Read`, `Write`, and
   `Edit` with an absolute `file_path` (an edit also with `old_string`,

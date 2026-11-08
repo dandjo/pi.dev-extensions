@@ -675,6 +675,8 @@ interface Held {
 }
 
 export default function (pi: ExtensionAPI) {
+	// Unix sockets with owner checks: there is no safe equivalent on Windows, so the extension stays out there.
+	if (process.platform === "win32") return;
 	let ctx: ExtensionContext | null = null;
 	let server: net.Server | null = null;
 	let ownSocket: string | null = null;
