@@ -1102,7 +1102,7 @@ type Input = Record<string, unknown>;
 
 function absolute(cwd: string, value: unknown): string | undefined {
 	if (typeof value !== "string" || !value) return undefined;
-	const expanded = value === "~" || value.startsWith("~/") ? path.join(process.env.HOME ?? "", value.slice(1)) : value;
+	const expanded = value === "~" || value.startsWith("~/") ? path.join(os.homedir(), value.slice(1)) : value;
 	return path.resolve(cwd, expanded);
 }
 

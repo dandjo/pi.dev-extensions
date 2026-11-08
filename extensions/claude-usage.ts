@@ -4,7 +4,12 @@
  *
  * Rows: the 5h session, the 7d week, and model-scoped weekly windows such as Fable, each with its local reset time,
  * and the usage credits while they are enabled or anything was spent. Without a usable answer, a single "Limits" row
- * says why (loading, rate limited, no token, …).
+ * says why (loading, rate limited, no token, …). Without any Claude login (Pi's own or Claude Code's) there are no
+ * rows and no requests at all, so a user of another provider sees nothing of this. With PI_OFFLINE set, the rows show
+ * what another session fetched last, and this one fetches nothing.
+ *
+ * Times, dates, and amounts follow the locale of LC_TIME and LC_MONETARY (or LC_ALL, else LANG), as other programs
+ * on the machine do; Node's own Intl default reads LANG alone.
  *
  * Limits come from https://api.anthropic.com/api/oauth/usage (the endpoint Claude Code's /usage dialog uses),
  * fetched in the background so a render never waits on the network, and only while the status line shows the rows.
@@ -81,10 +86,33 @@ interface UsageState {
 
 type LockResult = "acquired" | "busy" | "unshared";
 
-const pad2 = (n: number) => String(n).padStart(2, "0");
-const hhmm = (d: Date) => `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+/**
+ * The locale of a POSIX category as LC_ALL, the category's own variable, or LANG name it (de_AT.UTF-8 is de-AT), the
+ * first one set winning; undefined for C and POSIX or an unknown one, which leaves Intl its default. Node's Intl reads
+ * LANG alone, so LC_TIME=de_AT under LANG=en_US would otherwise show US dates. scheduled-tasks.ts carries a copy of
+ * this function: change them alike.
+ */
+function posixLocale(category: "LC_TIME" | "LC_MONETARY"): string | undefined {
+	for (const value of [process.env.LC_ALL, process.env[category], process.env.LANG]) {
+		if (!value) continue;
+		const tag = value.split(/[.@]/)[0].replace(/_/g, "-");
+		if (tag === "C" || tag === "POSIX") return undefined;
+		try {
+			return Intl.DateTimeFormat.supportedLocalesOf([tag]).length > 0 ? tag : undefined;
+		} catch {
+			return undefined;
+		}
+	}
+	return undefined;
+}
 
-/** "21:29" today, "Fr 24.10. 19:59" later; plus "3h 2m" left. */
+const TIME_LOCALE = posixLocale("LC_TIME");
+const MONEY_LOCALE = posixLocale("LC_MONETARY");
+
+/** The time of day in the locale, e.g. "21:29" or "09:29 PM". */
+const hhmm = (d: Date) => d.toLocaleTimeString(TIME_LOCALE, { hour: "2-digit", minute: "2-digit" });
+
+/** "21:29" today, "Sa., 24.10., 19:59" later (in the locale); plus "3h 2m" left. */
 function fmtReset(iso: string): { at: string; left: string } | null {
 	const target = new Date(iso);
 	if (Number.isNaN(target.getTime())) return null;
@@ -95,7 +123,7 @@ function fmtReset(iso: string): { at: string; left: string } | null {
 	const at =
 		target.toDateString() === now.toDateString()
 			? hhmm(target)
-			: `${target.toLocaleDateString(undefined, { weekday: "short" })} ${pad2(target.getDate())}.${pad2(target.getMonth() + 1)}. ${hhmm(target)}`;
+			: target.toLocaleString(TIME_LOCALE, { weekday: "short", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
 
 	const d = Math.floor(diff / 86_400_000);
 	const h = Math.floor((diff % 86_400_000) / 3_600_000);
@@ -105,26 +133,47 @@ function fmtReset(iso: string): { at: string; left: string } | null {
 }
 
 function fmtMoney(minor: number, places: number, currency: string): string {
-	const sym = ({ EUR: "€", USD: "$", GBP: "£" } as Record<string, string>)[currency] ?? `${currency} `;
-	return `${sym}${(minor / 10 ** places).toFixed(places)}`;
+	const amount = minor / 10 ** places;
+	try {
+		return new Intl.NumberFormat(MONEY_LOCALE, {
+			style: "currency",
+			currency,
+			minimumFractionDigits: places,
+			maximumFractionDigits: places,
+		}).format(amount);
+	} catch {
+		return `${currency} ${amount.toFixed(places)}`;
+	}
 }
 
 /** Valid (non-expired) OAuth access token: pi's own login first, then Claude Code's. */
 async function readAccessToken(): Promise<string | null> {
 	const now = Date.now();
 	try {
-		const pi = JSON.parse(await readFile(path.join(os.homedir(), ".pi/agent/auth.json"), "utf8"));
+		const pi = JSON.parse(await readFile(path.join(getAgentDir(), "auth.json"), "utf8"));
 		const a = pi?.anthropic;
 		if (a?.type === "oauth" && a.access && (!a.expires || a.expires > now)) return a.access;
 		if (a?.access && (!a.expires || a.expires > now)) return a.access;
 	} catch {}
 	try {
-		const dir = process.env.CLAUDE_CONFIG_DIR ?? path.join(os.homedir(), ".claude");
-		const cc = JSON.parse(await readFile(path.join(dir, ".credentials.json"), "utf8"));
+		const cc = JSON.parse(await readFile(path.join(claudeDir(), ".credentials.json"), "utf8"));
 		const o = cc?.claudeAiOauth;
 		if (o?.accessToken && (!o.expiresAt || o.expiresAt > now)) return o.accessToken;
 	} catch {}
 	return null;
+}
+
+/** Whether there is a Claude login at all, valid or not: Pi's own OAuth login or Claude Code's. */
+async function hasClaudeLogin(): Promise<boolean> {
+	try {
+		const pi = JSON.parse(await readFile(path.join(getAgentDir(), "auth.json"), "utf8"));
+		if (pi?.anthropic?.type === "oauth") return true;
+	} catch {}
+	try {
+		const cc = JSON.parse(await readFile(path.join(claudeDir(), ".credentials.json"), "utf8"));
+		if (cc?.claudeAiOauth) return true;
+	} catch {}
+	return false;
 }
 
 function parseUsage(json: any): UsageSnapshot {
@@ -381,6 +430,8 @@ export default function (pi: ExtensionAPI) {
 	let state: UsageState | null = null;
 	let inFlight = false;
 	let polledAt = 0;
+	/** Undefined until the first check; false hides the rows and stops the requests. */
+	let loggedIn: boolean | undefined;
 
 	const changed = () => {
 		pi.events.emit("statusline:changed", undefined);
@@ -399,7 +450,14 @@ export default function (pi: ExtensionAPI) {
 		inFlight = true;
 		let lock: LockResult = "unshared";
 		try {
+			const login = await hasClaudeLogin();
+			if (login !== loggedIn) {
+				loggedIn = login;
+				changed();
+			}
+			if (!login) return;
 			if (adopt(await readState())) changed();
+			if (process.env.PI_OFFLINE) return;
 			if (Date.now() - (state?.attemptAt ?? 0) < USAGE_TTL_MS) return;
 
 			lock = await acquireLock();
@@ -438,6 +496,7 @@ export default function (pi: ExtensionAPI) {
 			void refreshUsage();
 		}
 
+		if (!loggedIn) return [];
 		const sep = separator(theme);
 		const lines: string[] = [];
 		const snap = state?.snapshot;
@@ -445,7 +504,9 @@ export default function (pi: ExtensionAPI) {
 		if (!usage) {
 			// Say why the rows are missing instead of leaving them out
 			const head = "Limits".padEnd(LABEL_WIDTH) + " ";
-			if (state?.error) {
+			if (process.env.PI_OFFLINE) {
+				lines.push(head + theme.fg("dim", "not fetched while PI_OFFLINE is set"));
+			} else if (state?.error) {
 				const next = hhmm(new Date(Math.max(Date.now(), state.attemptAt + USAGE_TTL_MS)));
 				lines.push(head + theme.fg("warning", `⚠ ${state.error}`) + theme.fg("dim", ` · next try ${next}`));
 			} else {

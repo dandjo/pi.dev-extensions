@@ -25,6 +25,9 @@
  * - While the host does not answer, the footer shows "⚠ offline".
  * - When the API delivers data while the probe fails, the probe does not reflect this network (a proxy Pi does not
  *   see, for example). Probing then stops until Pi restarts; restarts after a disruption follow the grace alone.
+ * - The probe goes to the model's API host. A provider without an http(s) base URL is probed only when it is
+ *   claude-sdk (pi-claude-subscription), whose Claude Code talks to Anthropic; any other is not probed (set
+ *   probeHost for it), and its restarts follow the grace alone.
  *
  * Optional settings in ~/.pi/agent/network-resilience.json: noticeSeconds (20), graceSeconds (10), stallSeconds
  * (300, 0 turns the silence restart off), maxRestarts (3), maxAttempts (10), offlineWaitMinutes (30, 0 turns the
@@ -48,8 +51,12 @@ const PROBE_TIMEOUT_MS = 5_000;
 const PROBE_INTERVAL_MS = 5_000;
 const OFFLINE_PROBE_INTERVAL_MS = 3_000;
 const NET_CHECK_MS = 2_000;
-/** Interfaces of containers and virtual machines come and go without touching the route to the API. */
-const VIRTUAL_INTERFACE = /^(lo|docker|br-|veth|virbr|vmnet|vboxnet|cni|flannel|podman|kube|lxc|lxd)/;
+/**
+ * Interfaces of containers and virtual machines come and go without touching the route to the API: Linux names, the
+ * macOS VM bridges and Apple's peer-to-peer links, and the Windows adapters of WSL, Hyper-V, VirtualBox, and VMware.
+ */
+const VIRTUAL_INTERFACE =
+	/^(lo|docker|br-|veth|virbr|vmnet|vboxnet|cni|flannel|podman|kube|lxc|lxd|bridge|vmenet|awdl|llw|anpi|vEthernet|VirtualBox|VMware)/;
 
 interface Config {
 	noticeSeconds: number;
@@ -116,14 +123,17 @@ function bypassesProxy(host: string): boolean {
 		.some((entry) => entry === "*" || (entry !== "" && (host === entry || host.endsWith(`.${entry}`))));
 }
 
-function probeTarget(ctx: ExtensionContext | undefined, config: Config): Target {
+/** The host to probe: probeHost, else the model's API host; undefined when the model's provider names none. */
+function probeTarget(ctx: ExtensionContext | undefined, config: Config): Target | undefined {
 	if (config.probeHost) {
 		const own = hostPort(config.probeHost, 443);
 		if (own) return { ...own, label: own.host };
 	}
 	// pi-claude-subscription's models have the pseudo URL claude-agent-sdk://local: Claude Code talks to Anthropic.
 	const baseUrl = ctx?.model?.baseUrl;
-	const api = baseUrl && /^https?:\/\//.test(baseUrl) ? baseUrl : process.env.ANTHROPIC_BASE_URL || "https://api.anthropic.com";
+	const http = baseUrl && /^https?:\/\//.test(baseUrl);
+	if (!http && ctx?.model?.provider !== "claude-sdk") return undefined;
+	const api = http ? baseUrl : process.env.ANTHROPIC_BASE_URL || "https://api.anthropic.com";
 	const target = hostPort(api, 443) ?? { host: "api.anthropic.com", port: 443 };
 	const proxy = process.env.HTTPS_PROXY ?? process.env.https_proxy ?? process.env.ALL_PROXY ?? process.env.all_proxy;
 	const via = proxy && !bypassesProxy(target.host.toLowerCase()) ? hostPort(proxy, 8080) : undefined;
@@ -362,8 +372,10 @@ export default function (pi: ExtensionAPI): void {
 		r.probing = true;
 		const started = performance.now();
 		r.lastProbeAt = started;
-		const result = await probe(probeTarget(ctxRef, config));
+		const target = probeTarget(ctxRef, config);
+		const result = target ? await probe(target) : undefined;
 		r.probing = false;
+		if (!result) return;
 		if (request !== r) return;
 		if (!result.ok && r.lastData > started) {
 			// The API delivered while the probe target did not answer.
@@ -479,9 +491,9 @@ export default function (pi: ExtensionAPI): void {
 		const signal = ctx.signal;
 		const u = ctx.hasUI ? ctx.ui : undefined;
 		const target = probeTarget(ctx, config);
-		let result = config.offlineWaitMinutes > 0 && !probeUntrusted ? await probe(target) : undefined;
+		let result = target && config.offlineWaitMinutes > 0 && !probeUntrusted ? await probe(target) : undefined;
 		try {
-			if (result && !result.ok) {
+			if (target && result && !result.ok) {
 				outageSince ??= performance.now();
 				const deadline = outageSince + config.offlineWaitMinutes * 60_000;
 				while (result && !result.ok && !signal?.aborted && performance.now() < deadline) {

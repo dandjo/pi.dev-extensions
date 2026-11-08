@@ -5,11 +5,14 @@
  * pickSmallModel below) answers the prompt from it, so the page text never goes to another provider. Without a model,
  * or when the model fails, the Markdown itself is returned. A page behind a Cloudflare bot challenge, which only a
  * real browser passes, is read from its latest Wayback Machine capture instead; only its address goes to archive.org.
- * web_search comes from the pi-web-access package.
+ * {"waybackFallback": false} in ~/.pi/agent/web-tools.json turns that off. web_search comes from the pi-web-access
+ * package.
  */
 
+import { readFileSync } from "node:fs";
+import * as path from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, truncateHead } from "@earendil-works/pi-coding-agent";
+import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, getAgentDir, truncateHead } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { type Api, type AssistantMessage, type Model, uuidv7 } from "@earendil-works/pi-ai";
@@ -24,7 +27,8 @@ const USER_AGENT = "Mozilla/5.0 (compatible; pi-web-fetch/1.0; +https://pi.dev)"
 // Prefix of a raw capture (id_: the page as archived, without the Wayback toolbar); the timestamp 2 picks the latest.
 const ARCHIVE_LATEST = "https://web.archive.org/web/2id_/";
 const CAPTURE = /^https?:\/\/web\.archive\.org\/web\/(\d{4})(\d{2})(\d{2})\d*id_\/(https?:\/\/.+)$/;
-const BROWSER_HINT = "read it in a real browser instead (the chrome-devtools MCP tools, if connected)";
+const BROWSER_HINT = "read it in a real browser instead, with a browser tool if one is available";
+const CONFIG_FILE = path.join(getAgentDir(), "web-tools.json");
 const SYSTEM_PROMPT = [
 	"You answer a question about a web page from its content alone.",
 	"- Use only the page content you are given. If it does not answer the question, say so.",
@@ -48,15 +52,26 @@ class ChallengeError extends Error {
 	}
 }
 
+/** The named entities of HTML 4: Latin-1 (U+00A0 to U+00FF, in order) and the common typographic ones. */
+const LATIN1 =
+	"nbsp iexcl cent pound curren yen brvbar sect uml copy ordf laquo not shy reg macr deg plusmn sup2 sup3 acute micro " +
+	"para middot cedil sup1 ordm raquo frac14 frac12 frac34 iquest Agrave Aacute Acirc Atilde Auml Aring AElig Ccedil " +
+	"Egrave Eacute Ecirc Euml Igrave Iacute Icirc Iuml ETH Ntilde Ograve Oacute Ocirc Otilde Ouml times Oslash Ugrave " +
+	"Uacute Ucirc Uuml Yacute THORN szlig agrave aacute acirc atilde auml aring aelig ccedil egrave eacute ecirc euml " +
+	"igrave iacute icirc iuml eth ntilde ograve oacute ocirc otilde ouml divide oslash ugrave uacute ucirc uuml yacute " +
+	"thorn yuml";
 const ENTITIES: Record<string, string> = {
-	amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " ", ndash: "–", mdash: "—", hellip: "…",
-	laquo: "«", raquo: "»", ldquo: "“", rdquo: "”", lsquo: "‘", rsquo: "’", bdquo: "„", copy: "©", reg: "®",
-	trade: "™", euro: "€", deg: "°", times: "×", middot: "·", bull: "•", auml: "ä", ouml: "ö", uuml: "ü",
-	Auml: "Ä", Ouml: "Ö", Uuml: "Ü", szlig: "ß",
+	...Object.fromEntries(LATIN1.split(" ").map((name, i) => [name, String.fromCharCode(0xa0 + i)])),
+	amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", OElig: "Œ", oelig: "œ", Scaron: "Š", scaron: "š", Yuml: "Ÿ",
+	fnof: "ƒ", circ: "ˆ", tilde: "˜", ensp: "\u2002", emsp: "\u2003", thinsp: "\u2009", zwnj: "\u200c", zwj: "\u200d",
+	lrm: "\u200e", rlm: "\u200f", ndash: "–", mdash: "—", lsquo: "‘", rsquo: "’", sbquo: "‚", ldquo: "“", rdquo: "”",
+	bdquo: "„", dagger: "†", Dagger: "‡", bull: "•", hellip: "…", permil: "‰", prime: "′", Prime: "″", lsaquo: "‹",
+	rsaquo: "›", oline: "‾", frasl: "⁄", euro: "€", trade: "™", larr: "←", uarr: "↑", rarr: "→", darr: "↓", harr: "↔",
+	minus: "−", le: "≤", ge: "≥", ne: "≠", asymp: "≈", infin: "∞",
 };
 
 function decodeEntities(text: string): string {
-	return text.replace(/&(#x[0-9a-f]+|#\d+|[a-z]+);/gi, (whole, entity: string) => {
+	return text.replace(/&(#x[0-9a-f]+|#\d+|[a-z][a-z0-9]*);/gi, (whole, entity: string) => {
 		if (entity[0] !== "#") return ENTITIES[entity] ?? whole;
 		const code = entity[1].toLowerCase() === "x" ? parseInt(entity.slice(2), 16) : parseInt(entity.slice(1), 10);
 		return code > 0 && code <= 0x10ffff ? String.fromCodePoint(code) : whole;
@@ -160,6 +175,15 @@ function sameSite(from: URL, to: URL): boolean {
 	return protocol && port && from.hostname.replace(/^www\./, "") === to.hostname.replace(/^www\./, "");
 }
 
+/** Whether a bot challenge sends the fetch to the Wayback Machine; {"waybackFallback": false} in CONFIG_FILE stops it. */
+function waybackFallback(): boolean {
+	try {
+		return (JSON.parse(readFileSync(CONFIG_FILE, "utf8")) as { waybackFallback?: unknown })?.waybackFallback !== false;
+	} catch {
+		return true;
+	}
+}
+
 /** Fetches the page, falling back to its latest Wayback Machine capture when a bot challenge blocks it. */
 async function fetchPage(address: string, signal: AbortSignal | undefined): Promise<Page | { redirect: string }> {
 	const url = new URL(address);
@@ -168,6 +192,7 @@ async function fetchPage(address: string, signal: AbortSignal | undefined): Prom
 		return await load(url, signal);
 	} catch (error) {
 		if (!(error instanceof ChallengeError)) throw error;
+		if (!waybackFallback()) throw new Error(`${error.message}; ${BROWSER_HINT}`);
 		let capture: Page | { redirect: string } | null = null;
 		try {
 			capture = await load(new URL(`${ARCHIVE_LATEST}${error.url.href}`), signal);

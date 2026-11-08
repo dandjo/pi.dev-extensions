@@ -276,6 +276,15 @@ from Pi's own Anthropic login in `~/.pi/agent/auth.json`, otherwise from Claude
 Code's `~/.claude/.credentials.json`. It is never refreshed here and never
 written to the cache.
 
+Without any Claude login, neither Pi's OAuth login nor Claude Code's, there
+are no rows and no requests: someone on another provider sees nothing of
+this. With `PI_OFFLINE` set (Pi's `--offline`), the rows show what another
+session fetched last, and this one fetches nothing. Reset times, dates, and
+credit amounts follow `LC_TIME` and `LC_MONETARY` (or `LC_ALL`, else `LANG`),
+as other programs on the machine do: `Di., 10.11., 13:28` and `$ 12,34` under
+`de_AT`, `Tue, 11/10, 01:28 PM` and `$12.34` under `en_US`. Node's own default
+reads `LANG` alone.
+
 Claude Code renews its token only when it makes a request, so after hours
 without a prompt neither token is valid. The extension then starts a short
 Claude Code process that asks for its usage (no model request, nothing
@@ -314,9 +323,10 @@ enters the conversation, not the page.
   browser with a bot challenge (`cf-mitigated: challenge`), whatever its agent
   string. The tool then reads the page's latest raw capture from the
   [Wayback Machine](https://web.archive.org/) instead and puts its date and
-  address above the answer; only the page's address goes to archive.org. Other
-  blocks (Reddit), and a challenged page without a capture, end in an error
-  that points to the browser connection.
+  address above the answer; only the page's address goes to archive.org.
+  `{"waybackFallback": false}` in `~/.pi/agent/web-tools.json` turns that off.
+  Other blocks (Reddit), and a challenged page without a capture, end in an
+  error that points to a browser tool.
 - Redirects within the same site are followed. A redirect to another site is
   reported, and the model decides whether to fetch the target.
 - Text pages only: HTML, plain text, JSON, XML. PDFs and other files are refused
@@ -1109,13 +1119,15 @@ time out.
   and says whether the API host answers, as Claude Code's "Waiting for API
   response · check your network" does. The check is a TCP connect to the
   model's API host (`api.anthropic.com` for `claude-sdk`), through
-  `HTTPS_PROXY` when one is set.
+  `HTTPS_PROXY` when one is set. A provider without an http(s) base URL other
+  than `claude-sdk` is not checked unless `probeHost` names a host for it.
 - While the host does not answer, the message names the cause in Claude
   Code's words ("no route to api.anthropic.com (ENETUNREACH) · check your
   connection or VPN"), and the footer shows `⚠ offline`.
 - A request that gets no data after the network came back, after the machine
   woke from sleep, or after the network interfaces changed (a VPN coming up,
-  Wi-Fi to cable) is aborted 10 seconds later and the run resumes: a note in
+  Wi-Fi to cable; not the bridges of containers and virtual machines, WSL
+  included) is aborted 10 seconds later and the run resumes: a note in
   the transcript tells the model the response was lost. The same happens to a
   request silent for 5 minutes while the host answers. At most three restarts
   follow each other without a response in between.

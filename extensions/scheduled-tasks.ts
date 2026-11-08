@@ -25,7 +25,7 @@
  *   self-paced loops. CLAUDE_CODE_DISABLE_CRON=1 turns all of it off.
  */
 
-import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
+import { type ExtensionAPI, type ExtensionContext, getAgentDir, type Theme } from "@earendil-works/pi-coding-agent";
 import { Key, matchesKey, Text, type TuiMouseEvent, type TuiMouseEventResult, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { randomBytes } from "node:crypto";
@@ -163,11 +163,39 @@ function nextRun(spec: CronSpec, after: number): number | undefined {
 	return undefined;
 }
 
+/**
+ * The locale of a POSIX category as LC_ALL, the category's own variable, or LANG name it (de_AT.UTF-8 is de-AT), the
+ * first one set winning; undefined for C and POSIX or an unknown one, which leaves Intl its default. Node's Intl reads
+ * LANG alone, so LC_TIME=de_AT under LANG=en_US would otherwise show US dates. claude-usage.ts carries a copy of this
+ * function: change them alike.
+ */
+function posixLocale(category: "LC_TIME" | "LC_MONETARY"): string | undefined {
+	for (const value of [process.env.LC_ALL, process.env[category], process.env.LANG]) {
+		if (!value) continue;
+		const tag = value.split(/[.@]/)[0].replace(/_/g, "-");
+		if (tag === "C" || tag === "POSIX") return undefined;
+		try {
+			return Intl.DateTimeFormat.supportedLocalesOf([tag]).length > 0 ? tag : undefined;
+		} catch {
+			return undefined;
+		}
+	}
+	return undefined;
+}
+
+/** Times and dates in the locale of LC_TIME (or LC_ALL, else LANG). */
+const TIME_LOCALE = posixLocale("LC_TIME");
+
+/** The time of day in the locale ("21:29", "09:29 PM"). */
+function timeOfDay(date: Date): string {
+	return date.toLocaleTimeString(TIME_LOCALE, { hour: "2-digit", minute: "2-digit" });
+}
+
 function clock(ms: number): string {
 	const date = new Date(ms);
 	const today = new Date().toDateString() === date.toDateString();
-	const time = date.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
-	return today ? time : `${date.toLocaleDateString(undefined, { weekday: "short", day: "2-digit", month: "2-digit" })} ${time}`;
+	const time = timeOfDay(date);
+	return today ? time : `${date.toLocaleDateString(TIME_LOCALE, { weekday: "short", day: "2-digit", month: "2-digit" })} ${time}`;
 }
 
 function zone(): string {
@@ -183,7 +211,7 @@ function describeCron(cron: string): string {
 	const [m, h, dom, mon, dow] = fields;
 	const num = (s: string) => /^\d+$/.test(s);
 	const step = (s: string) => s.match(/^\*\/(\d+)$/)?.[1];
-	const at = () => `${h.padStart(2, "0")}:${m.padStart(2, "0")}`;
+	const at = () => timeOfDay(new Date(2000, 0, 1, Number(h), Number(m)));
 	const everyDay = dom === "*" && mon === "*";
 	if (everyDay && dow === "*") {
 		if (m === "*" && h === "*") return "every minute";
@@ -195,7 +223,10 @@ function describeCron(cron: string): string {
 	if (everyDay && num(m) && num(h) && /^[0-7]$/.test(dow)) return `${WEEKDAYS[Number(dow) % 7]} at ${at()}`;
 	if (everyDay && num(m) && num(h) && dow === "1-5") return `weekdays at ${at()}`;
 	if (step(dom) && mon === "*" && dow === "*" && num(m) && num(h)) return `every ${step(dom)} days at ${at()}`;
-	if (num(dom) && num(mon) && dow === "*" && num(m) && num(h)) return `on ${dom.padStart(2, "0")}.${mon.padStart(2, "0")}. at ${at()}`;
+	if (num(dom) && num(mon) && dow === "*" && num(m) && num(h)) {
+		const day = new Date(2000, Number(mon) - 1, Number(dom)).toLocaleDateString(TIME_LOCALE, { day: "2-digit", month: "2-digit" });
+		return `on ${day} at ${at()}`;
+	}
 	return cron;
 }
 
@@ -254,7 +285,7 @@ function loopFile(cwd: string): { file: string; text: string } | undefined {
 		path.join(cwd, ".claude", "loop.md"),
 		path.join(cwd, ".pi", "loop.md"),
 		path.join(process.env.CLAUDE_CONFIG_DIR ?? path.join(os.homedir(), ".claude"), "loop.md"),
-		path.join(os.homedir(), ".pi", "agent", "loop.md"),
+		path.join(getAgentDir(), "loop.md"),
 	];
 	for (const file of candidates) {
 		try {
