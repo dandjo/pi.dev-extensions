@@ -596,15 +596,34 @@ corrections and preferences you gave, facts and decisions about the project,
 where outside information lives — and corrects or removes entries that turn
 out wrong.
 
-- Where: shared with Claude Code while Claude Code is there (its config
-  directory exists; `CLAUDE_CONFIG_DIR` is honoured), in
-  `~/.claude/projects/<project>/memory/`, so Pi and Claude Code remember the
-  same. Without Claude Code, in `~/.pi/agent/memory/<project>/`.
-  `{"store": "claude"}` or `{"store": "pi"}` in `~/.pi/agent/memory.json`
-  fixes one.
-- The project is found the way Claude Code keys it, from the working
-  directory up through its parents. A project without a memory gets one with
-  its first entry: the folder and the index are created then.
+- Where the memory lives comes from the providers in
+  `~/.pi/agent/memory.json`, in order of priority: the first one available is
+  used, the others are fallbacks. Without the file:
+
+  ```json
+  {
+    "providers": {
+      "claude": {},
+      "pi": {}
+    }
+  }
+  ```
+
+  - `claude` is Claude Code's auto memory, so Pi and Claude Code remember the
+    same. It is available while Claude Code is installed and its auto memory
+    is on (no `autoMemoryEnabled: false` in its settings, no
+    `CLAUDE_CODE_DISABLE_AUTO_MEMORY`). The folder follows Claude Code's
+    rules: `autoMemoryDirectory` from its settings, else
+    `~/.claude/projects/<project>/memory/` (`CLAUDE_CONFIG_DIR` and
+    `CLAUDE_CODE_PROJECT_DIR_NAME` honoured).
+  - `pi` is `~/.pi/agent/memory/<project>/`, always available.
+  - Every provider takes a `"dir"` with `{project}` for the project key — a
+    synced folder, for one — and a provider of another name needs one.
+- The project is the git repository, its main worktree, so that subfolders
+  and worktrees share one memory, as in Claude Code; outside a repository,
+  the working directory. Claude Code's project settings count only once Pi
+  trusts the project. A project without a memory gets the folder and the
+  index with its first entry.
 - The index goes into the system prompt on every run, read fresh, cut at 200
   lines, together with the rules for writing: what to save and what not
   (nothing the repository already says, no secrets), the file format Claude
@@ -612,8 +631,8 @@ out wrong.
   `type` and `modified`; **Why:** and **How to apply:** for feedback and
   project entries), one index line per file, and updating instead of
   duplicating. The topic files are read on demand.
-- `/memory` shows the folder and the index; `/memory edit` opens the index in
-  Pi's editor.
+- `/memory` shows the providers with the one in use and the index;
+  `/memory edit` opens the index in Pi's editor.
 - At start, a notice names the memory in use. Subagents get no memory, as in
   Claude Code.
 - `memory.ts` replaces `claude-memory.ts`, which only read Claude Code's

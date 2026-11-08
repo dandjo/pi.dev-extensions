@@ -5,14 +5,20 @@
  *   the topic files themselves (Markdown with frontmatter). The index goes into the system prompt on every run, read
  *   live; the model reads a topic file when it is relevant and writes, corrects, and removes entries with its file
  *   tools, following the rules that come with the index.
- * - The folder is shared with Claude Code while Claude Code is there (its config directory exists; CLAUDE_CONFIG_DIR
- *   is honoured): ~/.claude/projects/<key>/memory, so both remember the same. Without Claude Code it is
- *   ~/.pi/agent/memory/<key>. {"store": "claude"} or {"store": "pi"} in ~/.pi/agent/memory.json fixes one.
- * - <key> is the project's absolute path with every character but letters and digits replaced by "-", as Claude Code
- *   names it. The working directory and its parents are tried, nearest first; without a memory in any of them, the
- *   working directory's folder is used, and the extension creates it with an empty index when the first entry is
- *   written there.
- * - /memory shows the folder and the index; /memory edit opens the index in Pi's editor.
+ * - Where it lives comes from the providers in ~/.pi/agent/memory.json, in order of priority: the first one available
+ *   is used, the others are fallbacks. {"providers": {"claude": {}, "pi": {}}} is the default:
+ *   - claude: Claude Code's auto memory, so both remember the same. Available while Claude Code is installed (its
+ *     config directory exists) and its auto memory is on (no autoMemoryEnabled: false in its settings, no
+ *     CLAUDE_CODE_DISABLE_AUTO_MEMORY). The folder follows Claude Code's rules: autoMemoryDirectory from its settings,
+ *     else <config dir>/projects/<project>/memory, <project> being CLAUDE_CODE_PROJECT_DIR_NAME beside
+ *     CLAUDE_CONFIG_DIR or the project key.
+ *   - pi: ~/.pi/agent/memory/<project>, always available.
+ *   - Any provider takes a "dir" with {project} for the key, and a provider of another name needs one.
+ * - The project is the git repository (its main worktree, so worktrees share one memory), else the working directory;
+ *   its key is the absolute path with every character but letters and digits replaced by "-", as Claude Code names
+ *   it. Claude Code's project settings count only once Pi trusts the project.
+ * - A project without a memory gets the folder and an empty index when the first entry is written there.
+ * - /memory shows the providers and the index in use; /memory edit opens the index in Pi's editor.
  * - Subagents (PI_SUBAGENT_DEPTH) get no memory, as in Claude Code.
  */
 
@@ -24,6 +30,7 @@ import {
 	type Theme,
 } from "@earendil-works/pi-coding-agent";
 import { Key, matchesKey, type TUI, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -46,35 +53,128 @@ function claudeDir(): string {
 	return process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), ".claude");
 }
 
-/** Where memories live: Claude Code's projects folder while Claude Code is there, else Pi's own; memory.json fixes one. */
-function store(): "claude" | "pi" {
+interface Provider {
+	name: string;
+	/** A folder with {project} for the project key; default the provider's own. */
+	dir?: string;
+}
+
+const DEFAULT_PROVIDERS: Provider[] = [{ name: "claude" }, { name: "pi" }];
+
+/** The providers in order of priority, and what is wrong with memory.json if it is; the defaults when it is. */
+function loadProviders(): { providers: Provider[]; problem?: string } {
+	let config: any;
 	try {
-		const value = JSON.parse(readFileSync(CONFIG_FILE, "utf8"))?.store;
-		if (value === "claude" || value === "pi") return value;
-	} catch {
-		// no settings: decide by Claude Code's presence
+		config = JSON.parse(readFileSync(CONFIG_FILE, "utf8"));
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return { providers: DEFAULT_PROVIDERS };
+		return { providers: DEFAULT_PROVIDERS, problem: `${CONFIG_FILE} is not valid JSON` };
 	}
-	return existsSync(claudeDir()) ? "claude" : "pi";
+	// {"store": "claude"|"pi"}, the form of the first version
+	if (config && typeof config === "object" && config.providers === undefined && (config.store === "claude" || config.store === "pi")) {
+		return { providers: [{ name: config.store }] };
+	}
+	const map = config?.providers;
+	if (!map || typeof map !== "object" || Array.isArray(map) || Object.keys(map).length === 0) {
+		return { providers: DEFAULT_PROVIDERS, problem: `${CONFIG_FILE}: expected {"providers": {"claude": {}, "pi": {}}}` };
+	}
+	const providers: Provider[] = [];
+	for (const [name, settings] of Object.entries(map)) {
+		const dir = (settings as { dir?: unknown } | null)?.dir;
+		if (dir !== undefined && (typeof dir !== "string" || !dir.trim())) {
+			return { providers: DEFAULT_PROVIDERS, problem: `${CONFIG_FILE}: providers.${name}.dir must be a path` };
+		}
+		if (name !== "claude" && name !== "pi" && dir === undefined) {
+			return { providers: DEFAULT_PROVIDERS, problem: `${CONFIG_FILE}: providers.${name} needs a dir` };
+		}
+		providers.push({ name, dir: dir as string | undefined });
+	}
+	return { providers };
 }
 
-function folderOf(dir: string, where: "claude" | "pi"): string {
-	const key = dir.replace(/[^a-zA-Z0-9]/g, "-");
-	return where === "claude" ? path.join(claudeDir(), "projects", key, "memory") : path.join(getAgentDir(), "memory", key);
+/** ~ expanded; {project} replaced with the key. */
+function expand(dir: string, key: string): string {
+	const withKey = dir.trim().replaceAll("{project}", key);
+	if (withKey === "~" || withKey.startsWith("~/")) return path.join(os.homedir(), withKey.slice(1));
+	return path.resolve(withKey);
 }
 
-/**
- * The memory of a working directory: the nearest folder of it and its parents that has an index, else the working
- * directory's own, which does not exist yet.
- */
-function memoryOf(cwd: string): { dir: string; exists: boolean; where: "claude" | "pi" } {
-	const where = store();
+const projectRoots = new Map<string, string>();
+
+/** The project of a working directory as Claude Code takes it: the git repository's main worktree, else the directory. */
+function projectRoot(cwd: string): string {
 	const start = path.resolve(cwd);
-	for (let dir = start; ; dir = path.dirname(dir)) {
-		const candidate = folderOf(dir, where);
-		if (existsSync(path.join(candidate, INDEX))) return { dir: candidate, exists: true, where };
-		if (dir === path.dirname(dir)) break;
+	const known = projectRoots.get(start);
+	if (known) return known;
+	let root = start;
+	try {
+		const git = (args: string[]) =>
+			execFileSync("git", args, { cwd: start, encoding: "utf8", timeout: 5_000, stdio: ["ignore", "pipe", "ignore"] }).trim();
+		const common = git(["rev-parse", "--path-format=absolute", "--git-common-dir"]);
+		root = path.basename(common) === ".git" ? path.dirname(common) : git(["rev-parse", "--show-toplevel"]) || start;
+	} catch {
+		// not a git repository
 	}
-	return { dir: folderOf(start, where), exists: false, where };
+	projectRoots.set(start, root);
+	return root;
+}
+
+/** Claude Code's settings that decide its auto memory: user, then project and local once Pi trusts the project. */
+function claudeSettings(root: string, trusted: boolean): { autoMemoryEnabled?: unknown; autoMemoryDirectory?: unknown } {
+	const files = [path.join(claudeDir(), "settings.json")];
+	if (trusted) files.push(path.join(root, ".claude", "settings.json"), path.join(root, ".claude", "settings.local.json"));
+	const merged: Record<string, unknown> = {};
+	for (const file of files) {
+		try {
+			const settings = JSON.parse(readFileSync(file, "utf8"));
+			for (const key of ["autoMemoryEnabled", "autoMemoryDirectory"]) if (settings?.[key] !== undefined) merged[key] = settings[key];
+		} catch {
+			// no such settings file
+		}
+	}
+	return merged;
+}
+
+interface Resolved {
+	provider: string;
+	dir: string;
+	/** Why the provider cannot be used; undefined when it can. */
+	unavailable?: string;
+}
+
+function resolve(provider: Provider, root: string, key: string, trusted: boolean): Resolved {
+	if (provider.name === "claude") {
+		if (!existsSync(claudeDir())) return { provider: provider.name, dir: "", unavailable: "Claude Code is not installed" };
+		const settings = claudeSettings(root, trusted);
+		const disabled = /^(1|true|yes)$/i.test(process.env.CLAUDE_CODE_DISABLE_AUTO_MEMORY ?? "") || settings.autoMemoryEnabled === false;
+		const name = process.env.CLAUDE_CONFIG_DIR && process.env.CLAUDE_CODE_PROJECT_DIR_NAME ? process.env.CLAUDE_CODE_PROJECT_DIR_NAME : key;
+		const dir = provider.dir
+			? expand(provider.dir, key)
+			: typeof settings.autoMemoryDirectory === "string" && settings.autoMemoryDirectory.trim()
+				? expand(settings.autoMemoryDirectory, key)
+				: path.join(claudeDir(), "projects", name, "memory");
+		return { provider: provider.name, dir, unavailable: disabled ? "Claude Code's auto memory is off" : undefined };
+	}
+	if (provider.name === "pi" && !provider.dir) return { provider: provider.name, dir: path.join(getAgentDir(), "memory", key) };
+	return { provider: provider.name, dir: expand(provider.dir ?? "", key) };
+}
+
+interface Memory {
+	dir: string;
+	exists: boolean;
+	provider: string;
+	/** Every provider in order, with its folder and why it is not used. */
+	all: Resolved[];
+}
+
+/** The memory of a working directory: the folder of the first available provider. */
+function memoryOf(cwd: string, trusted: boolean): Memory | undefined {
+	const root = projectRoot(cwd);
+	const key = root.replace(/[^a-zA-Z0-9]/g, "-");
+	const all = loadProviders().providers.map((provider) => resolve(provider, root, key, trusted));
+	const used = all.find((r) => !r.unavailable);
+	if (!used) return undefined;
+	return { dir: used.dir, exists: existsSync(path.join(used.dir, INDEX)), provider: used.provider, all };
 }
 
 function shortPath(file: string): string {
@@ -187,29 +287,44 @@ async function showText(
 	);
 }
 
+/** What the memory is, for the prompt and /memory: "Claude Code's auto memory" or the provider's name. */
+function describe(provider: string): string {
+	return provider === "claude" ? "shared with Claude Code" : provider === "pi" ? "Pi's own" : `provider ${provider}`;
+}
+
+const trustedIn = (ctx: ExtensionContext) => {
+	try {
+		return ctx.isProjectTrusted();
+	} catch {
+		return false;
+	}
+};
+
 export default function (pi: ExtensionAPI) {
 	pi.on("session_start", async (_event, ctx) => {
 		if (process.env.PI_SUBAGENT_DEPTH || !ctx.hasUI) return;
-		const memory = memoryOf(ctx.cwd);
-		if (memory.exists) ctx.ui.notify(`Memory: ${shortPath(memory.dir)}`, "info");
+		const problem = loadProviders().problem;
+		if (problem) ctx.ui.notify(`memory: ${problem}; the defaults apply`, "warning");
+		const memory = memoryOf(ctx.cwd, trustedIn(ctx));
+		if (!memory) ctx.ui.notify("memory: no provider in memory.json is available", "warning");
+		else if (memory.exists) ctx.ui.notify(`Memory: ${shortPath(memory.dir)}`, "info");
 	});
 
-	pi.on("before_agent_start", (event) => {
+	pi.on("before_agent_start", (event, ctx) => {
 		const sections = event.systemPromptOptions.sections as Record<string, string | undefined>;
-		if (process.env.PI_SUBAGENT_DEPTH) {
+		const memory = process.env.PI_SUBAGENT_DEPTH ? undefined : memoryOf(event.systemPromptOptions.cwd, trustedIn(ctx));
+		if (!memory) {
 			delete sections.memory;
 			return;
 		}
-		const memory = memoryOf(event.systemPromptOptions.cwd);
 		let index = "";
 		if (memory.exists) {
 			index = readFileSync(path.join(memory.dir, INDEX), "utf8").trim();
 			const lines = index.split("\n");
 			if (lines.length > MAX_INDEX_LINES) index = `${lines.slice(0, MAX_INDEX_LINES).join("\n")}\n…`;
 		}
-		const shared = memory.where === "claude" ? ", shared with Claude Code" : "";
 		sections.memory = [
-			`Persistent memory for this project${shared}. Directory: ${memory.dir}`,
+			`Persistent memory for this project, ${describe(memory.provider)}. Directory: ${memory.dir}`,
 			"The index below links topic files (relative to that directory). Read a topic file when it is relevant to the task before acting; treat entries as dated observations and verify them against the current state when it matters.",
 			"",
 			RULES,
@@ -222,8 +337,8 @@ export default function (pi: ExtensionAPI) {
 	pi.on("tool_call", (event, ctx) => {
 		if (process.env.PI_SUBAGENT_DEPTH) return;
 		if (!isToolCallEventType("write", event) && !isToolCallEventType("edit", event)) return;
-		const memory = memoryOf(ctx.cwd);
-		if (memory.exists) return;
+		const memory = memoryOf(ctx.cwd, trustedIn(ctx));
+		if (!memory || memory.exists) return;
 		const target = toolPath(event.input.path, ctx.cwd);
 		if (!target.startsWith(memory.dir + path.sep)) return;
 		try {
@@ -236,10 +351,14 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("memory", {
-		description: "Show this project's memory; /memory edit opens its index in the editor",
+		description: "Show this project's memory and its providers; /memory edit opens the index in the editor",
 		getArgumentCompletions: (prefix) => (prefix !== "edit" && "edit".startsWith(prefix) ? [{ value: "edit", label: "edit" }] : null),
 		handler: async (args, ctx) => {
-			const memory = memoryOf(ctx.cwd);
+			const memory = memoryOf(ctx.cwd, trustedIn(ctx));
+			if (!memory) {
+				ctx.ui.notify("No provider in memory.json is available, so Pi has no memory here.", "warning");
+				return;
+			}
 			const index = path.join(memory.dir, INDEX);
 			if (args.trim() === "edit") {
 				const before = memory.exists ? readFileSync(index, "utf8") : "";
@@ -250,11 +369,15 @@ export default function (pi: ExtensionAPI) {
 				ctx.ui.notify(`Saved ${shortPath(index)}`, "info");
 				return;
 			}
-			const where = memory.where === "claude" ? "shared with Claude Code" : "Pi's own";
 			await showText(ctx, `Memory · ${shortPath(memory.dir)}`, (_width, theme) => {
-				if (!memory.exists) return [`No memory yet for this project (${where}).`, "", theme.fg("muted", `The first entry creates ${shortPath(memory.dir)}.`)];
-				const lines = readFileSync(index, "utf8").trimEnd().split("\n");
-				return [theme.fg("muted", `${where} · /memory edit opens the index`), "", ...lines];
+				const providers = memory.all.map((r) =>
+					r.dir === memory.dir && r.provider === memory.provider
+						? `${theme.fg("success", "●")} ${r.provider}  ${shortPath(r.dir)}  ${theme.fg("muted", "(in use)")}`
+						: `${theme.fg("dim", "○")} ${r.provider}  ${r.dir ? shortPath(r.dir) : ""}  ${theme.fg("muted", r.unavailable ? `(${r.unavailable})` : "(fallback)")}`,
+				);
+				const head = [theme.fg("muted", `Providers in order of priority (${shortPath(CONFIG_FILE)}):`), ...providers, ""];
+				if (!memory.exists) return [...head, `No memory yet for this project (${describe(memory.provider)}). The first entry creates it.`];
+				return [...head, theme.fg("muted", `${INDEX} · /memory edit opens it`), "", ...readFileSync(index, "utf8").trimEnd().split("\n")];
 			});
 		},
 	});
