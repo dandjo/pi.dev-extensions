@@ -176,10 +176,11 @@ function transcriptLines(file: string, width: number, theme: Theme): string[] {
 
 /**
  * Framed, scrollable boxes for the extensions that show more than a notification can hold: overlays for /hooks,
- * /agents, and /cron, and the frame and scrolling of the boxes /btw and the /diff dialog show above the prompt.
+ * /agents, /cron, and /memory, and the frame and scrolling of the boxes /btw and the /diff dialog show above the
+ * prompt.
  *
- * btw.ts, claude-hooks.ts, claude-remote-control.ts, diff.ts, scheduled-tasks.ts, subagents.ts carry a copy of this
- * block, or of a part of it: change them alike.
+ * btw.ts, claude-hooks.ts, claude-remote-control.ts, diff.ts, memory.ts, scheduled-tasks.ts, subagents.ts carry a copy
+ * of this block, or of a part of it: change them alike.
  */
 /** Rows the body of an overlay may use: the overlay's height cap minus the frame and help lines. */
 function bodyRows(tui: TUI): number {

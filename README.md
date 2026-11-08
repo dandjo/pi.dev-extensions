@@ -3,12 +3,12 @@
 Extensions for [Pi](https://pi.dev), the terminal coding agent, that bring
 over what Claude Code does: Pi runs Claude models on your Claude
 subscription, shows a status line with the subscription limits, searches and
-reads the web, reads Claude Code's memory, titles every session, lets
-sessions message each other, runs Claude Code's hooks, brings over Claude
-Code's subagents, questions, side questions, goals, loops, scheduled prompts,
-diff view, agent panel, and Remote Control for the Claude app, reads and
-changes OpenProject and GitLab, controls your Chrome, and keeps requests
-alive through network trouble.
+reads the web, keeps a memory per project as Claude Code does, titles every
+session, lets sessions message each other, runs Claude Code's hooks, brings
+over Claude Code's subagents, questions, side questions, goals, loops,
+scheduled prompts, diff view, agent panel, and Remote Control for the Claude
+app, reads and changes OpenProject and GitLab, controls your Chrome, and keeps
+requests alive through network trouble.
 
 The repository mirrors `~/.pi/agent/`: a file at `extensions/<name>.ts`
 belongs at `~/.pi/agent/extensions/<name>.ts`.
@@ -21,7 +21,7 @@ belongs at `~/.pi/agent/extensions/<name>.ts`.
 | `web-tools.ts`             | Adds `web_fetch`: reads a page locally and lets a small model answer from it              | —                                                                |
 | `openproject.ts`           | Adds `openproject`: reads and changes OpenProject through its API v3, as you              | An OpenProject API token for each instance                       |
 | `gitlab.ts`                | Adds `gitlab`: reads and changes GitLab through its REST API v4 and GraphQL, as you       | A GitLab personal access token for each instance                 |
-| `claude-memory.ts`         | Puts Claude Code's auto memory of the current project into the system prompt              | Claude Code memory under `~/.claude/projects/`                   |
+| `memory.ts`                | Keeps a memory per project, shared with Claude Code's auto memory when it is there        | —                                                                |
 | `session-title.ts`         | Names each session after its first prompt and shows it in the terminal title              | —                                                                |
 | `session-socket.ts`        | Lets sessions message each other and your Claude Code sessions, as Claude Code does       | Linux or macOS                                                   |
 | `claude-hooks.ts`          | Runs Claude Code's hooks, from settings files and plugins, at Pi's events                 | —                                                                |
@@ -587,14 +587,39 @@ written with your permissions.
   changing its description.
 - Git itself — clone, fetch, push — stays with `git`.
 
-## claude-memory
+## memory
 
-Adds the `MEMORY.md` index of Claude Code's auto memory to the system prompt,
-read fresh on every run so it matches what Claude Code sees. The project is
-found the way Claude Code keys it, from the working directory up through its
-parents. The index is cut at 200 lines; the topic files it links to are read
-on demand. Pi only reads the memory, it never writes it. At start, a notice
-names the memory directory in use. Subagents get no memory, as in Claude Code.
+Gives Pi a memory per project, kept the way Claude Code keeps its auto
+memory: a folder with an index, `MEMORY.md`, holding one line per entry, and
+one topic file per entry. Pi remembers on its own what a later session needs —
+corrections and preferences you gave, facts and decisions about the project,
+where outside information lives — and corrects or removes entries that turn
+out wrong.
+
+- Where: shared with Claude Code while Claude Code is there (its config
+  directory exists; `CLAUDE_CONFIG_DIR` is honoured), in
+  `~/.claude/projects/<project>/memory/`, so Pi and Claude Code remember the
+  same. Without Claude Code, in `~/.pi/agent/memory/<project>/`.
+  `{"store": "claude"}` or `{"store": "pi"}` in `~/.pi/agent/memory.json`
+  fixes one.
+- The project is found the way Claude Code keys it, from the working
+  directory up through its parents. A project without a memory gets one with
+  its first entry: the folder and the index are created then.
+- The index goes into the system prompt on every run, read fresh, cut at 200
+  lines, together with the rules for writing: what to save and what not
+  (nothing the repository already says, no secrets), the file format Claude
+  Code uses (frontmatter with `name`, `description`, and `metadata` with
+  `type` and `modified`; **Why:** and **How to apply:** for feedback and
+  project entries), one index line per file, and updating instead of
+  duplicating. The topic files are read on demand.
+- `/memory` shows the folder and the index; `/memory edit` opens the index in
+  Pi's editor.
+- At start, a notice names the memory in use. Subagents get no memory, as in
+  Claude Code.
+- `memory.ts` replaces `claude-memory.ts`, which only read Claude Code's
+  memory: delete a link or copy of `claude-memory.ts` in
+  `~/.pi/agent/extensions/` (Pi reports a broken link as a load error) and
+  link or copy `memory.ts` instead.
 
 ## session-title
 

@@ -624,10 +624,11 @@ function toClaudeResponse(
 
 /**
  * Framed, scrollable boxes for the extensions that show more than a notification can hold: overlays for /hooks,
- * /agents, and /cron, and the frame and scrolling of the boxes /btw and the /diff dialog show above the prompt.
+ * /agents, /cron, and /memory, and the frame and scrolling of the boxes /btw and the /diff dialog show above the
+ * prompt.
  *
- * background-agents.ts, btw.ts, claude-remote-control.ts, diff.ts, scheduled-tasks.ts, subagents.ts carry a copy of
- * this block, or of a part of it: change them alike.
+ * background-agents.ts, btw.ts, claude-remote-control.ts, diff.ts, memory.ts, scheduled-tasks.ts, subagents.ts carry a
+ * copy of this block, or of a part of it: change them alike.
  */
 const OVERLAY_OPTIONS = { anchor: "center", width: "90%", maxHeight: "90%", margin: 1 } as const;
 
