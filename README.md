@@ -19,7 +19,7 @@ belongs at `~/.pi/agent/extensions/<name>.ts`.
 | `claude-usage.ts`          | Adds the Claude subscription limits and usage credits to the status line                  | `statusline.ts`, a Claude subscription login (Pi or Claude Code) |
 | `web-tools.ts`             | Adds `web_fetch`: reads a page locally and lets a small model answer from it              | —                                                                |
 | `openproject.ts`           | Adds `openproject`: reads and changes OpenProject through its API v3, as you              | An OpenProject API token in `OPENPROJECT_API_TOKEN`              |
-| `gitlab.ts`                | Adds `gitlab`: reads and changes GitLab through its REST API v4 and GraphQL, as you       | A GitLab personal access token in the environment                |
+| `gitlab.ts`                | Adds `gitlab`: reads and changes GitLab through its REST API v4 and GraphQL, as you       | A GitLab personal access token for each instance                 |
 | `claude-memory.ts`         | Puts Claude Code's auto memory of the current project into the system prompt              | Claude Code memory under `~/.claude/projects/`                   |
 | `session-title.ts`         | Names each session after its first prompt and shows it in the terminal title              | —                                                                |
 | `session-socket.ts`        | Lets sessions message each other and your Claude Code sessions, as Claude Code does       | Linux or macOS                                                   |
@@ -408,24 +408,48 @@ below `/api/bcf/2.1` reach the instance's BCF API (BIM topics and viewpoints).
 
 Registers `gitlab`, a tool that calls the
 [REST API v4](https://docs.gitlab.com/api/rest/) and the
-[GraphQL API](https://docs.gitlab.com/api/graphql/) of a GitLab instance as
-you: issues, merge requests, notes, pipelines, job logs, repository files,
-projects, groups, and whatever else the API offers, read and written with
-your permissions.
+[GraphQL API](https://docs.gitlab.com/api/graphql/) of one or more GitLab
+instances as you: issues, merge requests, notes, pipelines, job logs,
+repository files, projects, groups, and whatever else the API offers, read and
+written with your permissions.
 
-- The instance comes from `~/.pi/agent/gitlab.json`, as
-  `{"url": "https://gitlab.example.com"}`. Without the file the tool is not
-  registered.
-- The token is a personal access token (in GitLab: User settings → Personal
-  access tokens; scope `api`, or `read_api` to read only) in the environment
-  variable `GITLAB_TOKEN`, or in the one `"tokenEnv"` in `gitlab.json` names.
-  It is read at every call. Pi must start with it set: export it in your shell
-  profile or in `~/.pam_environment`, which applies only after the next
-  login.
-- The token goes only to the configured instance, in the `PRIVATE-TOKEN`
-  header. Paths and links outside its `/api/v4` and `/api/graphql` are
-  refused, and a redirect to another host (object storage) is followed
-  without the token.
+- The instances come from `~/.pi/agent/gitlab.json`, a list with a URL and a
+  token for each; the first is the default. A single `{"url": …, "token": …}`
+  without the list works as well. Without the file the tool is not registered.
+
+  ```json
+  [
+    { "url": "https://gitlab.example.com", "token": "$GITLAB_TOKEN" },
+    { "url": "https://gitlab.com", "token": "!op read op://Private/GitLab/token" }
+  ]
+  ```
+
+- `token` reads like `apiKey` in Pi's `models.json`: the token itself,
+  `"$NAME"` or `"${NAME}"` for an environment variable, or `"!command"` for
+  the output of a shell command, such as a password manager's CLI. `$$` and
+  `$!` are a literal `$` and `!`. `"tokenEnv": "NAME"` is short for
+  `"token": "$NAME"`; without either, the token is `$GITLAB_TOKEN`.
+  - It is a personal access token (in GitLab: User settings → Personal access
+    tokens; scope `api`, or `read_api` to read only).
+  - An environment variable is read at every call. Pi must start with it set:
+    export it in your shell profile or in `~/.pam_environment`, which applies
+    only after the next login.
+  - A command runs through `/bin/sh` at the first call of a session, for up
+    to 30 seconds, time enough to unlock the password manager. Its token is
+    kept for the session until the instance answers 401; then it runs again.
+  - A token written into `gitlab.json` itself draws a warning at session start
+    while others can read the file: `chmod 600 ~/.pi/agent/gitlab.json`.
+- With several instances the tool takes `host`, the host of the instance
+  (`gitlab.com`, or `example.com/gitlab` for GitLab below a path); without it,
+  a call goes to the first. A full URL in `path` picks its instance by itself.
+  On every instance but the first, the href of the next page is a full URL, so
+  that it leads back there.
+- Each token goes only to its instance: in the `PRIVATE-TOKEN` header, and to
+  `/api/graphql` as `Authorization: Bearer`, as GitLab documents it for
+  GraphQL (git.drupalcode.org ignores `PRIVATE-TOKEN` there and answers as an
+  anonymous user). Paths and links outside the instance's `/api/v4` and
+  `/api/graphql` are refused, and a redirect to another host (object storage,
+  another instance) is followed without the token.
 - Secrets never reach the model, not even with `raw: true`: the token itself,
   fields named `token` or `*_token` (`runners_token`, a newly created access
   token), and the value of a CI/CD variable that is masked or hidden or whose
@@ -447,7 +471,7 @@ your permissions.
   `files: {"avatar": "~/logo.png"}`, an image for Markdown
   `POST /projects/{id}/uploads` with `files: {"file": "./diagram.png"}`. The
   fields of `body` go along as form fields (arrays as `key[]`). Like the token,
-  files go only to the configured instance, up to 100 MB in all; GET, DELETE,
+  files go only to the instance of the call, up to 100 MB in all; GET, DELETE,
   and GraphQL take none.
 - File contents (`…/raw`) and GraphQL answers come as they are. A job log
   (`…/jobs/{id}/trace`) comes without its colour codes, and when it is cut,
@@ -464,8 +488,7 @@ your permissions.
 - Writes need no confirmation. The tool's guidelines tell the model to write
   only what you asked for and to read a single issue or merge request before
   changing its description.
-- Bodies are JSON only, so files cannot be uploaded. Git itself — clone,
-  fetch, push — stays with `git`.
+- Git itself — clone, fetch, push — stays with `git`.
 
 ## claude-memory
 
