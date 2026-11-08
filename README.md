@@ -15,6 +15,7 @@ belongs at `~/.pi/agent/extensions/<name>.ts`.
 
 | Extension                  | What it does                                                                              | Needs                                                            |
 | :------------------------- | :---------------------------------------------------------------------------------------- | :--------------------------------------------------------------- |
+| `claude-marketplaces.ts`   | Loads the plugins of Claude Code marketplaces into Pi and keeps them current              | Git access to each marketplace                                   |
 | `statusline.ts`            | Replaces Pi's footer with a Claude Code style status line, for any provider               | —                                                                |
 | `claude-usage.ts`          | Adds the Claude subscription limits and usage credits to the status line                  | `statusline.ts`, a Claude subscription login (Pi or Claude Code) |
 | `web-tools.ts`             | Adds `web_fetch`: reads a page locally and lets a small model answer from it              | —                                                                |
@@ -46,7 +47,7 @@ other copies. `web_search` comes from the npm package `pi-web-access`; see
 ## Set up Pi
 
 Follow the steps in order — together they are the complete setup: Pi itself,
-the Claude subscription, all twenty extensions, and the browser connection.
+the Claude subscription, all twenty-one extensions, and the browser connection.
 Every step except the Chrome switch in step 4 is a
 shell command, so an agent can carry them out as well.
 
@@ -109,7 +110,7 @@ retrying, but the turn fails first.
 
 ### 3. Install the extensions
 
-Link all twenty from the clone, so that `git pull` updates them:
+Link all twenty-one from the clone, so that `git pull` updates them:
 
 ```bash
 mkdir -p ~/.pi/agent/extensions
@@ -221,9 +222,67 @@ pi -e ./extensions/web-tools.ts
 ```
 
 To remove an extension, delete its file or link from `~/.pi/agent/extensions/`
-and `/reload`.
+and `/reload`. For `claude-marketplaces.ts`, also delete `~/.pi/agent/claude-marketplaces/`.
 `pi remove npm:pi-web-access@0.44.0` removes web search.
 `pi mcp remove chrome-devtools` removes the browser connection.
+
+## claude-marketplaces
+
+Brings the plugins of Claude Code marketplaces — their skills, hooks, and
+agents — into Pi and keeps them current.
+
+- The marketplaces come from `~/.pi/agent/claude-marketplaces.json`: under
+  `marketplaces`, a map from each marketplace's git URL to its settings, like
+  `mcpServers` in Pi's `mcp.json` (there are no settings yet, so `{}`).
+  Without the file the extension does nothing.
+
+  ```json
+  {
+    "marketplaces": {
+      "git@github.com:acme/claude-marketplace.git": {},
+      "https://example.com/team/plugins.git": {}
+    }
+  }
+  ```
+
+- Each marketplace gets its own clone in
+  `~/.pi/agent/claude-marketplaces/<name>/repo`, `<name>` taken from the URL,
+  pulled in the background at every Pi start (not with `PI_OFFLINE` set). Git
+  never asks for a password there: SSH runs in batch mode.
+- When a pull changed a plugin (its files, or the plugin list in
+  `.claude-plugin/marketplace.json`), Pi reloads by itself, so the new skills,
+  hooks, and agents apply without a restart. Commits that change only other
+  files update the clone without a reload. On the very first start the clone
+  is created the same way, followed by the reload.
+- The reload waits until Pi is at rest in the terminal: no response or
+  compaction running, nothing queued, no prompt just submitted, and the empty
+  prompt editor in focus. An open selector such as `/resume` or `/model`, a
+  dialog, or a half-typed prompt is never interrupted. Until then
+  `<marketplace> plugins updated <old> -> <new>; Pi reloads once it is idle.`
+  tells that the previous version is still loaded. Outside the terminal (RPC
+  mode) the notice asks for `/reload` instead.
+- `/marketplace-update` pulls every marketplace and reloads at once.
+- Builds a copy of every plugin listed in `.claude-plugin/marketplace.json`
+  whose source is a folder of the marketplace, in
+  `~/.pi/agent/claude-marketplaces/<name>/plugins`, and adapts it to Pi:
+  - Skill names carry the plugin, since Pi has no plugin namespaces:
+    `/my-plugin:guidelines` becomes `/skill:my-plugin-guidelines`. References
+    between the skills of a marketplace are rewritten the same way.
+  - `${CLAUDE_SKILL_DIR}` and `${CLAUDE_PLUGIN_ROOT}` are replaced with the
+    absolute paths of the copy, because Pi does not substitute them.
+- The plugins' `hooks/` and `scripts/` are mirrored as they are, and every
+  mirrored plugin is linked into `~/.pi/agent/claude-plugins/<plugin>`, where
+  [claude-hooks](#claude-hooks) and [claude-agents](#claude-agents) look for
+  Claude Code plugins, so their hooks and agents work in Pi as in Claude
+  Code. The links are made at every start and
+  after every update. A plugin name two marketplaces share goes to the first.
+  Links into a copy (this extension's, or an earlier one's) follow the copies;
+  any other entry there is left alone.
+- Subagent processes ([subagents](#subagents)) skip the pull.
+- Pi warns at start about skill descriptions longer than 1,024 characters (the
+  skill loads anyway).
+- Never edit files under `~/.pi/agent/claude-marketplaces/` — the clones are
+  reset to the remote and the copies are rebuilt.
 
 ## statusline
 
@@ -633,7 +692,11 @@ JSON on stdin, exit code 2 blocks, one JSON object on stdout decides.
 - Sources: `~/.claude/settings.json`; the project's `.claude/settings.json`
   and `.claude/settings.local.json` once Pi trusts the project; and
   `hooks/hooks.json` of every Claude Code plugin in
-  `~/.pi/agent/claude-plugins/<plugin>/` (a directory or a link to one), with
+  `~/.pi/agent/claude-plugins/<plugin>/` (a directory or a link to one;
+  [claude-marketplaces](#claude-marketplaces) links its plugins there) and of
+  every plugin Claude Code installed for you and enabled in
+  `~/.claude/settings.json` (`enabledPlugins`; a plugin of the same name in
+  `claude-plugins` replaces it), with
   `CLAUDE_PLUGIN_ROOT` set to the plugin and `CLAUDE_PLUGIN_DATA` to
   `~/.pi/agent/plugin-data/<plugin>`. `disableAllHooks: true` in a settings
   file turns them all off. The files are read again before every prompt.
@@ -742,8 +805,8 @@ Without `subagents.ts` it does nothing.
 - Definitions from `~/.claude/agents/` (`$CLAUDE_CONFIG_DIR/agents`), above
   `~/.pi/agent/agents/`; from the trusted project's `.claude/agents/`, at every
   level up to the repository root, below that level's `.pi/agents/`; and from
-  `agents/` of the plugins in `~/.pi/agent/claude-plugins/`, as `<plugin>:<name>`, below every user
-  and project agent.
+  `agents/` of the plugins in `~/.pi/agent/claude-plugins/` and of the plugins Claude Code installed for you and enabled, as
+  `<plugin>:<name>`, below every user and project agent.
 - Tool entries in Claude Code's names (`Read`, `Bash`, `Glob`, …) and
   permission rules (`Bash(git *)`) name the matching Pi tools, in every
   definition, those in `.pi/agents/` included.

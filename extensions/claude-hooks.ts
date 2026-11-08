@@ -6,7 +6,8 @@
  * - ~/.claude/settings.json (CLAUDE_CONFIG_DIR is honoured),
  * - <project>/.claude/settings.json and .claude/settings.local.json, only once the project is trusted in Pi,
  * - hooks/hooks.json of every Claude Code plugin in ~/.pi/agent/claude-plugins (one directory per plugin, or a link
- *   to one), with CLAUDE_PLUGIN_ROOT pointing at the plugin.
+ *   to one) and of every plugin Claude Code installed for the user and enabled in its user settings (a plugin in
+ *   claude-plugins replaces an installed one of the same name), with CLAUDE_PLUGIN_ROOT pointing at the plugin.
  * `disableAllHooks: true` in one of the settings files turns them all off.
  *
  * Events, and the Pi event each one runs at:
@@ -129,22 +130,42 @@ function readJson(file: string): any {
 }
 
 /** The directories in dir, links to directories included. */
-function listDirs(dir: string): string[] {
-	const linkedDir = (name: string) => {
+/**
+ * The Claude Code plugins Pi uses, by name: every directory in ~/.pi/agent/claude-plugins (or a link to one), then the
+ * plugins Claude Code installed for the user (plugins/installed_plugins.json) and enabled in its user settings
+ * (enabledPlugins), at their installPath. A name in claude-plugins wins over an installed plugin, and the first of two
+ * installed plugins of one name wins over the second. claude-agents.ts carries a copy of this function: change them alike.
+ */
+function claudePlugins(): { name: string; root: string }[] {
+	const plugins = new Map<string, string>();
+	const linked = path.join(getAgentDir(), "claude-plugins");
+	try {
+		for (const name of readdirSync(linked).sort()) {
+			try {
+				if (statSync(path.join(linked, name)).isDirectory()) plugins.set(name, path.join(linked, name));
+			} catch {
+				// a broken link
+			}
+		}
+	} catch {
+		// no claude-plugins
+	}
+	const json = (file: string): any => {
 		try {
-			return statSync(path.join(dir, name)).isDirectory();
+			return JSON.parse(readFileSync(file, "utf8"));
 		} catch {
-			return false;
+			return undefined;
 		}
 	};
-	try {
-		return readdirSync(dir, { withFileTypes: true })
-			.filter((entry) => entry.isDirectory() || (entry.isSymbolicLink() && linkedDir(entry.name)))
-			.map((entry) => entry.name)
-			.sort();
-	} catch {
-		return [];
+	const installed = json(path.join(claudeDir(), "plugins", "installed_plugins.json"))?.plugins ?? {};
+	const enabled = json(path.join(claudeDir(), "settings.json"))?.enabledPlugins ?? {};
+	for (const id of Object.keys(installed).sort()) {
+		const name = id.split("@")[0];
+		if (!name || enabled[id] !== true || plugins.has(name) || !Array.isArray(installed[id])) continue;
+		const entry = installed[id].find((e: any) => e?.scope === "user" && typeof e.installPath === "string");
+		if (entry && existsSync(entry.installPath)) plugins.set(name, entry.installPath);
 	}
+	return [...plugins].map(([name, root]) => ({ name, root }));
 }
 
 function hooksFrom(config: any, source: string, plugin?: { pluginRoot: string; pluginName: string }): Hook[] {
@@ -187,9 +208,7 @@ function loadConfig(cwd: string, trusted: boolean): Config {
 			all.push(hook);
 		}
 	}
-	const pluginsDir = path.join(getAgentDir(), "claude-plugins");
-	for (const name of listDirs(pluginsDir)) {
-		const root = path.join(pluginsDir, name);
+	for (const { name, root } of claudePlugins()) {
 		const file = path.join(root, "hooks", "hooks.json");
 		const json = readJson(file);
 		if (!json) continue;
