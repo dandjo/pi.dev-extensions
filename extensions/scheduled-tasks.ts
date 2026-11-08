@@ -284,7 +284,7 @@ function loopFile(cwd: string): { file: string; text: string } | undefined {
 	const candidates = [
 		path.join(cwd, ".claude", "loop.md"),
 		path.join(cwd, ".pi", "loop.md"),
-		path.join(process.env.CLAUDE_CONFIG_DIR ?? path.join(os.homedir(), ".claude"), "loop.md"),
+		path.join(process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), ".claude"), "loop.md"),
 		path.join(getAgentDir(), "loop.md"),
 	];
 	for (const file of candidates) {

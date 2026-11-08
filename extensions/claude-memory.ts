@@ -16,7 +16,7 @@ import * as path from "node:path";
 const MAX_INDEX_LINES = 200;
 
 function memoryDirFor(cwd: string): string | null {
-	const projects = path.join(process.env.CLAUDE_CONFIG_DIR ?? path.join(os.homedir(), ".claude"), "projects");
+	const projects = path.join(process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), ".claude"), "projects");
 	for (let dir = path.resolve(cwd); ; dir = path.dirname(dir)) {
 		const candidate = path.join(projects, dir.replace(/[^a-zA-Z0-9]/g, "-"), "memory");
 		if (existsSync(path.join(candidate, "MEMORY.md"))) return candidate;

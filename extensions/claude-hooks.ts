@@ -117,7 +117,7 @@ interface Outcome {
 }
 
 function claudeDir(): string {
-	return process.env.CLAUDE_CONFIG_DIR ?? path.join(os.homedir(), ".claude");
+	return process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), ".claude");
 }
 
 function readJson(file: string): any {

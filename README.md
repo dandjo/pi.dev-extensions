@@ -273,8 +273,9 @@ sessions share one answer through `~/.cache/pi-statusline/usage.json`: one
 session at a time asks, at most every two minutes, and the others read the
 file, so a new session shows the limits right away. The access token is read
 from Pi's own Anthropic login in `~/.pi/agent/auth.json`, otherwise from Claude
-Code's `~/.claude/.credentials.json`. It is never refreshed here and never
-written to the cache.
+Code's `~/.claude/.credentials.json` (on macOS from the login keychain item
+`Claude Code-credentials`, where Claude Code keeps it). It is never refreshed
+here and never written to the cache.
 
 Without any Claude login, neither Pi's OAuth login nor Claude Code's, there
 are no rows and no requests: someone on another provider sees nothing of
@@ -518,7 +519,10 @@ written with your permissions.
   counts as failed.
 - Requests go through `node:https`, not `fetch`: `fetch` sends
   `Sec-Fetch-Mode: cors`, and GitLab answers that with 406 on downloads such
-  as repository archives.
+  as repository archives. They use the proxy Pi uses for its own requests:
+  Pi's `httpProxy` setting, applied as `HTTPS_PROXY` and `HTTP_PROXY`, or
+  those variables themselves, with `NO_PROXY`. HTTPS goes through a `CONNECT`
+  tunnel, and a user in the proxy URL is sent as `Proxy-Authorization`.
 - Writes need no confirmation. The tool's guidelines tell the model to write
   only what you asked for and to read a single issue or merge request before
   changing its description.
@@ -1032,7 +1036,8 @@ and you can work on from there while Pi keeps running on your machine.
   does it ([background-agents](#background-agents)).
 - Transport: the Claude Agent SDK's bridge module
   (`@anthropic-ai/claude-agent-sdk/bridge`, marked alpha), which
-  `pi-claude-subscription` installs under `~/.pi/agent/npm`. It creates the
+  `pi-claude-subscription` installs: under `~/.pi/agent/npm`, in a project's
+  `.pi/npm`, or in npm's global root, wherever Pi put that package. It creates the
   session, mints a four-hour worker credential, and runs the event stream,
   heartbeats, and reconnects; the extension renews the credential five minutes
   before it expires and reconnects on its own after an outage. If another
@@ -1065,8 +1070,8 @@ and you can work on from there while Pi keeps running on your machine.
     part that answers the app, so every effort change, context usage and usage
     request failed with "not supported in this context". The copy passes all
     four on.
-- Login: the claude.ai OAuth token of Claude Code (`~/.claude/.credentials.json`;
-  it carries the `user:sessions:claude_code` scope), read fresh for every
+- Login: the claude.ai OAuth token of Claude Code (`~/.claude/.credentials.json`,
+  on macOS the login keychain; it carries the `user:sessions:claude_code` scope), read fresh for every
   request and never refreshed here — Claude Code refreshes it while the
   `claude-sdk` provider runs it. That is why Remote Control needs a Claude
   model: without one, `/rc` declines, and switching to another model

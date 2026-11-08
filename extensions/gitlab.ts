@@ -24,15 +24,18 @@
  *   content (artifacts, archives) is saved to a temp file. A cut job log keeps its end.
  * - files uploads local files as multipart/form-data (a project avatar, a markdown upload); the fields of body go
  *   along as form fields. Files go, like the token, only to the instance of the call.
+ * - Requests go through the proxy Pi uses for its own HTTP (its httpProxy setting, applied as HTTPS_PROXY and
+ *   HTTP_PROXY, and NO_PROXY): https through a CONNECT tunnel, as curl and undici do.
  */
 
 import { randomBytes } from "node:crypto";
 import { mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
-import { request as httpRequest } from "node:http";
-import { request as httpsRequest } from "node:https";
+import { type ClientRequest, type IncomingMessage, request as httpRequest } from "node:http";
+import { Agent as HttpsAgent, request as httpsRequest } from "node:https";
 import os from "node:os";
 import path from "node:path";
-import { Readable } from "node:stream";
+import { type Duplex, Readable } from "node:stream";
+import { connect as tlsConnect } from "node:tls";
 import { StringEnum } from "@earendil-works/pi-ai";
 import {
 	DEFAULT_MAX_BYTES,
@@ -204,8 +207,71 @@ function multipart(fields: Record<string, unknown> | undefined, files: Record<st
 }
 
 /**
- * One HTTP request through node:http(s), as a Response. Not fetch: it adds Sec-Fetch-Mode: cors to every request, and
- * GitLab answers that with 406 on downloads such as repository archives.
+ * The proxy for a URL as undici's EnvHttpProxyAgent picks it, which Pi installs for fetch: https_proxy or HTTPS_PROXY
+ * (else the http proxy) for https, http_proxy or HTTP_PROXY for http, none when no_proxy or NO_PROXY names the host
+ * (a host, a domain with or without a leading dot or *., host:port, or *).
+ */
+function proxyFor(url: URL): URL | undefined {
+	const env = (name: string) => process.env[name.toLowerCase()] || process.env[name] || undefined;
+	const raw = url.protocol === "https:" ? (env("HTTPS_PROXY") ?? env("HTTP_PROXY")) : env("HTTP_PROXY");
+	if (!raw) return undefined;
+	const host = url.hostname.toLowerCase().replace(/^\[|\]$/g, "");
+	const port = url.port || (url.protocol === "https:" ? "443" : "80");
+	for (const entry of (env("NO_PROXY") ?? "").split(/[\s,]+/)) {
+		if (!entry) continue;
+		if (entry === "*") return undefined;
+		const [name, onlyPort] = entry.toLowerCase().replace(/^\*?\./, ".").split(/:(?=\d+$)/);
+		if (onlyPort && onlyPort !== port) continue;
+		const domain = name.replace(/^\./, "");
+		if (host === domain || host.endsWith(`.${domain}`)) return undefined;
+	}
+	try {
+		return new URL(raw.includes("://") ? raw : `http://${raw}`);
+	} catch {
+		return undefined;
+	}
+}
+
+/** The Proxy-Authorization header for a proxy URL with a user. */
+function proxyAuthorization(proxy: URL): Record<string, string> {
+	if (!proxy.username) return {};
+	const credentials = `${decodeURIComponent(proxy.username)}:${decodeURIComponent(proxy.password)}`;
+	return { "Proxy-Authorization": `Basic ${Buffer.from(credentials).toString("base64")}` };
+}
+
+/** An https.Agent that reaches the host through a CONNECT tunnel of the proxy, then speaks TLS to the host itself. */
+class TunnelAgent extends HttpsAgent {
+	constructor(private readonly proxy: URL) {
+		super({ keepAlive: false });
+	}
+
+	// http.Agent takes the socket through the callback when createConnection returns nothing.
+	override createConnection(options: any, callback: any): any {
+		const target = `${options.host}:${options.port}`;
+		const tunnel: ClientRequest = (this.proxy.protocol === "https:" ? httpsRequest : httpRequest)({
+			hostname: this.proxy.hostname,
+			port: this.proxy.port || (this.proxy.protocol === "https:" ? 443 : 80),
+			method: "CONNECT",
+			path: target,
+			headers: { Host: target, ...proxyAuthorization(this.proxy) },
+		});
+		tunnel.once("connect", (res: IncomingMessage, socket: Duplex) => {
+			if (res.statusCode !== 200) {
+				socket.destroy();
+				callback(new Error(`the proxy ${this.proxy.host} answered CONNECT ${target} with ${res.statusCode}`));
+				return;
+			}
+			callback(null, tlsConnect({ socket, servername: options.servername || options.host }));
+		});
+		tunnel.once("error", (error: Error) => callback(new Error(`the proxy ${this.proxy.host} is unreachable: ${error.message}`)));
+		tunnel.end();
+		return undefined;
+	}
+}
+
+/**
+ * One HTTP request through node:http(s), as a Response, through the proxy proxyFor names. Not fetch: it adds
+ * Sec-Fetch-Mode: cors to every request, and GitLab answers that with 406 on downloads such as repository archives.
  */
 function request(
 	url: URL,
@@ -215,9 +281,9 @@ function request(
 	signal: AbortSignal,
 ): Promise<Response> {
 	return new Promise((resolve, reject) => {
-		const send = url.protocol === "https:" ? httpsRequest : httpRequest;
 		const all = body === undefined ? headers : { ...headers, "Content-Length": String(Buffer.byteLength(body)) };
-		const req = send(url, { method, headers: all, signal }, (res) => {
+		const proxy = proxyFor(url);
+		const onResponse = (res: IncomingMessage) => {
 			const received = new Headers();
 			for (const [name, value] of Object.entries(res.headers)) {
 				for (const item of Array.isArray(value) ? value : value === undefined ? [] : [value]) received.append(name, item);
@@ -227,7 +293,25 @@ function request(
 			if (empty) res.resume();
 			const stream = empty ? null : (Readable.toWeb(res) as ReadableStream<Uint8Array>);
 			resolve(new Response(stream, { status, statusText: res.statusMessage, headers: received }));
-		});
+		};
+		let req: ClientRequest;
+		if (proxy && url.protocol === "http:") {
+			// A plain-http request goes to the proxy whole, with the full URL as its path.
+			req = (proxy.protocol === "https:" ? httpsRequest : httpRequest)(
+				{
+					hostname: proxy.hostname,
+					port: proxy.port || (proxy.protocol === "https:" ? 443 : 80),
+					path: url.href,
+					method,
+					headers: { ...all, Host: url.host, ...proxyAuthorization(proxy) },
+					signal,
+				},
+				onResponse,
+			);
+		} else {
+			const send = url.protocol === "https:" ? httpsRequest : httpRequest;
+			req = send(url, { method, headers: all, signal, ...(proxy ? { agent: new TunnelAgent(proxy) } : {}) }, onResponse);
+		}
 		req.on("error", reject);
 		req.end(body);
 	});

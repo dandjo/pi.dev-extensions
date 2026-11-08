@@ -95,11 +95,13 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Key, matchesKey, Text, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { createHash, randomUUID } from "node:crypto";
+import { execFile, execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { promisify } from "node:util";
 
 const API_BASE_URL = "https://api.anthropic.com";
 const APP_URL = "https://claude.ai";
@@ -128,7 +130,6 @@ const MAX_HISTORY_MESSAGES = 400;
 const MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024;
 const MAX_TITLE_CHARS = 60;
 const STATE_FILE = path.join(getAgentDir(), "remote-control.json");
-const SDK_DIR = path.join(getAgentDir(), "npm", "node_modules", "@anthropic-ai", "claude-agent-sdk");
 const BRIDGE_CACHE_DIR = path.join(process.env.XDG_CACHE_HOME || path.join(os.homedir(), ".cache"), "pi-remote-control");
 /** Claude Code's effort levels; each is a Pi thinking level of the same name. */
 const EFFORTS = new Set(["low", "medium", "high", "xhigh", "max"]);
@@ -242,7 +243,83 @@ interface Token {
 }
 
 function claudeDir(): string {
-	return process.env.CLAUDE_CONFIG_DIR ?? path.join(os.homedir(), ".claude");
+	return process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), ".claude");
+}
+
+const execFileAsync = promisify(execFile);
+
+/**
+ * Claude Code's stored login, the JSON with claudeAiOauth, or undefined. On macOS Claude Code keeps it in the login
+ * keychain as the generic password "Claude Code-credentials" (with CLAUDE_CONFIG_DIR set, followed by "-" and the first
+ * eight hex digits of that directory's SHA-256), and .credentials.json is only its fallback; elsewhere the file is the
+ * store. macOS 26 prints a password with non-ASCII content as hex, which is decoded here. claude-usage.ts carries a
+ * copy of this function: change them alike.
+ */
+async function claudeCodeCredentials(): Promise<any> {
+	if (process.platform === "darwin") {
+		const dir = process.env.CLAUDE_CONFIG_DIR;
+		const suffix = dir ? `-${createHash("sha256").update(dir).digest("hex").slice(0, 8)}` : "";
+		try {
+			const { stdout } = await execFileAsync(
+				"/usr/bin/security",
+				["find-generic-password", "-s", `Claude Code-credentials${suffix}`, "-w"],
+				{ timeout: 5_000 },
+			);
+			const raw = stdout.trim();
+			const parsed = JSON.parse(/^(?:[0-9a-f]{2})+$/i.test(raw) ? Buffer.from(raw, "hex").toString("utf8") : raw);
+			if (parsed?.claudeAiOauth) return parsed;
+		} catch {
+			// no keychain item: the file
+		}
+	}
+	try {
+		return JSON.parse(await readFile(path.join(claudeDir(), ".credentials.json"), "utf8"));
+	} catch {
+		return undefined;
+	}
+}
+
+/** Where npm keeps global packages (Pi's legacy installs), asked once; undefined without npm. */
+let npmGlobalRoot: string | null | undefined;
+function globalNpmRoot(): string | undefined {
+	if (npmGlobalRoot === undefined) {
+		const windows = process.platform === "win32";
+		try {
+			npmGlobalRoot =
+				execFileSync(windows ? "npm.cmd" : "npm", ["root", "-g"], {
+					encoding: "utf8",
+					timeout: 10_000,
+					stdio: ["ignore", "pipe", "ignore"],
+					shell: windows,
+				}).trim() || null;
+		} catch {
+			npmGlobalRoot = null;
+		}
+	}
+	return npmGlobalRoot ?? undefined;
+}
+
+/**
+ * The Claude Agent SDK that pi-claude-subscription brings, wherever Pi installed that package: in the user scope
+ * (~/.pi/agent/npm), the project scope (.pi/npm), or npm's global root (Pi's legacy installs); hoisted, or below the
+ * package itself. Undefined when it is in none of them.
+ * claude-usage.ts carries a copy of this function: change them alike.
+ */
+function claudeSdkDir(): string | undefined {
+	const find = (roots: string[]) => {
+		for (const root of roots) {
+			const nested = path.join(root, "pi-claude-subscription", "node_modules");
+			for (const base of [root, nested]) {
+				const dir = path.join(base, "@anthropic-ai", "claude-agent-sdk");
+				if (existsSync(path.join(dir, "sdk.mjs"))) return dir;
+			}
+		}
+		return undefined;
+	};
+	const local = find([path.join(getAgentDir(), "npm", "node_modules"), path.join(process.cwd(), ".pi", "npm", "node_modules")]);
+	if (local) return local;
+	const global = globalNpmRoot();
+	return global ? find([global]) : undefined;
 }
 
 /**
@@ -252,8 +329,7 @@ function claudeDir(): string {
 async function readAccessToken(): Promise<Token | null> {
 	const now = Date.now() + 60_000;
 	try {
-		const cc = JSON.parse(await readFile(path.join(claudeDir(), ".credentials.json"), "utf8"));
-		const o = cc?.claudeAiOauth;
+		const o = (await claudeCodeCredentials())?.claudeAiOauth;
 		if (typeof o?.accessToken === "string" && o.accessToken && (!o.expiresAt || o.expiresAt > now)) {
 			return { value: o.accessToken, source: "claude-code" };
 		}
@@ -344,13 +420,12 @@ function writePatchedBridge(source: string): string {
 
 function loadBridge(): Promise<LoadedBridge> {
 	bridgePromise ??= (async () => {
-		const file = path.join(SDK_DIR, "bridge.mjs");
-		if (!existsSync(file)) {
-			throw new Error("The Claude Agent SDK is not installed: `pi install npm:pi-claude-subscription` brings it (see the README).");
-		}
+		const sdkDir = claudeSdkDir();
+		const file = sdkDir ? path.join(sdkDir, "bridge.mjs") : "";
+		if (!sdkDir || !existsSync(file)) throw new Error("The Claude Agent SDK is not installed: `pi install npm:pi-claude-subscription` brings it (see the README).");
 		let version = "unknown";
 		try {
-			version = String(JSON.parse(readFileSync(path.join(SDK_DIR, "manifest.json"), "utf8")).version ?? version);
+			version = String(JSON.parse(readFileSync(path.join(sdkDir, "manifest.json"), "utf8")).version ?? version);
 		} catch {
 			// the manifest is optional
 		}
@@ -732,8 +807,7 @@ function planRateLimits(snapshot: UsageSnapshot): Json {
 /** The plan as Claude Code's login names it (pro, max, team, enterprise), or null. */
 async function subscriptionType(): Promise<string | null> {
 	try {
-		const cc = JSON.parse(await readFile(path.join(claudeDir(), ".credentials.json"), "utf8"));
-		const type = cc?.claudeAiOauth?.subscriptionType;
+		const type = (await claudeCodeCredentials())?.claudeAiOauth?.subscriptionType;
 		return typeof type === "string" && type ? type : null;
 	} catch {
 		return null;
@@ -1008,7 +1082,7 @@ const gate = ((globalThis as Record<symbol, unknown>)[Symbol.for("pi.claude-logi
 /** Whether Claude Code's access token is valid for at least another minute. */
 async function claudeCodeLoginValid(): Promise<boolean> {
 	try {
-		const o = JSON.parse(await readFile(path.join(claudeDir(), ".credentials.json"), "utf8"))?.claudeAiOauth;
+		const o = (await claudeCodeCredentials())?.claudeAiOauth;
 		return typeof o?.accessToken === "string" && o.accessToken !== "" && (!o.expiresAt || o.expiresAt > Date.now() + MARGIN_MS);
 	} catch {
 		return false;
@@ -1016,7 +1090,9 @@ async function claudeCodeLoginValid(): Promise<boolean> {
 }
 
 async function askClaudeCodeForUsage(): Promise<void> {
-	const sdk = (await import(pathToFileURL(path.join(SDK_DIR, "sdk.mjs")).href)) as ClaudeSdk;
+	const sdkDir = claudeSdkDir();
+	if (!sdkDir) throw new Error("The Claude Agent SDK is not installed: `pi install npm:pi-claude-subscription` brings it (see the README).");
+	const sdk = (await import(pathToFileURL(path.join(sdkDir, "sdk.mjs")).href)) as ClaudeSdk;
 	const idle: AsyncIterable<never> = { [Symbol.asyncIterator]: () => ({ next: () => new Promise<IteratorResult<never>>(() => {}) }) };
 	const env: Record<string, string | undefined> = {
 		...process.env,

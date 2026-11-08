@@ -22,7 +22,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 function claudeDir(): string {
-	return process.env.CLAUDE_CONFIG_DIR ?? path.join(os.homedir(), ".claude");
+	return process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), ".claude");
 }
 
 function pluginAgentDirs(): { plugin: string; dir: string }[] {

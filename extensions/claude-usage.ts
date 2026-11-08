@@ -26,10 +26,14 @@
  */
 
 import { type ExtensionAPI, getAgentDir, type Theme } from "@earendil-works/pi-coding-agent";
+import { execFile, execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import { existsSync } from "node:fs";
 import { mkdir, open, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { pathToFileURL } from "node:url";
+import { promisify } from "node:util";
 
 const SECTION_ID = "claude-usage";
 const POLL_MS = 10_000;
@@ -146,6 +150,82 @@ function fmtMoney(minor: number, places: number, currency: string): string {
 	}
 }
 
+const execFileAsync = promisify(execFile);
+
+/**
+ * Claude Code's stored login, the JSON with claudeAiOauth, or undefined. On macOS Claude Code keeps it in the login
+ * keychain as the generic password "Claude Code-credentials" (with CLAUDE_CONFIG_DIR set, followed by "-" and the first
+ * eight hex digits of that directory's SHA-256), and .credentials.json is only its fallback; elsewhere the file is the
+ * store. macOS 26 prints a password with non-ASCII content as hex, which is decoded here.
+ * claude-remote-control.ts carries a copy of this function: change them alike.
+ */
+async function claudeCodeCredentials(): Promise<any> {
+	if (process.platform === "darwin") {
+		const dir = process.env.CLAUDE_CONFIG_DIR;
+		const suffix = dir ? `-${createHash("sha256").update(dir).digest("hex").slice(0, 8)}` : "";
+		try {
+			const { stdout } = await execFileAsync(
+				"/usr/bin/security",
+				["find-generic-password", "-s", `Claude Code-credentials${suffix}`, "-w"],
+				{ timeout: 5_000 },
+			);
+			const raw = stdout.trim();
+			const parsed = JSON.parse(/^(?:[0-9a-f]{2})+$/i.test(raw) ? Buffer.from(raw, "hex").toString("utf8") : raw);
+			if (parsed?.claudeAiOauth) return parsed;
+		} catch {
+			// no keychain item: the file
+		}
+	}
+	try {
+		return JSON.parse(await readFile(path.join(claudeDir(), ".credentials.json"), "utf8"));
+	} catch {
+		return undefined;
+	}
+}
+
+/** Where npm keeps global packages (Pi's legacy installs), asked once; undefined without npm. */
+let npmGlobalRoot: string | null | undefined;
+function globalNpmRoot(): string | undefined {
+	if (npmGlobalRoot === undefined) {
+		const windows = process.platform === "win32";
+		try {
+			npmGlobalRoot =
+				execFileSync(windows ? "npm.cmd" : "npm", ["root", "-g"], {
+					encoding: "utf8",
+					timeout: 10_000,
+					stdio: ["ignore", "pipe", "ignore"],
+					shell: windows,
+				}).trim() || null;
+		} catch {
+			npmGlobalRoot = null;
+		}
+	}
+	return npmGlobalRoot ?? undefined;
+}
+
+/**
+ * The Claude Agent SDK that pi-claude-subscription brings, wherever Pi installed that package: in the user scope
+ * (~/.pi/agent/npm), the project scope (.pi/npm), or npm's global root (Pi's legacy installs); hoisted, or below the
+ * package itself. Undefined when it is in none of them.
+ * claude-remote-control.ts carries a copy of this function: change them alike.
+ */
+function claudeSdkDir(): string | undefined {
+	const find = (roots: string[]) => {
+		for (const root of roots) {
+			const nested = path.join(root, "pi-claude-subscription", "node_modules");
+			for (const base of [root, nested]) {
+				const dir = path.join(base, "@anthropic-ai", "claude-agent-sdk");
+				if (existsSync(path.join(dir, "sdk.mjs"))) return dir;
+			}
+		}
+		return undefined;
+	};
+	const local = find([path.join(getAgentDir(), "npm", "node_modules"), path.join(process.cwd(), ".pi", "npm", "node_modules")]);
+	if (local) return local;
+	const global = globalNpmRoot();
+	return global ? find([global]) : undefined;
+}
+
 /** Valid (non-expired) OAuth access token: pi's own login first, then Claude Code's. */
 async function readAccessToken(): Promise<string | null> {
 	const now = Date.now();
@@ -156,24 +236,27 @@ async function readAccessToken(): Promise<string | null> {
 		if (a?.access && (!a.expires || a.expires > now)) return a.access;
 	} catch {}
 	try {
-		const cc = JSON.parse(await readFile(path.join(claudeDir(), ".credentials.json"), "utf8"));
-		const o = cc?.claudeAiOauth;
+		const o = (await claudeCodeCredentials())?.claudeAiOauth;
 		if (o?.accessToken && (!o.expiresAt || o.expiresAt > now)) return o.accessToken;
 	} catch {}
 	return null;
 }
 
+/** The last answer of hasClaudeLogin, kept LOGIN_CHECK_MS so a macOS keychain is not asked at every poll. */
+let loginCheck: { at: number; present: boolean } | undefined;
+const LOGIN_CHECK_MS = 60_000;
+
 /** Whether there is a Claude login at all, valid or not: Pi's own OAuth login or Claude Code's. */
 async function hasClaudeLogin(): Promise<boolean> {
+	if (loginCheck && Date.now() - loginCheck.at < LOGIN_CHECK_MS) return loginCheck.present;
+	let present = false;
 	try {
 		const pi = JSON.parse(await readFile(path.join(getAgentDir(), "auth.json"), "utf8"));
-		if (pi?.anthropic?.type === "oauth") return true;
+		present = pi?.anthropic?.type === "oauth";
 	} catch {}
-	try {
-		const cc = JSON.parse(await readFile(path.join(claudeDir(), ".credentials.json"), "utf8"));
-		if (cc?.claudeAiOauth) return true;
-	} catch {}
-	return false;
+	if (!present) present = Boolean((await claudeCodeCredentials())?.claudeAiOauth);
+	loginCheck = { at: Date.now(), present };
+	return present;
 }
 
 function parseUsage(json: any): UsageSnapshot {
@@ -295,7 +378,6 @@ async function acquireLock(): Promise<LockResult> {
  *
  * claude-remote-control.ts carries a copy of this block, or of a part of it: change them alike.
  */
-const SDK_DIR = path.join(getAgentDir(), "npm", "node_modules", "@anthropic-ai", "claude-agent-sdk");
 const RETRY_MS = 5 * 60_000;
 const MAX_RETRY_MS = 60 * 60_000;
 const TIMEOUT_MS = 30_000;
@@ -324,13 +406,13 @@ const gate = ((globalThis as Record<symbol, unknown>)[Symbol.for("pi.claude-logi
 }) as Gate;
 
 function claudeDir(): string {
-	return process.env.CLAUDE_CONFIG_DIR ?? path.join(os.homedir(), ".claude");
+	return process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), ".claude");
 }
 
 /** Whether Claude Code's access token is valid for at least another minute. */
 async function claudeCodeLoginValid(): Promise<boolean> {
 	try {
-		const o = JSON.parse(await readFile(path.join(claudeDir(), ".credentials.json"), "utf8"))?.claudeAiOauth;
+		const o = (await claudeCodeCredentials())?.claudeAiOauth;
 		return typeof o?.accessToken === "string" && o.accessToken !== "" && (!o.expiresAt || o.expiresAt > Date.now() + MARGIN_MS);
 	} catch {
 		return false;
@@ -338,7 +420,9 @@ async function claudeCodeLoginValid(): Promise<boolean> {
 }
 
 async function askClaudeCodeForUsage(): Promise<void> {
-	const sdk = (await import(pathToFileURL(path.join(SDK_DIR, "sdk.mjs")).href)) as ClaudeSdk;
+	const sdkDir = claudeSdkDir();
+	if (!sdkDir) throw new Error("The Claude Agent SDK is not installed: `pi install npm:pi-claude-subscription` brings it (see the README).");
+	const sdk = (await import(pathToFileURL(path.join(sdkDir, "sdk.mjs")).href)) as ClaudeSdk;
 	const idle: AsyncIterable<never> = { [Symbol.asyncIterator]: () => ({ next: () => new Promise<IteratorResult<never>>(() => {}) }) };
 	const env: Record<string, string | undefined> = {
 		...process.env,
