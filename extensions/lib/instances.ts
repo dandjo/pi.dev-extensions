@@ -4,8 +4,9 @@
  *
  * Pi does not load this file as an extension: it sits in a subdirectory without index.ts. Extensions import it.
  *
- * - The file holds a list [{"url": "https://…", "token": "…"}, …], the first instance being the default, or a single
- *   {"url": …, "token": …} without the list.
+ * - The file holds {"instances": {"https://…": {"token": "…"}, …}}, a map from each instance's URL to its settings,
+ *   like mcpServers in Pi's mcp.json; the first instance is the default. Older forms are read as well: a list
+ *   [{"url": …, "token": …}, …] and a single {"url": …, "token": …}.
  * - token follows Pi's apiKey convention in models.json: a literal token, "$NAME" or "${NAME}" for an environment
  *   variable, or "!command" for the output of a shell command (a password manager); "$$" and "$!" are a literal $ and
  *   !. "tokenEnv": "NAME" is short for "token": "$NAME"; without either, the tool's default variable holds the token.
@@ -90,16 +91,12 @@ function parseToken(value: string): TokenSource {
 	return { type: "template", parts };
 }
 
-/** One instance of the file; where names it in errors ([1]), empty for the single-instance form. */
-function parseInstance(entry: unknown, where: string, defaultTokenEnv: string): ConfiguredInstance {
+const FORMAT = '{"instances": {"https://…": {"token": "…"}, …}}';
+
+/** One instance: its URL and its settings; where names it in errors (the URL, [1]), empty for a single instance. */
+function parseInstance(address: unknown, entry: Record<string, unknown>, where: string, defaultTokenEnv: string): ConfiguredInstance {
 	const prefix = where ? `${where}: ` : "";
-	if (!isObject(entry) || typeof entry.url !== "string" || !entry.url) {
-		throw new Error(
-			where
-				? `${prefix}expected {"url": "https://…", "token": "…"}`
-				: 'expected [{"url": "https://…", "token": "…"}, …] or a single {"url": "https://…", "token": "…"}',
-		);
-	}
+	if (typeof address !== "string" || !address) throw new Error(`${prefix}expected the URL of the instance`);
 	if (entry.token !== undefined && entry.tokenEnv !== undefined) throw new Error(`${prefix}give either token or tokenEnv, not both`);
 	if (entry.token !== undefined && (typeof entry.token !== "string" || !entry.token.trim())) {
 		throw new Error(`${prefix}token must be a token, "$NAME" for an environment variable, or "!command"`);
@@ -119,14 +116,37 @@ function parseInstance(entry: unknown, where: string, defaultTokenEnv: string): 
 	}
 	let url: URL;
 	try {
-		url = new URL(entry.url);
+		url = new URL(address);
 	} catch {
-		throw new Error(`${prefix}${entry.url} is not a URL`);
+		throw new Error(`${prefix}${address} is not a URL`);
 	}
 	const local = ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname);
 	if (url.protocol !== "https:" && !(url.protocol === "http:" && local)) throw new Error(`${prefix}the url must use https`);
 	const basePath = url.pathname.replace(/\/+$/, "");
 	return { name: url.host + basePath, origin: url.origin, base: url.origin + basePath, basePath, token };
+}
+
+/** The instances of a parsed config file in the order they are written: the map, or one of the older forms. */
+function parseConfig(config: unknown, defaultTokenEnv: string): ConfiguredInstance[] {
+	if (isObject(config) && config.instances !== undefined) {
+		if (!isObject(config.instances)) throw new Error(`instances must be a map from URL to settings: ${FORMAT}`);
+		const entries = Object.entries(config.instances);
+		if (entries.length === 0) throw new Error("instances is empty");
+		return entries.map(([address, entry]) => {
+			if (!isObject(entry)) throw new Error(`${address}: expected the settings of the instance, {"token": "…"}`);
+			if (entry.url !== undefined) throw new Error(`${address}: the URL is the key; leave url out`);
+			return parseInstance(address, entry, address, defaultTokenEnv);
+		});
+	}
+	if (Array.isArray(config)) {
+		if (config.length === 0) throw new Error("the list of instances is empty");
+		return config.map((entry, index) => {
+			if (!isObject(entry)) throw new Error(`[${index}]: expected {"url": "https://…", "token": "…"}`);
+			return parseInstance(entry.url, entry, `[${index}]`, defaultTokenEnv);
+		});
+	}
+	if (isObject(config) && config.url !== undefined) return [parseInstance(config.url, config, "", defaultTokenEnv)];
+	throw new Error(`expected ${FORMAT}`);
 }
 
 /**
@@ -145,11 +165,7 @@ export function loadInstances<Paths extends object>(
 		return undefined;
 	}
 	try {
-		const config = JSON.parse(text) as unknown;
-		if (Array.isArray(config) && config.length === 0) throw new Error("the list of instances is empty");
-		const instances = Array.isArray(config)
-			? config.map((entry, index) => parseInstance(entry, `[${index}]`, defaultTokenEnv))
-			: [parseInstance(config, "", defaultTokenEnv)];
+		const instances = parseConfig(JSON.parse(text) as unknown, defaultTokenEnv);
 		const names = new Set<string>();
 		for (const instance of instances) {
 			if (names.has(instance.name)) throw new Error(`${instance.name} is configured twice`);

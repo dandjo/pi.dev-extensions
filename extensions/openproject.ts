@@ -2,10 +2,9 @@
  * OpenProject: the openproject tool, which calls the API v3 (and the BCF API 2.1) of one or more OpenProject instances,
  * each with its own personal API token.
  *
- * - The instances come from ~/.pi/agent/openproject.json, read like gitlab.json by lib/instances.ts:
- *   [{"url": "https://openproject.example.com", "token": "$OPENPROJECT_API_TOKEN"}, …], the first instance being the
- *   default; a single {"url": …, "token": …} without the list works as well. Without that file the tool is not
- *   registered. With several instances the tool takes host, the instance's host (with its path, if OpenProject is
+ * - The instances come from ~/.pi/agent/openproject.json, read like gitlab.json by lib/instances.ts: a map from each
+ *   instance's URL to its settings, {"instances": {"https://openproject.example.com": {"token":
+ *   "$OPENPROJECT_API_TOKEN"}, …}}, the first instance being the default. Without that file the tool is not registered. With several instances the tool takes host, the instance's host (with its path, if OpenProject is
  *   served below one), and a full URL in path picks its instance by itself.
  * - token follows Pi's apiKey convention in models.json: a literal token, "$NAME" or "${NAME}" for an environment
  *   variable, or "!command" for the output of a shell command (a password manager). "tokenEnv": "NAME" is short for

@@ -342,15 +342,18 @@ topics and viewpoints). `/spec.json` returns the instance's own description
 of the API v3.
 
 - The instances come from `~/.pi/agent/openproject.json`, read the same way as
-  [gitlab](#gitlab)'s `gitlab.json` (`lib/instances.ts` does both): a list with
-  a URL and a token for each, the first being the default, or a single
-  `{"url": …, "token": …}`. Without the file the tool is not registered.
+  [gitlab](#gitlab)'s `gitlab.json` (`lib/instances.ts` does both): under
+  `instances`, a map from each instance's URL to its settings, like
+  `mcpServers` in Pi's `mcp.json`; the first is the default. Without the file
+  the tool is not registered.
 
   ```json
-  [
-    { "url": "https://openproject.example.com", "token": "$OPENPROJECT_API_TOKEN" },
-    { "url": "https://community.openproject.org", "token": "!op read op://Private/OpenProject/token" }
-  ]
+  {
+    "instances": {
+      "https://openproject.example.com": { "token": "$OPENPROJECT_API_TOKEN" },
+      "https://community.openproject.org": { "token": "!op read op://Private/OpenProject/token" }
+    }
+  }
   ```
 
 - `token` reads like `apiKey` in Pi's `models.json`: the token itself,
@@ -432,15 +435,19 @@ instances as you: issues, merge requests, notes, pipelines, job logs,
 repository files, projects, groups, and whatever else the API offers, read and
 written with your permissions.
 
-- The instances come from `~/.pi/agent/gitlab.json`, a list with a URL and a
-  token for each; the first is the default. A single `{"url": …, "token": …}`
-  without the list works as well. Without the file the tool is not registered.
+- The instances come from `~/.pi/agent/gitlab.json`: under `instances`, a map
+  from each instance's URL to its settings, like `mcpServers` in Pi's
+  `mcp.json`; the first is the default. Without the file the tool is not
+  registered. The forms of earlier versions, a list of `{"url", "token"}` and a
+  single `{"url", "tokenEnv"}`, are still read.
 
   ```json
-  [
-    { "url": "https://gitlab.example.com", "token": "$GITLAB_TOKEN" },
-    { "url": "https://gitlab.com", "token": "!op read op://Private/GitLab/token" }
-  ]
+  {
+    "instances": {
+      "https://gitlab.example.com": { "token": "$GITLAB_TOKEN" },
+      "https://gitlab.com": { "token": "!op read op://Private/GitLab/token" }
+    }
+  }
   ```
 
 - `token` reads like `apiKey` in Pi's `models.json`: the token itself,

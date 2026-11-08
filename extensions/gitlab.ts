@@ -2,9 +2,9 @@
  * GitLab: the gitlab tool, which calls the REST API v4 and the GraphQL API of one or more GitLab instances, each with
  * its own personal access token.
  *
- * - The instances come from ~/.pi/agent/gitlab.json: [{"url": "https://gitlab.example.com", "token": "$GITLAB_TOKEN"},
- *   …], the first instance being the default; a single {"url": …, "token": …} without the list works as well. Without
- *   that file the tool is not registered. With several instances the tool takes host, the instance's host (with its
+ * - The instances come from ~/.pi/agent/gitlab.json, a map from each instance's URL to its settings like mcpServers in
+ *   mcp.json: {"instances": {"https://gitlab.example.com": {"token": "$GITLAB_TOKEN"}, …}}, the first instance being the
+ *   default. Without that file the tool is not registered. With several instances the tool takes host, the instance's host (with its
  *   path, if GitLab is served below one), and a full URL in path picks its instance by itself.
  * - token follows Pi's apiKey convention in models.json: a literal token, "$NAME" or "${NAME}" for an environment
  *   variable, or "!command" for the output of a shell command (a password manager); "$$" and "$!" are a literal $ and !.
