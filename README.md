@@ -18,7 +18,7 @@ belongs at `~/.pi/agent/extensions/<name>.ts`.
 | `statusline.ts`            | Replaces Pi's footer with a Claude Code style status line, for any provider               | —                                                                |
 | `claude-usage.ts`          | Adds the Claude subscription limits and usage credits to the status line                  | `statusline.ts`, a Claude subscription login (Pi or Claude Code) |
 | `web-tools.ts`             | Adds `web_fetch`: reads a page locally and lets a small model answer from it              | —                                                                |
-| `openproject.ts`           | Adds `openproject`: reads and changes OpenProject through its API v3, as you              | An OpenProject API token in `OPENPROJECT_API_TOKEN`              |
+| `openproject.ts`           | Adds `openproject`: reads and changes OpenProject through its API v3, as you              | An OpenProject API token for each instance                       |
 | `gitlab.ts`                | Adds `gitlab`: reads and changes GitLab through its REST API v4 and GraphQL, as you       | A GitLab personal access token for each instance                 |
 | `claude-memory.ts`         | Puts Claude Code's auto memory of the current project into the system prompt              | Claude Code memory under `~/.claude/projects/`                   |
 | `session-title.ts`         | Names each session after its first prompt and shows it in the terminal title              | —                                                                |
@@ -41,8 +41,9 @@ belongs at `~/.pi/agent/extensions/<name>.ts`.
 between Pi's and Claude Code's tool names and inputs, `overlay.ts` draws the
 overlays, `meter.ts` draws the bars of the status line, `transcript.ts`
 turns the conversation into text for `/btw` and `/goal`, `qr.ts` draws the
-QR code of `/remote-control`, and `claude-login.ts` has Claude Code renew its
-login once it has run out. `web_search` comes from the npm package `pi-web-access`; see
+QR code of `/remote-control`, `claude-login.ts` has Claude Code renew its
+login once it has run out, and `instances.ts` reads the instances and tokens
+of `openproject.json` and `gitlab.json`. `web_search` comes from the npm package `pi-web-access`; see
 [Web search](#web-search).
 
 ## Set up Pi
@@ -332,25 +333,43 @@ enters the conversation, not the page.
 ## openproject
 
 Registers `openproject`, a tool that calls the
-[API v3](https://www.openproject.org/docs/api/) of an OpenProject instance as
-you: work packages, comments, relations, time entries, versions, projects,
-meetings with their agenda items and sections, attachments up and down, and
-whatever else the API offers, read and written with your permissions. Paths
-below `/api/bcf/2.1` reach the instance's BCF API (BIM topics and viewpoints).
-`/spec.json` returns the instance's own description of the API v3.
+[API v3](https://www.openproject.org/docs/api/) of one or more OpenProject
+instances as you: work packages, comments, relations, time entries, versions,
+projects, meetings with their agenda items and sections, attachments up and
+down, and whatever else the API offers, read and written with your
+permissions. Paths below `/api/bcf/2.1` reach the instance's BCF API (BIM
+topics and viewpoints). `/spec.json` returns the instance's own description
+of the API v3.
 
-- The instance comes from `~/.pi/agent/openproject.json`, as
-  `{"url": "https://openproject.example.com"}`. Without the file the tool is not
-  registered.
-- The token is a personal API token (in OpenProject: My account → Access
-  tokens → API token) in the environment variable `OPENPROJECT_API_TOKEN`,
-  read at every call. Pi must start with it set: export it in your shell
-  profile or in `~/.pam_environment`, which applies only after the next
-  login.
-- The token goes only to the configured instance. Paths and links outside its
+- The instances come from `~/.pi/agent/openproject.json`, read the same way as
+  [gitlab](#gitlab)'s `gitlab.json` (`lib/instances.ts` does both): a list with
+  a URL and a token for each, the first being the default, or a single
+  `{"url": …, "token": …}`. Without the file the tool is not registered.
+
+  ```json
+  [
+    { "url": "https://openproject.example.com", "token": "$OPENPROJECT_API_TOKEN" },
+    { "url": "https://community.openproject.org", "token": "!op read op://Private/OpenProject/token" }
+  ]
+  ```
+
+- `token` reads like `apiKey` in Pi's `models.json`: the token itself,
+  `"$NAME"` or `"${NAME}"` for an environment variable, or `"!command"` for
+  the output of a shell command. `"tokenEnv": "NAME"` is short for
+  `"token": "$NAME"`; without either, the token is `$OPENPROJECT_API_TOKEN`.
+  It is a personal API token (in OpenProject: My account → Access tokens → API
+  token). An environment variable is read at every call, and Pi must start
+  with it set; a command runs at the first call of a session and runs again
+  after a 401; a token written into the file draws a warning while others can
+  read it. [gitlab](#gitlab) has the details.
+- With several instances the tool takes `host`, the host of the instance;
+  without it, a call goes to the first. A full URL in `path` picks its
+  instance by itself. The hrefs in responses are paths, so following one on
+  another instance needs `host` again.
+- Each token goes only to its instance. Paths and links outside the instance's
   `/api/v3` and `/api/bcf/2.1` are refused, a redirect to another host
-  (attachment storage) is followed without the token, and the token never
-  appears in a result. API v3 gets it as a Bearer token; the BCF API accepts an
+  (attachment storage, another instance) is followed without the token, and
+  the token never appears in a result. API v3 gets it as a Bearer token; the BCF API accepts an
   API token only as Basic `apikey:<token>` (Bearer there means OAuth), so its
   requests send it that way.
 - No MCP: OpenProject's own MCP server (`/mcp`, since 17.2) is an Enterprise

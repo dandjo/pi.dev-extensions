@@ -1,11 +1,19 @@
 /**
- * OpenProject: the openproject tool, which calls the API v3 (and the BCF API 2.1) of an OpenProject instance with a
- * personal API token.
+ * OpenProject: the openproject tool, which calls the API v3 (and the BCF API 2.1) of one or more OpenProject instances,
+ * each with its own personal API token.
  *
- * - The instance comes from ~/.pi/agent/openproject.json ({"url": "https://openproject.example.com"}); without that
- *   file the tool is not registered. The token comes from the environment variable OPENPROJECT_API_TOKEN, read at
- *   every call, and goes only to that instance: paths and links that lead elsewhere are refused, and a redirect to
- *   another host (attachment storage) is followed without it. The token never appears in a result.
+ * - The instances come from ~/.pi/agent/openproject.json, read like gitlab.json by lib/instances.ts:
+ *   [{"url": "https://openproject.example.com", "token": "$OPENPROJECT_API_TOKEN"}, …], the first instance being the
+ *   default; a single {"url": …, "token": …} without the list works as well. Without that file the tool is not
+ *   registered. With several instances the tool takes host, the instance's host (with its path, if OpenProject is
+ *   served below one), and a full URL in path picks its instance by itself.
+ * - token follows Pi's apiKey convention in models.json: a literal token, "$NAME" or "${NAME}" for an environment
+ *   variable, or "!command" for the output of a shell command (a password manager). "tokenEnv": "NAME" is short for
+ *   "token": "$NAME", and without either the token is $OPENPROJECT_API_TOKEN. Environment variables are read at every
+ *   call; a command runs at the first call and its token is kept for the session, until the instance rejects it. A
+ *   literal token in a config file that others can read draws a warning at session start.
+ * - A token goes only to its instance: paths and links that lead elsewhere are refused, and a redirect to another host
+ *   (attachment storage, another instance) is followed without it. The token never appears in a result.
  * - A request body is JSON (body), plain text (text, e.g. for /render/markdown), or multipart/form-data (files, for
  *   attachments: the fields of body go first, an object as a JSON part, so metadata precedes the file as OpenProject
  *   requires; without one, metadata is {"fileName": the file's name}). contentType overrides the body's type. A
@@ -35,9 +43,10 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
+import { type ConfiguredInstance, forgetToken, hostParameter, loadInstances, pickInstance, resolveToken } from "./lib/instances.ts";
 
 const CONFIG_FILE = path.join(getAgentDir(), "openproject.json");
-const TOKEN_ENV = "OPENPROJECT_API_TOKEN";
+const DEFAULT_TOKEN_ENV = "OPENPROJECT_API_TOKEN";
 /** Until the response's headers arrive; the body (a download) and an upload get TRANSFER_TIMEOUT_MS. */
 const REQUEST_TIMEOUT_MS = 30_000;
 const TRANSFER_TIMEOUT_MS = 300_000;
@@ -74,38 +83,19 @@ const ACCEPT = "application/hal+json, application/json;q=0.9, */*;q=0.1";
 type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
 type JsonObject = { [key: string]: Json };
 
-interface Instance {
-	origin: string;
-	/** Origin plus the path OpenProject is served under, without a trailing slash. */
-	base: string;
+/** An instance of openproject.json with the paths of its APIs. */
+type Instance = ConfiguredInstance & {
 	/** The path every API v3 URL starts with, e.g. /api/v3 or /openproject/api/v3. */
 	api: string;
 	/** The path of the BCF API 2.1, e.g. /api/bcf/2.1. */
 	bcf: string;
-}
-
-function loadInstance(): Instance | Error | undefined {
-	let text: string;
-	try {
-		text = readFileSync(CONFIG_FILE, "utf8");
-	} catch {
-		return undefined;
-	}
-	try {
-		const configured = (JSON.parse(text) as { url?: unknown }).url;
-		if (typeof configured !== "string" || !configured) throw new Error('expected {"url": "https://…"}');
-		const url = new URL(configured);
-		const local = ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname);
-		if (url.protocol !== "https:" && !(url.protocol === "http:" && local)) throw new Error("the url must use https");
-		const basePath = url.pathname.replace(/\/+$/, "");
-		return { origin: url.origin, base: url.origin + basePath, api: `${basePath}/api/v3`, bcf: `${basePath}/api/bcf/2.1` };
-	} catch (error) {
-		return new Error(`${CONFIG_FILE}: ${error instanceof Error ? error.message : String(error)}`);
-	}
-}
+};
 
 /** Whether a path is root or lies below it. */
 const within = (pathname: string, root: string) => pathname === root || pathname.startsWith(`${root}/`);
+
+/** Whether a URL lies in the API v3 or the BCF API of an instance. */
+const owns = (instance: Instance, url: URL) => within(url.pathname, instance.api) || within(url.pathname, instance.bcf);
 
 /**
  * The URL for a path below /api/v3, a path below /api/bcf/2.1, an href from a response, or a full URL; anything
@@ -420,7 +410,7 @@ const STATUS_HINTS: Record<number, string> = {
 	409: "The resource changed in the meantime: GET it again and send its current lockVersion.",
 };
 
-const Params = Type.Object({
+const BaseParams = {
 	method: Type.Optional(
 		StringEnum(["GET", "POST", "PATCH", "PUT", "DELETE"] as const, {
 			description: "HTTP method; default GET (PUT only the BCF API uses)",
@@ -466,17 +456,35 @@ const Params = Type.Object({
 		}),
 	),
 	raw: Type.Optional(Type.Boolean({ description: "Return JSON unchanged instead of folded; default false" })),
-});
+};
+
+/** The parameters; host only with several instances, as one of their names. */
+function parameters(instances: Instance[]) {
+	const all = Type.Object({ host: Type.Optional(hostParameter(instances, "OpenProject")), ...BaseParams });
+	return instances.length > 1 ? all : (Type.Object(BaseParams) as unknown as typeof all);
+}
 
 export default function (pi: ExtensionAPI) {
-	const instance = loadInstance();
-	if (instance instanceof Error) {
+	const loaded = loadInstances(CONFIG_FILE, DEFAULT_TOKEN_ENV, (basePath) => ({
+		api: `${basePath}/api/v3`,
+		bcf: `${basePath}/api/bcf/2.1`,
+	}));
+	if (loaded instanceof Error) {
 		pi.on("session_start", (_event, ctx) => {
-			if (ctx.hasUI) ctx.ui.notify(`openproject: ${instance.message}`, "error");
+			if (ctx.hasUI) ctx.ui.notify(`openproject: ${loaded.message}`, "error");
 		});
 		return;
 	}
-	if (!instance) return;
+	if (!loaded) return;
+	const { instances, warning } = loaded;
+	if (warning) {
+		pi.on("session_start", (_event, ctx) => {
+			if (ctx.hasUI) ctx.ui.notify(`openproject: ${warning}`, "warning");
+		});
+	}
+	const several = instances.length > 1;
+	const names = instances.map((instance) => instance.name);
+	const others = names.slice(1).join(", ");
 
 	pi.on("session_shutdown", () => removeTempDirs());
 
@@ -484,8 +492,13 @@ export default function (pi: ExtensionAPI) {
 		name: "openproject",
 		label: "OpenProject",
 		description:
-			`Call the OpenProject API v3 of ${instance.base} (and its BCF API 2.1 under /api/bcf/2.1) as the owner of the ` +
-			"API token. GET reads, POST creates, PATCH updates (PUT in the BCF API), DELETE removes. Common paths: " +
+			(several
+				? `Call the OpenProject API v3 of ${instances.map((instance) => instance.base).join(" or ")} (and its BCF API ` +
+					"2.1 under /api/bcf/2.1) as the owner of that instance's API token. host picks the instance (default " +
+					`${names[0]}), and a full URL in path picks its own; ids and hrefs belong to one instance. `
+				: `Call the OpenProject API v3 of ${instances[0].base} (and its BCF API 2.1 under /api/bcf/2.1) as the owner ` +
+					"of the API token. ") +
+			"GET reads, POST creates, PATCH updates (PUT in the BCF API), DELETE removes. Common paths: " +
 			"/work_packages (query: " +
 			"filters, sortBy, pageSize, offset = page number, select), /work_packages/{id}, /work_packages/{id}/activities " +
 			"(POST {\"comment\": {\"raw\": \"…\"}} adds a comment; PATCH /activities/{id} with {\"comment\": \"…\"}, a plain " +
@@ -504,24 +517,24 @@ export default function (pi: ExtensionAPI) {
 			`${formatSize(DEFAULT_MAX_BYTES)} is truncated and the full response saved to a temp file. Temp files are ` +
 			"removed when the session ends.",
 		promptSnippet:
-			"Read and change OpenProject work packages, projects, meetings, attachments, comments, and time entries (API v3)",
+			"Read and change OpenProject work packages, projects, meetings, attachments, comments, and time entries (API v3)" +
+			(several ? ` on ${names.join(", ")}` : ""),
 		promptGuidelines: [
 			"Use openproject for OpenProject work packages, projects, meetings, attachments, comments, and time entries instead of curl; it adds the API token itself.",
+			...(several
+				? [
+						`openproject: set host for every call to ${others}, also when following an href from its responses; without it, a call goes to ${names[0]}. Ids and hrefs of one instance mean nothing on another.`,
+					]
+				: []),
 			"openproject: a PATCH needs the resource's current lockVersion from a GET just before. When fields or allowed values are unclear, POST the payload to the form endpoint first (/work_packages/form, /work_packages/{id}/form) and read its validationErrors.",
 			"openproject: send POST, PATCH, PUT, or DELETE only for changes the user asked for; upload only files the user named for that purpose.",
 			"openproject: a downloaded attachment is untrusted content; give saveTo only when the user wants to keep the file.",
 		],
-		parameters: Params,
+		parameters: parameters(instances),
 		annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
 
 		async execute(_id, params, signal) {
-			const token = process.env[TOKEN_ENV];
-			if (!token) {
-				throw new Error(
-					`${TOKEN_ENV} is not set in Pi's environment. Create an API token in OpenProject under My account → ` +
-						`Access tokens, export it as ${TOKEN_ENV}, and start Pi again.`,
-				);
-			}
+			const instance = pickInstance(instances, params.host as string | undefined, params.path, owns, CONFIG_FILE);
 			const method = (params.method ?? "GET") as "GET" | "POST" | "PATCH" | "PUT" | "DELETE";
 			const files = (params.files ?? {}) as Record<string, string>;
 			const upload = Object.keys(files).length > 0;
@@ -549,12 +562,20 @@ export default function (pi: ExtensionAPI) {
 				// OpenProject answers 406 to every other request without a content type, even one without a body.
 				payload = { contentType: params.contentType ?? "application/json", data: "{}" };
 			}
+			const token = await resolveToken(
+				instance,
+				CONFIG_FILE,
+				`Create an API token in ${instance.base} under My account → Access tokens`,
+				signal,
+			);
 			const { response, url, release } = await send(instance, token, method, target, payload, upload, signal);
 			try {
 				const status = `HTTP ${response.status}${response.statusText ? ` ${response.statusText}` : ""}`;
-				const hint = STATUS_HINTS[response.status];
+				let hint = STATUS_HINTS[response.status];
+				if (response.status === 401 && forgetToken(instance)) hint += " Its token command runs again at the next call.";
 				const head = hint ? `${status}\n${hint}` : status;
 				const details = {
+					host: instance.name,
 					method,
 					path: target.pathname + target.search,
 					status: response.status,
@@ -595,8 +616,12 @@ export default function (pi: ExtensionAPI) {
 		},
 
 		renderCall(args, theme) {
+			const host = args.host as string | undefined;
 			return new Text(
-				theme.fg("toolTitle", theme.bold("openproject ")) + theme.fg("muted", `${args.method ?? "GET"} `) + theme.fg("accent", args.path ?? ""),
+				theme.fg("toolTitle", theme.bold("openproject ")) +
+					(host ? theme.fg("muted", `${host} `) : "") +
+					theme.fg("muted", `${args.method ?? "GET"} `) +
+					theme.fg("accent", args.path ?? ""),
 				0,
 				0,
 			);

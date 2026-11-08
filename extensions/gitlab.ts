@@ -11,6 +11,7 @@
  *   "tokenEnv": "NAME" is short for "token": "$NAME", and without either the token is $GITLAB_TOKEN. Environment
  *   variables are read at every call; a command runs at the first call and its token is kept for the session, until
  *   the instance rejects it. A literal token in a config file that others can read draws a warning at session start.
+ * - lib/instances.ts reads the file and the tokens; openproject.ts shares it, so both files work alike.
  * - A token goes only to its instance: paths and links that lead elsewhere are refused, and a redirect to another host
  *   (object storage, another instance) is followed without it.
  * - Secrets stay out of results, raw ones included: the token itself, fields named token or *_token (runners_token,
@@ -25,7 +26,6 @@
  *   along as form fields. Files go, like the token, only to the instance of the call.
  */
 
-import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { request as httpRequest } from "node:http";
@@ -45,12 +45,11 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
+import { type ConfiguredInstance, forgetToken, hostParameter, loadInstances, pickInstance, resolveToken } from "./lib/instances.ts";
 
 const CONFIG_FILE = path.join(getAgentDir(), "gitlab.json");
 const DEFAULT_TOKEN_ENV = "GITLAB_TOKEN";
 const REQUEST_TIMEOUT_MS = 30_000;
-/** A token command may wait this long for a password manager to be unlocked. */
-const TOKEN_COMMAND_TIMEOUT_MS = 30_000;
 const MAX_REDIRECTS = 5;
 const MAX_DOWNLOAD_BYTES = 100 * 1024 * 1024;
 const MAX_UPLOAD_BYTES = 100 * 1024 * 1024;
@@ -90,225 +89,18 @@ const CONTENT_PATH = /\/(raw|trace|artifacts|archive)(\/|\.|$)/;
 type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
 type JsonObject = { [key: string]: Json };
 
-interface Instance {
-	/** The host plus the path GitLab is served under, e.g. git.example.com or example.com/gitlab; what host names. */
-	name: string;
-	origin: string;
-	/** Origin plus the path GitLab is served under, without a trailing slash. */
-	base: string;
+/** An instance of gitlab.json with the paths of its APIs. */
+type Instance = ConfiguredInstance & {
 	/** The path every REST URL starts with, e.g. /api/v4 or /gitlab/api/v4. */
 	api: string;
 	/** The path of the GraphQL endpoint, e.g. /api/graphql. */
 	graphql: string;
-	token: TokenSource;
-}
-
-/** Where a token comes from: the output of a shell command, or literal text and environment variables. */
-type TokenSource =
-	| { type: "command"; command: string }
-	| { type: "template"; parts: Array<{ type: "literal"; value: string } | { type: "env"; name: string }> };
-
-const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
-
-/** A token setting as Pi reads apiKey in models.json: "!command", or text with $NAME, ${NAME}, $$, and $!. */
-function parseToken(value: string): TokenSource {
-	if (value.startsWith("!")) {
-		if (!value.slice(1).trim()) throw new Error("token: the command after ! is empty");
-		return { type: "command", command: value.slice(1) };
-	}
-	const parts: Array<{ type: "literal"; value: string } | { type: "env"; name: string }> = [];
-	const literal = (text: string) => {
-		const last = parts[parts.length - 1];
-		if (last?.type === "literal") last.value += text;
-		else if (text) parts.push({ type: "literal", value: text });
-	};
-	let index = 0;
-	while (index < value.length) {
-		const dollar = value.indexOf("$", index);
-		if (dollar < 0) {
-			literal(value.slice(index));
-			break;
-		}
-		literal(value.slice(index, dollar));
-		const next = value[dollar + 1];
-		if (next === "$" || next === "!") {
-			literal(next);
-			index = dollar + 2;
-			continue;
-		}
-		if (next === "{") {
-			const end = value.indexOf("}", dollar + 2);
-			const name = end < 0 ? "" : value.slice(dollar + 2, end);
-			if (ENV_NAME.test(name)) {
-				parts.push({ type: "env", name });
-				index = end + 1;
-				continue;
-			}
-		}
-		const name = value.slice(dollar + 1).match(/^[A-Za-z_][A-Za-z0-9_]*/)?.[0];
-		if (name) {
-			parts.push({ type: "env", name });
-			index = dollar + 1 + name.length;
-			continue;
-		}
-		literal("$");
-		index = dollar + 1;
-	}
-	return { type: "template", parts };
-}
-
-/** One instance of gitlab.json; where names it in errors ([1]), empty for the single-instance form. */
-function parseInstance(entry: unknown, where: string): Instance {
-	const prefix = where ? `${where}: ` : "";
-	if (!isObject(entry) || typeof entry.url !== "string" || !entry.url) {
-		throw new Error(
-			where
-				? `${prefix}expected {"url": "https://…", "token": "…"}`
-				: 'expected [{"url": "https://…", "token": "…"}, …] or a single {"url": "https://…", "token": "…"}',
-		);
-	}
-	if (entry.token !== undefined && entry.tokenEnv !== undefined) throw new Error(`${prefix}give either token or tokenEnv, not both`);
-	if (entry.token !== undefined && (typeof entry.token !== "string" || !entry.token.trim())) {
-		throw new Error(`${prefix}token must be a token, "$NAME" for an environment variable, or "!command"`);
-	}
-	const tokenEnv = entry.tokenEnv ?? DEFAULT_TOKEN_ENV;
-	if (typeof tokenEnv !== "string" || !ENV_NAME.test(tokenEnv)) {
-		throw new Error(`${prefix}tokenEnv must be the name of an environment variable`);
-	}
-	let token: TokenSource;
-	try {
-		token =
-			typeof entry.token === "string"
-				? parseToken(entry.token.trim())
-				: { type: "template", parts: [{ type: "env", name: tokenEnv }] };
-	} catch (error) {
-		throw new Error(`${prefix}${error instanceof Error ? error.message : String(error)}`);
-	}
-	let url: URL;
-	try {
-		url = new URL(entry.url);
-	} catch {
-		throw new Error(`${prefix}${entry.url} is not a URL`);
-	}
-	const local = ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname);
-	if (url.protocol !== "https:" && !(url.protocol === "http:" && local)) throw new Error(`${prefix}the url must use https`);
-	const basePath = url.pathname.replace(/\/+$/, "");
-	return {
-		name: url.host + basePath,
-		origin: url.origin,
-		base: url.origin + basePath,
-		api: `${basePath}/api/v4`,
-		graphql: `${basePath}/api/graphql`,
-		token,
-	};
-}
-
-/** The configured instances, the default first, and a warning about the file; undefined without a config file. */
-function loadInstances(): { instances: Instance[]; warning?: string } | Error | undefined {
-	let text: string;
-	try {
-		text = readFileSync(CONFIG_FILE, "utf8");
-	} catch {
-		return undefined;
-	}
-	try {
-		const config = JSON.parse(text) as unknown;
-		if (Array.isArray(config) && config.length === 0) throw new Error("the list of instances is empty");
-		const instances = Array.isArray(config)
-			? config.map((entry, index) => parseInstance(entry, `[${index}]`))
-			: [parseInstance(config, "")];
-		const names = new Set<string>();
-		for (const instance of instances) {
-			if (names.has(instance.name)) throw new Error(`${instance.name} is configured twice`);
-			names.add(instance.name);
-		}
-		const literal = instances.filter(
-			(instance) => instance.token.type === "template" && instance.token.parts.some((part) => part.type === "literal"),
-		);
-		let warning: string | undefined;
-		if (literal.length > 0 && process.platform !== "win32" && (statSync(CONFIG_FILE).mode & 0o077) !== 0) {
-			const which = literal.map((instance) => instance.name).join(", ");
-			warning = `${CONFIG_FILE} holds the token of ${which} and others can read it: chmod 600 ${CONFIG_FILE}`;
-		}
-		return { instances, warning };
-	} catch (error) {
-		return new Error(`${CONFIG_FILE}: ${error instanceof Error ? error.message : String(error)}`);
-	}
-}
+};
 
 const within = (pathname: string, prefix: string) => pathname === prefix || pathname.startsWith(`${prefix}/`);
 
-/** The instance of a call: the one host names, else the one a full URL in path belongs to, else the default. */
-function pickInstance(instances: Instance[], host: string | undefined, target: string): Instance {
-	const names = instances.map((instance) => instance.name).join(", ");
-	if (host?.trim()) {
-		const wanted = host.trim().replace(/^https?:\/\//i, "").replace(/\/+$/, "").toLowerCase();
-		const found = instances.find((instance) => instance.name.toLowerCase() === wanted);
-		if (!found) throw new Error(`host ${host} is not configured in ${CONFIG_FILE} (configured: ${names})`);
-		return found;
-	}
-	const trimmed = target.trim();
-	if (instances.length > 1 && /^https?:\/\//i.test(trimmed)) {
-		const url = new URL(trimmed);
-		const found = instances.find(
-			(instance) => url.origin === instance.origin && (within(url.pathname, instance.api) || url.pathname === instance.graphql),
-		);
-		if (!found) throw new Error(`${target} is outside the API of every configured instance (${names})`);
-		return found;
-	}
-	return instances[0];
-}
-
-/** The tokens token commands printed, by command, kept for the session until an instance rejects one. */
-const commandTokens = new Map<string, string>();
-
-/** Runs a token command through /bin/sh, as Pi does for apiKey, and returns its trimmed output. */
-function runTokenCommand(command: string, instance: Instance, signal: AbortSignal | undefined): Promise<string> {
-	return new Promise((resolve, reject) => {
-		const fail = (why: string) => reject(new Error(`The token command of ${instance.name} in ${CONFIG_FILE} ${why}.`));
-		const child = spawn("/bin/sh", ["-c", command], {
-			stdio: ["ignore", "pipe", "ignore"],
-			timeout: TOKEN_COMMAND_TIMEOUT_MS,
-			signal,
-		});
-		const chunks: Buffer[] = [];
-		child.stdout.on("data", (chunk: Buffer) => chunks.push(chunk));
-		child.on("error", (error) => (signal?.aborted ? reject(error) : fail(`cannot run (${error.message})`)));
-		child.on("close", (code, killedBy) => {
-			if (code !== 0) {
-				return fail(
-					killedBy ? `was stopped (${killedBy}; it may run ${TOKEN_COMMAND_TIMEOUT_MS / 1000} s)` : `exited with status ${code}`,
-				);
-			}
-			const token = Buffer.concat(chunks).toString("utf8").trim();
-			if (!token) fail("printed no token");
-			else resolve(token);
-		});
-	});
-}
-
-/** The token of an instance, from the environment, the config, or its command; throws with what to fix. */
-async function resolveToken(instance: Instance, signal: AbortSignal | undefined): Promise<string> {
-	const source = instance.token;
-	let token: string;
-	if (source.type === "command") {
-		token = commandTokens.get(source.command) ?? (await runTokenCommand(source.command, instance, signal));
-		commandTokens.set(source.command, token);
-	} else {
-		const missing = source.parts.flatMap((part) => (part.type === "env" && !process.env[part.name] ? [part.name] : []));
-		if (missing.length > 0) {
-			throw new Error(
-				`${missing.join(" and ")} ${missing.length > 1 ? "are" : "is"} not set in Pi's environment, so ${instance.name} ` +
-					`has no token. Create a personal access token in ${instance.base} under User settings → Personal access ` +
-					`tokens (scope api, or read_api to read only), export it as ${missing[0]}, and start Pi again — or set ` +
-					`token in ${CONFIG_FILE} to the token itself or to a command that prints it ("!command").`,
-			);
-		}
-		token = source.parts.map((part) => (part.type === "literal" ? part.value : process.env[part.name])).join("");
-	}
-	if (/[\r\n]/.test(token)) throw new Error(`The token of ${instance.name} contains a line break.`);
-	return token;
-}
+/** Whether a URL lies in the REST or GraphQL API of an instance. */
+const owns = (instance: Instance, url: URL) => within(url.pathname, instance.api) || url.pathname === instance.graphql;
 
 /** Appends a query parameter the way GitLab reads it: arrays as key[]=…, objects as key[sub]=…. */
 function appendParam(params: URLSearchParams, key: string, value: unknown): void {
@@ -668,16 +460,15 @@ const BaseParams = {
 
 /** The parameters; host only with several instances, as one of their names. */
 function parameters(instances: Instance[]) {
-	const host = StringEnum(
-		instances.map((instance) => instance.name),
-		{ description: `The GitLab instance; default ${instances[0].name}. A full URL in path picks its instance by itself` },
-	);
-	const all = Type.Object({ host: Type.Optional(host), ...BaseParams });
+	const all = Type.Object({ host: Type.Optional(hostParameter(instances, "GitLab")), ...BaseParams });
 	return instances.length > 1 ? all : (Type.Object(BaseParams) as unknown as typeof all);
 }
 
 export default function (pi: ExtensionAPI) {
-	const loaded = loadInstances();
+	const loaded = loadInstances(CONFIG_FILE, DEFAULT_TOKEN_ENV, (basePath) => ({
+		api: `${basePath}/api/v4`,
+		graphql: `${basePath}/api/graphql`,
+	}));
 	if (loaded instanceof Error) {
 		pi.on("session_start", (_event, ctx) => {
 			if (ctx.hasUI) ctx.ui.notify(`gitlab: ${loaded.message}`, "error");
@@ -743,7 +534,7 @@ export default function (pi: ExtensionAPI) {
 		annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
 
 		async execute(_id, params, signal) {
-			const instance = pickInstance(instances, params.host as string | undefined, params.path);
+			const instance = pickInstance(instances, params.host as string | undefined, params.path, owns, CONFIG_FILE);
 			const method = (params.method ?? "GET") as "GET" | "POST" | "PUT" | "DELETE";
 			if (params.body !== undefined && (method === "GET" || method === "DELETE")) {
 				throw new Error(`a ${method} request takes no body; send its parameters as query`);
@@ -758,10 +549,15 @@ export default function (pi: ExtensionAPI) {
 					: params.body !== undefined
 						? { contentType: "application/json", data: JSON.stringify(params.body) }
 						: undefined;
-			const token = await resolveToken(instance, signal);
+			const token = await resolveToken(
+				instance,
+				CONFIG_FILE,
+				`Create a personal access token in ${instance.base} under User settings → Personal access tokens (scope api, or read_api to read only)`,
+				signal,
+			);
 			const { response, url } = await send(instance, token, method, target, payload, signal);
 			const mask = (text: string) => text.split(token).join(REDACTED);
-			if (response.status === 401 && instance.token.type === "command") commandTokens.delete(instance.token.command);
+			const rerun = response.status === 401 && forgetToken(instance);
 
 			const graphql = target.pathname === instance.graphql;
 			const content = !graphql && CONTENT_PATH.test(target.pathname);
@@ -770,7 +566,7 @@ export default function (pi: ExtensionAPI) {
 			let hint = STATUS_HINTS[response.status];
 			const retryAfter = response.headers.get("retry-after");
 			if (response.status === 429 && retryAfter) hint += ` Retry after ${retryAfter} seconds.`;
-			if (response.status === 401 && instance.token.type === "command") hint += " Its token command runs again at the next call.";
+			if (rerun) hint += " Its token command runs again at the next call.";
 			const page = pagination(response, instance !== instances[0]);
 			const head = [status, hint, page].filter(Boolean).join("\n");
 			const details = {
