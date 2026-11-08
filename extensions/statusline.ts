@@ -19,7 +19,6 @@ import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { CustomEditor, type ExtensionAPI, type Theme } from "@earendil-works/pi-coding-agent";
 import { type TuiMouseEvent, type TuiMouseEventResult, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import * as os from "node:os";
-import { meter, separator } from "./lib/meter.ts";
 
 const INDENT = " ";
 const TICK_MS = 10_000;
@@ -85,6 +84,29 @@ function borderLabel(): BorderLabel | undefined {
 		return original.call(this, width - visibleWidth(shown) - tail.length, hiddenLineCount) + shown + color(tail);
 	};
 	return label;
+}
+
+/**
+ * The bars of the status line: a label, a bar coloured by how full it is, and the percentage. statusline.ts draws its
+ * context row with it, claude-usage.ts its limit rows.
+ *
+ * claude-usage.ts carries a copy of this block, or of a part of it: change them alike.
+ */
+const BAR_WIDTH = 20;
+const LABEL_WIDTH = 7;
+
+/** "Context ████████░░░░░░░░░░░░  42%"; a null percentage draws an empty bar with "?%". */
+function meter(theme: Theme, label: string, pct: number | null): string {
+	const head = label.padEnd(LABEL_WIDTH) + " ";
+	if (pct === null) return head + theme.fg("dim", "░".repeat(BAR_WIDTH)) + theme.fg("dim", "   ?%");
+	const p = Math.max(0, Math.round(pct));
+	const color = p >= 90 ? "error" : p >= 70 ? "warning" : "success";
+	const filled = Math.min(BAR_WIDTH, Math.floor((p * BAR_WIDTH) / 100));
+	return head + theme.fg(color, "█".repeat(filled)) + theme.fg("dim", "░".repeat(BAR_WIDTH - filled)) + ` ${String(p).padStart(3)}%`;
+}
+
+function separator(theme: Theme): string {
+	return theme.fg("dim", " | ");
 }
 
 export default function (pi: ExtensionAPI) {

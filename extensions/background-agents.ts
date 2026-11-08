@@ -49,9 +49,6 @@ import {
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { bodyRows, frame, scrollKey, viewport } from "./lib/overlay.ts";
-import type { ScheduledTaskView } from "./scheduled-tasks.ts";
-import type { SubagentView } from "./subagents.ts";
 
 const SESSIONS_ROOT = path.join(getAgentDir(), "subagents");
 const WIDGET_KEY = "background-agents";
@@ -176,6 +173,78 @@ function transcriptLines(file: string, width: number, theme: Theme): string[] {
 }
 
 // --- Extension -----------------------------------------------------------------------------------------------------------------
+
+/**
+ * Framed, scrollable boxes for the extensions that show more than a notification can hold: overlays for /hooks,
+ * /agents, and /cron, and the frame and scrolling of the boxes /btw and the /diff dialog show above the prompt.
+ *
+ * btw.ts, claude-hooks.ts, claude-remote-control.ts, diff.ts, scheduled-tasks.ts, subagents.ts carry a copy of this
+ * block, or of a part of it: change them alike.
+ */
+/** Rows the body of an overlay may use: the overlay's height cap minus the frame and help lines. */
+function bodyRows(tui: TUI): number {
+	return Math.max(3, Math.floor(tui.terminal.rows * 0.9) - 4);
+}
+
+/** Draws a rounded frame around `body`, with `title` in the top edge and `help` under it. */
+function frame(theme: Theme, width: number, title: string, body: string[], help: string): string[] {
+	const inner = Math.max(1, width - 4);
+	const border = (s: string) => theme.fg("border", s);
+	const head = truncateToWidth(` ${title} `, Math.max(1, width - 4), "…");
+	const lines = [border("╭─") + theme.fg("accent", head) + border(`${"─".repeat(Math.max(0, width - 3 - visibleWidth(head)))}╮`)];
+	for (const line of body) lines.push(`${border("│")} ${truncateToWidth(line, inner, "…", true)} ${border("│")}`);
+	lines.push(border(`╰${"─".repeat(Math.max(0, width - 2))}╯`));
+	lines.push(truncateToWidth(theme.fg("dim", ` ${help}`), width));
+	return lines;
+}
+
+/** Moves `offset` for the scroll keys; returns the new offset, or undefined when `data` is no scroll key. */
+function scrollKey(data: string, offset: number, total: number, rows: number): number | undefined {
+	const max = Math.max(0, total - rows);
+	if (matchesKey(data, Key.up) || data === "k") return Math.max(0, offset - 1);
+	if (matchesKey(data, Key.down) || data === "j") return Math.min(max, offset + 1);
+	if (matchesKey(data, Key.pageUp)) return Math.max(0, offset - rows);
+	if (matchesKey(data, Key.pageDown) || data === " ") return Math.min(max, offset + rows);
+	if (matchesKey(data, Key.home) || data === "g") return 0;
+	if (matchesKey(data, Key.end) || data === "G") return max;
+	return undefined;
+}
+
+/** The visible slice of `lines`, padded to `rows` so the frame keeps its height while scrolling. */
+function viewport(lines: string[], offset: number, rows: number): string[] {
+	const visible = lines.slice(offset, offset + rows);
+	return lines.length > rows ? [...visible, ...Array(Math.max(0, rows - visible.length)).fill("")] : visible;
+}
+
+// A copy of ScheduledTaskView from scheduled-tasks.ts, the event-bus contract between the two: change both alike.
+/** A scheduled task as other extensions see it (scheduled-tasks:state). */
+interface ScheduledTaskView {
+	id: string;
+	kind: "recurring" | "one-shot" | "loop wakeup";
+	/** The schedule in words where it has a common shape ("daily at 11:00"), else the cron expression. */
+	schedule: string;
+	nextRun: number;
+	/** nextRun as the status line shows it. */
+	next: string;
+	prompt: string;
+}
+
+// A copy of SubagentView from subagents.ts, the event-bus contract between the two: change both alike.
+/** What other extensions see of a subagent ("subagents:state" on the event bus). */
+interface SubagentView {
+	agentId: string;
+	type: string;
+	description: string;
+	status: "running" | "completed" | "failed" | "aborted";
+	background: boolean;
+	model: string;
+	startedAt: number;
+	durationMs?: number;
+	tokens: number;
+	toolCount: number;
+	lastTool?: string;
+	error?: string;
+}
 
 export default function (pi: ExtensionAPI) {
 	if (process.env.PI_SUBAGENT_DEPTH) return;

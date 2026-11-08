@@ -2,10 +2,11 @@
  * OpenProject: the openproject tool, which calls the API v3 (and the BCF API 2.1) of one or more OpenProject instances,
  * each with its own personal API token.
  *
- * - The instances come from ~/.pi/agent/openproject.json, read like gitlab.json by lib/instances.ts: a map from each
- *   instance's URL to its settings, {"instances": {"https://openproject.example.com": {"token":
- *   "$OPENPROJECT_API_TOKEN"}, …}}, the first instance being the default. Without that file the tool is not registered. With several instances the tool takes host, the instance's host (with its path, if OpenProject is
- *   served below one), and a full URL in path picks its instance by itself.
+ * - The instances come from ~/.pi/agent/openproject.json, read like gitlab.json (gitlab.ts has a copy of the same
+ *   code): a map from each instance's URL to its settings, {"instances": {"https://openproject.example.com": {"token":
+ *   "$OPENPROJECT_API_TOKEN"}, …}}, the first instance being the default. Without that file the tool is not registered.
+ *   With several instances the tool takes host, the instance's host (with its path, if OpenProject is served below
+ *   one), and a full URL in path picks its instance by itself.
  * - token follows Pi's apiKey convention in models.json: a literal token, "$NAME" or "${NAME}" for an environment
  *   variable, or "!command" for the output of a shell command (a password manager). "tokenEnv": "NAME" is short for
  *   "token": "$NAME", and without either the token is $OPENPROJECT_API_TOKEN. Environment variables are read at every
@@ -42,7 +43,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import { type ConfiguredInstance, forgetToken, hostParameter, loadInstances, pickInstance, resolveToken } from "./lib/instances.ts";
+import { spawn } from "node:child_process";
 
 const CONFIG_FILE = path.join(getAgentDir(), "openproject.json");
 const DEFAULT_TOKEN_ENV = "OPENPROJECT_API_TOKEN";
@@ -461,6 +462,289 @@ const BaseParams = {
 function parameters(instances: Instance[]) {
 	const all = Type.Object({ host: Type.Optional(hostParameter(instances, "OpenProject")), ...BaseParams });
 	return instances.length > 1 ? all : (Type.Object(BaseParams) as unknown as typeof all);
+}
+
+/**
+ * The instances of a tool's config file and their tokens, shared by gitlab.ts (gitlab.json) and openproject.ts
+ * (openproject.json).
+ *
+ * - The file holds {"instances": {"https://…": {"token": "…"}, …}}, a map from each instance's URL to its settings,
+ *   like mcpServers in Pi's mcp.json; the first instance is the default. Older forms are read as well: a list
+ *   [{"url": …, "token": …}, …] and a single {"url": …, "token": …}.
+ * - token follows Pi's apiKey convention in models.json: a literal token, "$NAME" or "${NAME}" for an environment
+ *   variable, or "!command" for the output of a shell command (a password manager); "$$" and "$!" are a literal $ and
+ *   !. "tokenEnv": "NAME" is short for "token": "$NAME"; without either, the tool's default variable holds the token.
+ * - Environment variables are read at every call. A command runs through /bin/sh at the first call and its token is
+ *   kept for the session, until the instance rejects it (forgetToken).
+ * - A literal token in a config file that others can read draws a warning.
+ * - An instance is named by its host plus the path it is served under (git.example.com, example.com/gitlab): the
+ *   value of the tools' host parameter.
+ *
+ * gitlab.ts carries a copy of this block, or of a part of it: change them alike.
+ */
+/** A token command may wait this long for a password manager to be unlocked. */
+const TOKEN_COMMAND_TIMEOUT_MS = 30_000;
+const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+type TokenPart = { type: "literal"; value: string } | { type: "env"; name: string };
+
+/** Where a token comes from: the output of a shell command, or literal text and environment variables. */
+type TokenSource = { type: "command"; command: string } | { type: "template"; parts: TokenPart[] };
+
+interface ConfiguredInstance {
+	/** The host plus the path the application is served under, e.g. git.example.com or example.com/gitlab. */
+	name: string;
+	origin: string;
+	/** Origin plus the path the application is served under, without a trailing slash. */
+	base: string;
+	/** The path the application is served under, without a trailing slash; empty at the root. */
+	basePath: string;
+	token: TokenSource;
+}
+
+/** A token setting as Pi reads apiKey in models.json: "!command", or text with $NAME, ${NAME}, $$, and $!. */
+function parseToken(value: string): TokenSource {
+	if (value.startsWith("!")) {
+		if (!value.slice(1).trim()) throw new Error("token: the command after ! is empty");
+		return { type: "command", command: value.slice(1) };
+	}
+	const parts: TokenPart[] = [];
+	const literal = (text: string) => {
+		const last = parts[parts.length - 1];
+		if (last?.type === "literal") last.value += text;
+		else if (text) parts.push({ type: "literal", value: text });
+	};
+	let index = 0;
+	while (index < value.length) {
+		const dollar = value.indexOf("$", index);
+		if (dollar < 0) {
+			literal(value.slice(index));
+			break;
+		}
+		literal(value.slice(index, dollar));
+		const next = value[dollar + 1];
+		if (next === "$" || next === "!") {
+			literal(next);
+			index = dollar + 2;
+			continue;
+		}
+		if (next === "{") {
+			const end = value.indexOf("}", dollar + 2);
+			const name = end < 0 ? "" : value.slice(dollar + 2, end);
+			if (ENV_NAME.test(name)) {
+				parts.push({ type: "env", name });
+				index = end + 1;
+				continue;
+			}
+		}
+		const name = value.slice(dollar + 1).match(/^[A-Za-z_][A-Za-z0-9_]*/)?.[0];
+		if (name) {
+			parts.push({ type: "env", name });
+			index = dollar + 1 + name.length;
+			continue;
+		}
+		literal("$");
+		index = dollar + 1;
+	}
+	return { type: "template", parts };
+}
+
+const FORMAT = '{"instances": {"https://…": {"token": "…"}, …}}';
+
+/** One instance: its URL and its settings; where names it in errors (the URL, [1]), empty for a single instance. */
+function parseInstance(address: unknown, entry: Record<string, unknown>, where: string, defaultTokenEnv: string): ConfiguredInstance {
+	const prefix = where ? `${where}: ` : "";
+	if (typeof address !== "string" || !address) throw new Error(`${prefix}expected the URL of the instance`);
+	if (entry.token !== undefined && entry.tokenEnv !== undefined) throw new Error(`${prefix}give either token or tokenEnv, not both`);
+	if (entry.token !== undefined && (typeof entry.token !== "string" || !entry.token.trim())) {
+		throw new Error(`${prefix}token must be a token, "$NAME" for an environment variable, or "!command"`);
+	}
+	const tokenEnv = entry.tokenEnv ?? defaultTokenEnv;
+	if (typeof tokenEnv !== "string" || !ENV_NAME.test(tokenEnv)) {
+		throw new Error(`${prefix}tokenEnv must be the name of an environment variable`);
+	}
+	let token: TokenSource;
+	try {
+		token =
+			typeof entry.token === "string"
+				? parseToken(entry.token.trim())
+				: { type: "template", parts: [{ type: "env", name: tokenEnv }] };
+	} catch (error) {
+		throw new Error(`${prefix}${error instanceof Error ? error.message : String(error)}`);
+	}
+	let url: URL;
+	try {
+		url = new URL(address);
+	} catch {
+		throw new Error(`${prefix}${address} is not a URL`);
+	}
+	const local = ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname);
+	if (url.protocol !== "https:" && !(url.protocol === "http:" && local)) throw new Error(`${prefix}the url must use https`);
+	const basePath = url.pathname.replace(/\/+$/, "");
+	return { name: url.host + basePath, origin: url.origin, base: url.origin + basePath, basePath, token };
+}
+
+/** The instances of a parsed config file in the order they are written: the map, or one of the older forms. */
+function parseConfig(config: unknown, defaultTokenEnv: string): ConfiguredInstance[] {
+	if (isObject(config) && config.instances !== undefined) {
+		if (!isObject(config.instances)) throw new Error(`instances must be a map from URL to settings: ${FORMAT}`);
+		const entries = Object.entries(config.instances);
+		if (entries.length === 0) throw new Error("instances is empty");
+		return entries.map(([address, entry]) => {
+			if (!isObject(entry)) throw new Error(`${address}: expected the settings of the instance, {"token": "…"}`);
+			if (entry.url !== undefined) throw new Error(`${address}: the URL is the key; leave url out`);
+			return parseInstance(address, entry, address, defaultTokenEnv);
+		});
+	}
+	if (Array.isArray(config)) {
+		if (config.length === 0) throw new Error("the list of instances is empty");
+		return config.map((entry, index) => {
+			if (!isObject(entry)) throw new Error(`[${index}]: expected {"url": "https://…", "token": "…"}`);
+			return parseInstance(entry.url, entry, `[${index}]`, defaultTokenEnv);
+		});
+	}
+	if (isObject(config) && config.url !== undefined) return [parseInstance(config.url, config, "", defaultTokenEnv)];
+	throw new Error(`expected ${FORMAT}`);
+}
+
+/**
+ * The instances of a config file, the default first, each with the paths extend adds, and a warning about the file;
+ * undefined without the file.
+ */
+function loadInstances<Paths extends object>(
+	file: string,
+	defaultTokenEnv: string,
+	extend: (basePath: string) => Paths,
+): { instances: Array<ConfiguredInstance & Paths>; warning?: string } | Error | undefined {
+	let text: string;
+	try {
+		text = readFileSync(file, "utf8");
+	} catch {
+		return undefined;
+	}
+	try {
+		const instances = parseConfig(JSON.parse(text) as unknown, defaultTokenEnv);
+		const names = new Set<string>();
+		for (const instance of instances) {
+			if (names.has(instance.name)) throw new Error(`${instance.name} is configured twice`);
+			names.add(instance.name);
+		}
+		const literal = instances.filter(
+			(instance) => instance.token.type === "template" && instance.token.parts.some((part) => part.type === "literal"),
+		);
+		let warning: string | undefined;
+		if (literal.length > 0 && process.platform !== "win32" && (statSync(file).mode & 0o077) !== 0) {
+			const which = literal.map((instance) => instance.name).join(", ");
+			warning = `${file} holds the token of ${which} and others can read it: chmod 600 ${file}`;
+		}
+		return { instances: instances.map((instance) => ({ ...instance, ...extend(instance.basePath) })), warning };
+	} catch (error) {
+		return new Error(`${file}: ${error instanceof Error ? error.message : String(error)}`);
+	}
+}
+
+/** The schema of the host parameter: one of the instances' names; product names the application (GitLab). */
+function hostParameter(instances: ConfiguredInstance[], product: string) {
+	return StringEnum(
+		instances.map((instance) => instance.name),
+		{ description: `The ${product} instance; default ${instances[0].name}. A full URL in path picks its instance by itself` },
+	);
+}
+
+/**
+ * The instance of a call: the one host names, else the one a full URL in path belongs to (owns says which), else the
+ * default.
+ */
+function pickInstance<T extends ConfiguredInstance>(
+	instances: T[],
+	host: string | undefined,
+	target: string,
+	owns: (instance: T, url: URL) => boolean,
+	file: string,
+): T {
+	const names = instances.map((instance) => instance.name).join(", ");
+	if (host?.trim()) {
+		const wanted = host.trim().replace(/^https?:\/\//i, "").replace(/\/+$/, "").toLowerCase();
+		const found = instances.find((instance) => instance.name.toLowerCase() === wanted);
+		if (!found) throw new Error(`host ${host} is not configured in ${file} (configured: ${names})`);
+		return found;
+	}
+	const trimmed = target.trim();
+	if (instances.length > 1 && /^https?:\/\//i.test(trimmed)) {
+		const url = new URL(trimmed);
+		const found = instances.find((instance) => url.origin === instance.origin && owns(instance, url));
+		if (!found) throw new Error(`${target} is outside the API of every configured instance (${names})`);
+		return found;
+	}
+	return instances[0];
+}
+
+/** The tokens token commands printed, by command, kept for the session until an instance rejects one. */
+const commandTokens = new Map<string, string>();
+
+/** Runs a token command through /bin/sh, as Pi does for apiKey, and returns its trimmed output. */
+function runTokenCommand(command: string, what: string, signal: AbortSignal | undefined): Promise<string> {
+	return new Promise((resolve, reject) => {
+		const fail = (why: string) => reject(new Error(`The token command of ${what} ${why}.`));
+		const child = spawn("/bin/sh", ["-c", command], {
+			stdio: ["ignore", "pipe", "ignore"],
+			timeout: TOKEN_COMMAND_TIMEOUT_MS,
+			signal,
+		});
+		const chunks: Buffer[] = [];
+		child.stdout.on("data", (chunk: Buffer) => chunks.push(chunk));
+		child.on("error", (error) => (signal?.aborted ? reject(error) : fail(`cannot run (${error.message})`)));
+		child.on("close", (code, killedBy) => {
+			if (code !== 0) {
+				return fail(
+					killedBy ? `was stopped (${killedBy}; it may run ${TOKEN_COMMAND_TIMEOUT_MS / 1000} s)` : `exited with status ${code}`,
+				);
+			}
+			const token = Buffer.concat(chunks).toString("utf8").trim();
+			if (!token) fail("printed no token");
+			else resolve(token);
+		});
+	});
+}
+
+/**
+ * The token of an instance, from the environment, the config, or its command; throws with what to fix. howTo says
+ * where to create a token, e.g. "Create an API token in https://… under My account → Access tokens".
+ */
+async function resolveToken(
+	instance: ConfiguredInstance,
+	file: string,
+	howTo: string,
+	signal: AbortSignal | undefined,
+): Promise<string> {
+	const source = instance.token;
+	let token: string;
+	if (source.type === "command") {
+		token = commandTokens.get(source.command) ?? (await runTokenCommand(source.command, `${instance.name} in ${file}`, signal));
+		commandTokens.set(source.command, token);
+	} else {
+		const missing = source.parts.flatMap((part) => (part.type === "env" && !process.env[part.name] ? [part.name] : []));
+		if (missing.length > 0) {
+			throw new Error(
+				`${missing.join(" and ")} ${missing.length > 1 ? "are" : "is"} not set in Pi's environment, so ${instance.name} ` +
+					`has no token. ${howTo}, export it as ${missing[0]}, and start Pi again — or set token in ${file} to the ` +
+					`token itself or to a command that prints it ("!command").`,
+			);
+		}
+		token = source.parts.map((part) => (part.type === "literal" ? part.value : process.env[part.name])).join("");
+	}
+	if (/[\r\n]/.test(token)) throw new Error(`The token of ${instance.name} contains a line break.`);
+	return token;
+}
+
+/**
+ * Drops the kept token of an instance that rejected it (401), so that its command runs again at the next call; says
+ * whether there was a command.
+ */
+function forgetToken(instance: ConfiguredInstance): boolean {
+	if (instance.token.type !== "command") return false;
+	commandTokens.delete(instance.token.command);
+	return true;
 }
 
 export default function (pi: ExtensionAPI) {

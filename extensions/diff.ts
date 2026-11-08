@@ -43,7 +43,6 @@ import { execFile } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { frame, scrollKey, viewport } from "./lib/overlay.ts";
 
 const MAX_FILE_BYTES = 2 * 1024 * 1024;
 const MAX_BASELINE_FILE = 1024 * 1024;
@@ -429,6 +428,43 @@ interface Zone {
 interface Row {
 	text: string;
 	zones: Zone[];
+}
+
+/**
+ * Framed, scrollable boxes for the extensions that show more than a notification can hold: overlays for /hooks,
+ * /agents, and /cron, and the frame and scrolling of the boxes /btw and the /diff dialog show above the prompt.
+ *
+ * background-agents.ts, btw.ts, claude-hooks.ts, claude-remote-control.ts, scheduled-tasks.ts, subagents.ts carry a
+ * copy of this block, or of a part of it: change them alike.
+ */
+/** Draws a rounded frame around `body`, with `title` in the top edge and `help` under it. */
+function frame(theme: Theme, width: number, title: string, body: string[], help: string): string[] {
+	const inner = Math.max(1, width - 4);
+	const border = (s: string) => theme.fg("border", s);
+	const head = truncateToWidth(` ${title} `, Math.max(1, width - 4), "…");
+	const lines = [border("╭─") + theme.fg("accent", head) + border(`${"─".repeat(Math.max(0, width - 3 - visibleWidth(head)))}╮`)];
+	for (const line of body) lines.push(`${border("│")} ${truncateToWidth(line, inner, "…", true)} ${border("│")}`);
+	lines.push(border(`╰${"─".repeat(Math.max(0, width - 2))}╯`));
+	lines.push(truncateToWidth(theme.fg("dim", ` ${help}`), width));
+	return lines;
+}
+
+/** Moves `offset` for the scroll keys; returns the new offset, or undefined when `data` is no scroll key. */
+function scrollKey(data: string, offset: number, total: number, rows: number): number | undefined {
+	const max = Math.max(0, total - rows);
+	if (matchesKey(data, Key.up) || data === "k") return Math.max(0, offset - 1);
+	if (matchesKey(data, Key.down) || data === "j") return Math.min(max, offset + 1);
+	if (matchesKey(data, Key.pageUp)) return Math.max(0, offset - rows);
+	if (matchesKey(data, Key.pageDown) || data === " ") return Math.min(max, offset + rows);
+	if (matchesKey(data, Key.home) || data === "g") return 0;
+	if (matchesKey(data, Key.end) || data === "G") return max;
+	return undefined;
+}
+
+/** The visible slice of `lines`, padded to `rows` so the frame keeps its height while scrolling. */
+function viewport(lines: string[], offset: number, rows: number): string[] {
+	const visible = lines.slice(offset, offset + rows);
+	return lines.length > rows ? [...visible, ...Array(Math.max(0, rows - visible.length)).fill("")] : visible;
 }
 
 export default function (pi: ExtensionAPI) {

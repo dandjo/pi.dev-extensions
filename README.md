@@ -36,14 +36,11 @@ belongs at `~/.pi/agent/extensions/<name>.ts`.
 | `claude-stream-only.ts`    | Keeps Claude Code on streamed responses, so a stalled one cannot leave Pi waiting         | `pi-claude-subscription`                                         |
 | `network-resilience.ts`    | Claude Code's handling of dropped connections: stall notice, restart, network wait        | —                                                                |
 
-`lib/` holds the code the extensions share: `small-model.ts` picks the
-[small model](#small-model) for side tasks, `claude-tools.ts` translates
-between Pi's and Claude Code's tool names and inputs, `overlay.ts` draws the
-overlays, `meter.ts` draws the bars of the status line, `transcript.ts`
-turns the conversation into text for `/btw` and `/goal`, `qr.ts` draws the
-QR code of `/remote-control`, `claude-login.ts` has Claude Code renew its
-login once it has run out, and `instances.ts` reads the instances and tokens
-of `openproject.json` and `gitlab.json`. `web_search` comes from the npm package `pi-web-access`; see
+Every extension is a single file that works on its own. Code that several of
+them need — the [small model](#small-model) choice, the overlay frame,
+Claude Code's tool names, the instances and tokens of `gitlab.json` and
+`openproject.json` — is copied into each of them, with a note that names the
+other copies. `web_search` comes from the npm package `pi-web-access`; see
 [Web search](#web-search).
 
 ## Set up Pi
@@ -112,25 +109,25 @@ retrying, but the turn fails first.
 
 ### 3. Install the extensions
 
-Link all twenty from the clone, together with the `lib/` folder they
-share, so that `git pull` updates them:
+Link all twenty from the clone, so that `git pull` updates them:
 
 ```bash
 mkdir -p ~/.pi/agent/extensions
 for f in "$PWD"/extensions/*.ts; do ln -sf "$f" ~/.pi/agent/extensions/; done
-ln -sfn "$PWD/extensions/lib" ~/.pi/agent/extensions/lib
 ```
 
 Or copy them, if the clone may move:
 
 ```bash
 mkdir -p ~/.pi/agent/extensions
-cp -r extensions/*.ts extensions/lib ~/.pi/agent/extensions/
+cp extensions/*.ts ~/.pi/agent/extensions/
 ```
 
-Pi loads every `.ts` file in `~/.pi/agent/extensions/` at start; `lib/` has no
-`index.ts`, so Pi does not load it as an extension. There is no build step and
-no `npm install`: the extensions import only packages Pi provides itself.
+Pi loads every `.ts` file in `~/.pi/agent/extensions/` at start. Each file
+stands on its own, so you may also take only the ones you want. There is no
+build step and no `npm install`: the extensions import only packages Pi
+provides itself. A `lib` folder or link in `~/.pi/agent/extensions/` from an
+earlier setup is no longer used and can go.
 
 When a pull adds or renames an extension, repeat the link or copy step. A link
 whose file is gone must go too, or Pi fails to load it, and a renamed copy
@@ -342,7 +339,7 @@ topics and viewpoints). `/spec.json` returns the instance's own description
 of the API v3.
 
 - The instances come from `~/.pi/agent/openproject.json`, read the same way as
-  [gitlab](#gitlab)'s `gitlab.json` (`lib/instances.ts` does both): under
+  [gitlab](#gitlab)'s `gitlab.json` (both files carry the same code): under
   `instances`, a map from each instance's URL to its settings, like
   `mcpServers` in Pi's `mcp.json`; the first is the default. Without the file
   the tool is not registered.
@@ -1142,9 +1139,9 @@ time out.
 
 ## Small model
 
-`lib/small-model.ts` picks the model for side tasks — session titles,
-`web_fetch` answers, and the `/goal` evaluator — for whatever provider and
-model are in use:
+`session-title.ts`, `web-tools.ts`, and `goal.ts` carry the same code that
+picks the model for side tasks — session titles, `web_fetch` answers, and the
+`/goal` evaluator — for whatever provider and model are in use:
 
 - Among the models of the current model's provider that have working
   credentials and read text, it takes the one with the lowest list price (input

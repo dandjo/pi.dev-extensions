@@ -28,20 +28,13 @@
  * (my-plugin:my-skill -> my-plugin-my-skill). /hooks lists what is configured.
  */
 
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import {
-	applyClaudeInput,
-	claudeToolName,
-	contentText,
-	toClaudeInput,
-	toClaudeResponse,
-} from "./lib/claude-tools.ts";
-import { showText } from "./lib/overlay.ts";
+import { Key, matchesKey, truncateToWidth, type TUI, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 
 const DEFAULT_TIMEOUT_S = 600;
 const PROMPT_TIMEOUT_S = 30;
@@ -398,6 +391,287 @@ function interpret(hook: Hook, run: RunResult, timeoutS: number): Outcome {
 		failed: true,
 		failure: `Failed with non-blocking status code: ${firstLine(stderr) || `exit code ${run.code}`}`,
 	};
+}
+
+/**
+ * Claude Code <-> Pi tool names and inputs, shared by the extensions that speak Claude Code's formats (hooks, subagent
+ * definitions).
+ *
+ * claude-agents.ts, claude-remote-control.ts carry a copy of this block, or of a part of it: change them alike.
+ */
+/** Pi tool name -> Claude Code tool name. Tools without an entry keep their name (MCP tools, Agent, …). */
+const PI_TO_CLAUDE: Record<string, string> = {
+	bash: "Bash",
+	powershell: "PowerShell",
+	read: "Read",
+	edit: "Edit",
+	write: "Write",
+	grep: "Grep",
+	find: "Glob",
+	ls: "LS",
+	web_fetch: "WebFetch",
+	fetch_content: "WebFetch",
+	web_search: "WebSearch",
+	tool_search: "ToolSearch",
+};
+
+function claudeToolName(piName: string): string {
+	return PI_TO_CLAUDE[piName] ?? piName;
+}
+
+type Input = Record<string, unknown>;
+
+function absolute(cwd: string, value: unknown): string | undefined {
+	if (typeof value !== "string" || !value) return undefined;
+	const expanded = value === "~" || value.startsWith("~/") ? path.join(process.env.HOME ?? "", value.slice(1)) : value;
+	return path.resolve(cwd, expanded);
+}
+
+/** The `tool_input` Claude Code would send to a hook for this Pi tool call. File paths are absolute, as there. */
+function toClaudeInput(piName: string, input: Input, cwd: string): Input {
+	switch (piName) {
+		case "bash":
+		case "powershell": {
+			const out: Input = { command: input.command ?? "", description: input.description ?? "" };
+			if (typeof input.timeout === "number") out.timeout = Math.round(input.timeout * 1000);
+			return out;
+		}
+		case "read":
+			return { file_path: absolute(cwd, input.path), offset: input.offset, limit: input.limit };
+		case "write":
+			return { file_path: absolute(cwd, input.path), content: input.content ?? "" };
+		case "edit": {
+			const edits = Array.isArray(input.edits) ? (input.edits as Input[]) : [];
+			const out: Input = {
+				file_path: absolute(cwd, input.path),
+				edits: edits.map((e) => ({ old_string: e.oldText ?? "", new_string: e.newText ?? "" })),
+				replace_all: false,
+			};
+			if (edits.length === 1) {
+				out.old_string = edits[0].oldText ?? "";
+				out.new_string = edits[0].newText ?? "";
+			}
+			return out;
+		}
+		case "grep": {
+			const out: Input = { pattern: input.pattern ?? "", output_mode: "content" };
+			if (input.path !== undefined) out.path = absolute(cwd, input.path);
+			if (input.glob !== undefined) out.glob = input.glob;
+			if (input.ignoreCase) out["-i"] = true;
+			if (typeof input.context === "number") out["-C"] = input.context;
+			if (typeof input.limit === "number") out.head_limit = input.limit;
+			return out;
+		}
+		case "find": {
+			const out: Input = { pattern: input.pattern ?? "" };
+			if (input.path !== undefined) out.path = absolute(cwd, input.path);
+			return out;
+		}
+		case "ls":
+			return { path: absolute(cwd, input.path ?? ".") };
+		case "web_search": {
+			const queries = Array.isArray(input.queries) ? input.queries : [];
+			return { ...input, query: input.query ?? queries[0] ?? "" };
+		}
+		default:
+			return { ...input };
+	}
+}
+
+/**
+ * Applies a hook's `updatedInput` (Claude Code shape) to a Pi tool input, in place. Fields the hook left out keep their
+ * Pi value only where Claude Code has no counterpart; Claude Code replaces the whole input.
+ */
+function applyClaudeInput(piName: string, target: Input, updated: Input): void {
+	const set = (key: string, value: unknown) => {
+		if (value === undefined) delete target[key];
+		else target[key] = value;
+	};
+	switch (piName) {
+		case "bash":
+		case "powershell":
+			if (typeof updated.command === "string") set("command", updated.command);
+			if (typeof updated.timeout === "number") set("timeout", Math.max(1, Math.round(updated.timeout / 1000)));
+			return;
+		case "read":
+			if (typeof updated.file_path === "string") set("path", updated.file_path);
+			set("offset", updated.offset);
+			set("limit", updated.limit);
+			return;
+		case "write":
+			if (typeof updated.file_path === "string") set("path", updated.file_path);
+			if (typeof updated.content === "string") set("content", updated.content);
+			return;
+		case "edit": {
+			if (typeof updated.file_path === "string") set("path", updated.file_path);
+			if (Array.isArray(updated.edits)) {
+				set(
+					"edits",
+					(updated.edits as Input[]).map((e) => ({ oldText: String(e.old_string ?? ""), newText: String(e.new_string ?? "") })),
+				);
+			} else if (typeof updated.old_string === "string" && typeof updated.new_string === "string") {
+				set("edits", [{ oldText: updated.old_string, newText: updated.new_string }]);
+			}
+			return;
+		}
+		case "grep":
+			if (typeof updated.pattern === "string") set("pattern", updated.pattern);
+			if ("path" in updated) set("path", updated.path);
+			if ("glob" in updated) set("glob", updated.glob);
+			if ("-i" in updated) set("ignoreCase", updated["-i"] === true ? true : undefined);
+			return;
+		case "find":
+			if (typeof updated.pattern === "string") set("pattern", updated.pattern);
+			if ("path" in updated) set("path", updated.path);
+			return;
+		case "ls":
+			if ("path" in updated) set("path", updated.path);
+			return;
+		default:
+			for (const key of Object.keys(target)) if (!(key in updated)) delete target[key];
+			Object.assign(target, updated);
+	}
+}
+
+/** Text of a tool result's content blocks. */
+function contentText(content: ReadonlyArray<{ type: string; text?: string }>): string {
+	return content
+		.map((part) => (part.type === "text" ? (part.text ?? "") : `[${part.type}]`))
+		.join("\n");
+}
+
+/** The `tool_response` Claude Code would send to a PostToolUse hook, as far as Pi's result allows. */
+function toClaudeResponse(
+	piName: string,
+	claudeInput: Input,
+	text: string,
+	details: unknown,
+	structured: unknown,
+	existedBefore: boolean | undefined,
+): unknown {
+	switch (piName) {
+		case "bash":
+		case "powershell":
+			return { stdout: text, stderr: "", interrupted: false, isImage: false };
+		case "write":
+			return {
+				type: existedBefore ? "update" : "create",
+				filePath: claudeInput.file_path,
+				content: claudeInput.content,
+			};
+		case "edit": {
+			const patch = (details as { patch?: unknown } | undefined)?.patch;
+			return {
+				filePath: claudeInput.file_path,
+				oldString: claudeInput.old_string,
+				newString: claudeInput.new_string,
+				replaceAll: false,
+				userModified: false,
+				...(typeof patch === "string" ? { patch } : {}),
+			};
+		}
+		case "read":
+			return { type: "text", file: { filePath: claudeInput.file_path, content: text } };
+		default:
+			return structured ?? text;
+	}
+}
+
+/**
+ * Framed, scrollable boxes for the extensions that show more than a notification can hold: overlays for /hooks,
+ * /agents, and /cron, and the frame and scrolling of the boxes /btw and the /diff dialog show above the prompt.
+ *
+ * background-agents.ts, btw.ts, claude-remote-control.ts, diff.ts, scheduled-tasks.ts, subagents.ts carry a copy of
+ * this block, or of a part of it: change them alike.
+ */
+const OVERLAY_OPTIONS = { anchor: "center", width: "90%", maxHeight: "90%", margin: 1 } as const;
+
+/** Rows the body of an overlay may use: the overlay's height cap minus the frame and help lines. */
+function bodyRows(tui: TUI): number {
+	return Math.max(3, Math.floor(tui.terminal.rows * 0.9) - 4);
+}
+
+/** Draws a rounded frame around `body`, with `title` in the top edge and `help` under it. */
+function frame(theme: Theme, width: number, title: string, body: string[], help: string): string[] {
+	const inner = Math.max(1, width - 4);
+	const border = (s: string) => theme.fg("border", s);
+	const head = truncateToWidth(` ${title} `, Math.max(1, width - 4), "…");
+	const lines = [border("╭─") + theme.fg("accent", head) + border(`${"─".repeat(Math.max(0, width - 3 - visibleWidth(head)))}╮`)];
+	for (const line of body) lines.push(`${border("│")} ${truncateToWidth(line, inner, "…", true)} ${border("│")}`);
+	lines.push(border(`╰${"─".repeat(Math.max(0, width - 2))}╯`));
+	lines.push(truncateToWidth(theme.fg("dim", ` ${help}`), width));
+	return lines;
+}
+
+/** Moves `offset` for the scroll keys; returns the new offset, or undefined when `data` is no scroll key. */
+function scrollKey(data: string, offset: number, total: number, rows: number): number | undefined {
+	const max = Math.max(0, total - rows);
+	if (matchesKey(data, Key.up) || data === "k") return Math.max(0, offset - 1);
+	if (matchesKey(data, Key.down) || data === "j") return Math.min(max, offset + 1);
+	if (matchesKey(data, Key.pageUp)) return Math.max(0, offset - rows);
+	if (matchesKey(data, Key.pageDown) || data === " ") return Math.min(max, offset + rows);
+	if (matchesKey(data, Key.home) || data === "g") return 0;
+	if (matchesKey(data, Key.end) || data === "G") return max;
+	return undefined;
+}
+
+/** The visible slice of `lines`, padded to `rows` so the frame keeps its height while scrolling. */
+function viewport(lines: string[], offset: number, rows: number): string[] {
+	const visible = lines.slice(offset, offset + rows);
+	return lines.length > rows ? [...visible, ...Array(Math.max(0, rows - visible.length)).fill("")] : visible;
+}
+
+/**
+ * Shows read-only text in a scrollable overlay until Esc, q, or Enter. `build` renders the body lines for a width;
+ * longer lines are wrapped. Outside the interactive terminal the text goes out as a notification instead.
+ */
+async function showText(
+	ctx: ExtensionContext,
+	title: string,
+	build: (width: number, theme: Theme) => string[],
+): Promise<void> {
+	if (ctx.mode !== "tui") {
+		ctx.ui.notify(build(100, ctx.ui.theme).join("\n"), "info");
+		return;
+	}
+	await ctx.ui.custom<void>(
+		(tui, theme, _keybindings, done) => {
+			let offset = 0;
+			let cache: { width: number; lines: string[] } | undefined;
+			const body = (width: number) => {
+				if (!cache || cache.width !== width) {
+					const inner = Math.max(1, width - 4);
+					cache = { width, lines: build(inner, theme).flatMap((line) => (line ? wrapTextWithAnsi(line, inner) : [""])) };
+				}
+				return cache.lines;
+			};
+			return {
+				render(width: number): string[] {
+					const lines = body(width);
+					const rows = Math.min(bodyRows(tui), Math.max(1, lines.length));
+					offset = Math.min(offset, Math.max(0, lines.length - rows));
+					const more = lines.length > rows ? `  ${offset + 1}–${Math.min(lines.length, offset + rows)}/${lines.length}` : "";
+					return frame(theme, width, title, viewport(lines, offset, rows), `↑↓ PgUp PgDn scroll · Esc close${more}`);
+				},
+				handleInput(data: string): void {
+					if (matchesKey(data, Key.escape) || matchesKey(data, Key.enter) || data === "q") {
+						done();
+						return;
+					}
+					const lines = body(cache?.width ?? 80);
+					const next = scrollKey(data, offset, lines.length, Math.min(bodyRows(tui), lines.length));
+					if (next !== undefined && next !== offset) {
+						offset = next;
+						tui.requestRender();
+					}
+				},
+				invalidate(): void {
+					cache = undefined;
+				},
+			};
+		},
+		{ overlay: true, overlayOptions: OVERLAY_OPTIONS },
+	);
 }
 
 export default function (pi: ExtensionAPI) {

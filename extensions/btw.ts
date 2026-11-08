@@ -15,12 +15,18 @@
  *   of the terminal.
  */
 
-import { uuidv7 } from "@earendil-works/pi-ai";
-import { copyToClipboard, type ExtensionAPI, type ExtensionContext, getMarkdownTheme } from "@earendil-works/pi-coding-agent";
-import { Key, Markdown, matchesKey } from "@earendil-works/pi-tui";
-import { frame, scrollKey, viewport } from "./lib/overlay.ts";
-import { oneAtATime } from "./lib/small-model.ts";
-import { conversationText } from "./lib/transcript.ts";
+import { type Message, uuidv7 } from "@earendil-works/pi-ai";
+import {
+	buildSessionContext,
+	convertToLlm,
+	copyToClipboard,
+	type ExtensionAPI,
+	type ExtensionContext,
+	getMarkdownTheme,
+	type Theme,
+} from "@earendil-works/pi-coding-agent";
+import { Key, Markdown, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
 
 const MAX_EXCHANGES = 20;
 const SHOWN_EARLIER = 5;
@@ -42,6 +48,130 @@ interface Exchange {
 	answer: string;
 	error?: string;
 	pending: boolean;
+}
+
+/**
+ * Framed, scrollable boxes for the extensions that show more than a notification can hold: overlays for /hooks,
+ * /agents, and /cron, and the frame and scrolling of the boxes /btw and the /diff dialog show above the prompt.
+ *
+ * background-agents.ts, claude-hooks.ts, claude-remote-control.ts, diff.ts, scheduled-tasks.ts, subagents.ts carry a
+ * copy of this block, or of a part of it: change them alike.
+ */
+/** Draws a rounded frame around `body`, with `title` in the top edge and `help` under it. */
+function frame(theme: Theme, width: number, title: string, body: string[], help: string): string[] {
+	const inner = Math.max(1, width - 4);
+	const border = (s: string) => theme.fg("border", s);
+	const head = truncateToWidth(` ${title} `, Math.max(1, width - 4), "…");
+	const lines = [border("╭─") + theme.fg("accent", head) + border(`${"─".repeat(Math.max(0, width - 3 - visibleWidth(head)))}╮`)];
+	for (const line of body) lines.push(`${border("│")} ${truncateToWidth(line, inner, "…", true)} ${border("│")}`);
+	lines.push(border(`╰${"─".repeat(Math.max(0, width - 2))}╯`));
+	lines.push(truncateToWidth(theme.fg("dim", ` ${help}`), width));
+	return lines;
+}
+
+/** Moves `offset` for the scroll keys; returns the new offset, or undefined when `data` is no scroll key. */
+function scrollKey(data: string, offset: number, total: number, rows: number): number | undefined {
+	const max = Math.max(0, total - rows);
+	if (matchesKey(data, Key.up) || data === "k") return Math.max(0, offset - 1);
+	if (matchesKey(data, Key.down) || data === "j") return Math.min(max, offset + 1);
+	if (matchesKey(data, Key.pageUp)) return Math.max(0, offset - rows);
+	if (matchesKey(data, Key.pageDown) || data === " ") return Math.min(max, offset + rows);
+	if (matchesKey(data, Key.home) || data === "g") return 0;
+	if (matchesKey(data, Key.end) || data === "G") return max;
+	return undefined;
+}
+
+/** The visible slice of `lines`, padded to `rows` so the frame keeps its height while scrolling. */
+function viewport(lines: string[], offset: number, rows: number): string[] {
+	const visible = lines.slice(offset, offset + rows);
+	return lines.length > rows ? [...visible, ...Array(Math.max(0, rows - visible.length)).fill("")] : visible;
+}
+
+/**
+ * Small-model calls for side tasks (session titles, page answers), whatever provider and model are in use.
+ *
+ * The model: among the models of the current model's provider that have working credentials and read text, the
+ * one with the lowest list price (input + output per million tokens), if it is cheaper than the current model;
+ * otherwise the current model. So a side task never moves to another provider or account. On providers that serve
+ * several makers' models with the maker in the id ("anthropic/claude-…" on OpenRouter, "us.anthropic.claude-…" on
+ * Bedrock), only models of the current maker qualify. A current model without a price (local, unknown) is kept.
+ * PI_SMALL_MODEL=<provider>/<model-id> overrides the choice.
+ *
+ * goal.ts, session-title.ts, web-tools.ts carry a copy of this block, or of a part of it: change them alike.
+ */
+/**
+ * Side requests run one at a time, across every extension that loads this file. A provider that runs one process per
+ * request may otherwise close the conversation's own process while it waits for tool results: pi-claude-subscription
+ * keeps at most three Claude Code processes and closes the least recently used one outside a call.
+ */
+const gate: { tail: Promise<unknown> } = ((globalThis as Record<symbol, unknown>)[Symbol.for("pi.small-model.gate")] ??= {
+	tail: Promise.resolve(),
+}) as { tail: Promise<unknown> };
+
+/** Runs `run` after every side request queued before it has finished. */
+function oneAtATime<T>(run: () => Promise<T>): Promise<T> {
+	const result = gate.tail.then(run, run);
+	gate.tail = result.catch(() => {});
+	return result;
+}
+
+/**
+ * The current conversation as plain text, for side requests that must not touch the conversation itself (/btw, the
+ * /goal evaluator). A request without tools cannot carry tool-call blocks, so the transcript goes in as text.
+ *
+ * goal.ts carries a copy of this block, or of a part of it: change them alike.
+ */
+interface TranscriptOptions {
+	/** Characters kept of each tool result. */
+	toolResultChars: number;
+	/** Characters kept of the whole transcript; the oldest part goes first. */
+	maxChars: number;
+	/** Messages to use instead of the session's current context. */
+	messages?: AgentMessage[];
+}
+
+function text(content: Message["content"]): string {
+	if (typeof content === "string") return content;
+	return content
+		.map((part) => (part.type === "text" ? part.text : part.type === "image" ? "[image]" : ""))
+		.filter(Boolean)
+		.join("\n");
+}
+
+function cut(value: string, max: number): string {
+	return value.length <= max ? value : `${value.slice(0, max)}\n[… ${value.length - max} more characters]`;
+}
+
+/** The conversation the model currently sees (compaction summary included), as `[Role]: …` blocks. */
+function conversationText(ctx: ExtensionContext, options: TranscriptOptions): string {
+	const messages =
+		options.messages ?? buildSessionContext(ctx.sessionManager.getEntries(), ctx.sessionManager.getLeafId()).messages;
+	const parts: string[] = [];
+	for (const message of convertToLlm(messages)) {
+		if (message.role === "user") {
+			const body = text(message.content).trim();
+			if (body) parts.push(`[User]: ${body}`);
+		} else if (message.role === "assistant") {
+			const said = message.content
+				.filter((part) => part.type === "text")
+				.map((part) => (part.type === "text" ? part.text : ""))
+				.join("\n")
+				.trim();
+			if (said) parts.push(`[Assistant]: ${said}`);
+			const calls = message.content
+				.filter((part) => part.type === "toolCall")
+				.map((part) => (part.type === "toolCall" ? `${part.name}(${cut(JSON.stringify(part.arguments), 2_000)})` : ""));
+			if (calls.length) parts.push(`[Assistant tool calls]: ${calls.join("; ")}`);
+		} else if (message.role === "toolResult") {
+			const body = text(message.content).trim();
+			if (body) parts.push(`[Tool result${message.isError ? " (error)" : ""}]: ${cut(body, options.toolResultChars)}`);
+		}
+	}
+	let joined = parts.join("\n\n");
+	if (joined.length > options.maxChars) {
+		joined = `[… earlier conversation left out …]\n\n${joined.slice(joined.length - options.maxChars)}`;
+	}
+	return joined;
 }
 
 export default function (pi: ExtensionAPI) {

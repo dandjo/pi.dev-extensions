@@ -25,14 +25,13 @@
  *   self-paced loops. CLAUDE_CODE_DISABLE_CRON=1 turns all of it off.
  */
 
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { Key, matchesKey, Text, type TuiMouseEvent, type TuiMouseEventResult, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { frame, viewport } from "./lib/overlay.ts";
 
 const MAX_TASKS = 50;
 const EXPIRY_MS = 7 * 24 * 60 * 60 * 1000;
@@ -269,6 +268,31 @@ function loopFile(cwd: string): { file: string; text: string } | undefined {
 }
 
 // --- Extension ---------------------------------------------------------------------------------------------------
+
+/**
+ * Framed, scrollable boxes for the extensions that show more than a notification can hold: overlays for /hooks,
+ * /agents, and /cron, and the frame and scrolling of the boxes /btw and the /diff dialog show above the prompt.
+ *
+ * background-agents.ts, btw.ts, claude-hooks.ts, claude-remote-control.ts, diff.ts, subagents.ts carry a copy of this
+ * block, or of a part of it: change them alike.
+ */
+/** Draws a rounded frame around `body`, with `title` in the top edge and `help` under it. */
+function frame(theme: Theme, width: number, title: string, body: string[], help: string): string[] {
+	const inner = Math.max(1, width - 4);
+	const border = (s: string) => theme.fg("border", s);
+	const head = truncateToWidth(` ${title} `, Math.max(1, width - 4), "…");
+	const lines = [border("╭─") + theme.fg("accent", head) + border(`${"─".repeat(Math.max(0, width - 3 - visibleWidth(head)))}╮`)];
+	for (const line of body) lines.push(`${border("│")} ${truncateToWidth(line, inner, "…", true)} ${border("│")}`);
+	lines.push(border(`╰${"─".repeat(Math.max(0, width - 2))}╯`));
+	lines.push(truncateToWidth(theme.fg("dim", ` ${help}`), width));
+	return lines;
+}
+
+/** The visible slice of `lines`, padded to `rows` so the frame keeps its height while scrolling. */
+function viewport(lines: string[], offset: number, rows: number): string[] {
+	const visible = lines.slice(offset, offset + rows);
+	return lines.length > rows ? [...visible, ...Array(Math.max(0, rows - visible.length)).fill("")] : visible;
+}
 
 export default function (pi: ExtensionAPI) {
 	if (Number(process.env.PI_SUBAGENT_DEPTH || 0) > 0 || process.env.CLAUDE_CODE_DISABLE_CRON === "1") return;
