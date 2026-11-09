@@ -915,6 +915,9 @@ export default function (pi: ExtensionAPI) {
 	const running = new Map<string, Running>();
 	const finished: RunDetails[] = [];
 	let currentCtx: ExtensionContext | null = null;
+	// After session_shutdown (quit, /new, /resume, /fork, /reload) this instance's `pi` is stale and throws on use,
+	// while an aborted child can still deliver output or a pending progress update: such late callbacks must not touch it.
+	let active = true;
 
 	const childDepth = DEPTH + 1;
 	const canSpawn = () => DEPTH < maxDepth();
@@ -945,6 +948,7 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	function publish(): void {
+		if (!active) return;
 		const count = [...running.values()].filter((r) => r.background).length;
 		pi.events.emit("subagents:running", count);
 		pi.events.emit("subagents:state", [
@@ -1035,6 +1039,7 @@ export default function (pi: ExtensionAPI) {
 					background ||= def.background === true;
 				}
 
+				if (!active) throw new Error("The session was replaced; the subagent was not started.");
 				const own = new AbortController();
 				// A foreground subagent stops with the Agent call, until it is moved to the background.
 				const forward = () => own.abort();
@@ -1056,6 +1061,7 @@ export default function (pi: ExtensionAPI) {
 					parentSession,
 					own.signal,
 					(details) => {
+						if (!active) return;
 						if (!background) onUpdate?.({ content: [{ type: "text", text: `${details.toolCount} tool calls…` }], details });
 						publish();
 					},
@@ -1079,6 +1085,7 @@ export default function (pi: ExtensionAPI) {
 				/** Reports the subagent once it finishes, as a message that starts a turn, and returns the Agent call now. */
 				const inBackground = (text: string): AgentToolResult<RunDetails> => {
 					run.then(({ details }) => {
+						if (!active) return;
 						pi.sendMessage(
 							{ customType: "subagent", content: report(details, true), display: true, details },
 							{ triggerTurn: true, deliverAs: "followUp" },
@@ -1181,6 +1188,7 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	pi.on("session_start", (_event, ctx) => {
+		active = true;
 		currentCtx = ctx;
 		if (canSpawn()) register(ctx);
 		if (DEPTH === 0) setTimeout(cleanup, 5_000).unref();
@@ -1190,6 +1198,7 @@ export default function (pi: ExtensionAPI) {
 		for (const entry of running.values()) entry.abort.abort();
 		running.clear();
 		publish();
+		active = false;
 		currentCtx = null;
 	});
 
