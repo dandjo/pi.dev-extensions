@@ -117,10 +117,20 @@ async function pickSmallModel(ctx: ExtensionContext): Promise<Model<Api> | undef
 	return best;
 }
 
-/** The lowest thinking level the model accepts, so a side task does not think at length. Undefined is "off". */
-function lowestThinking(model: Model<Api>): "minimal" | "low" | undefined {
+/**
+ * The thinking level for a side task: "off" (undefined) where the model can turn thinking off, else its lowest level.
+ * A model cannot when its levels exclude "off" or when it thinks adaptively whatever it is asked (compat
+ * forceAdaptiveThinking: Claude Haiku 5.5, for one). A provider that passes another's models on (claude-sdk) may drop
+ * their compat, so a model of the same id elsewhere in the registry counts too.
+ */
+function lowestThinking(ctx: ExtensionContext, model: Model<Api>): "minimal" | "low" | undefined {
+	if (!model.reasoning) return undefined;
 	const map = model.thinkingLevelMap;
-	if (!model.reasoning || map?.off !== null) return undefined;
+	const forced = (m: Model<Api>) =>
+		(m.compat as { forceAdaptiveThinking?: boolean } | undefined)?.forceAdaptiveThinking === true;
+	const mustThink =
+		map?.off === null || forced(model) || ctx.modelRegistry.getAll().some((m) => m.id === model.id && forced(m));
+	if (!mustThink) return undefined;
 	return map?.minimal !== null ? "minimal" : "low";
 }
 
@@ -136,7 +146,7 @@ function askModel(
 	text: string,
 	options: { maxTokens: number; signal?: AbortSignal },
 ): Promise<AssistantMessage> {
-	const reasoning = lowestThinking(model);
+	const reasoning = lowestThinking(ctx, model);
 	const maxTokens = options.maxTokens + (reasoning ? THINKING_ROOM : 0);
 	return oneAtATime(() => {
 		const timeout = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
