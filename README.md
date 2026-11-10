@@ -1,14 +1,14 @@
 # Pi extensions
 
 Extensions for [Pi](https://pi.dev), the terminal coding agent, that bring
-over what Claude Code does: Pi runs Claude models on your Claude
-subscription, shows a status line with the subscription limits, searches and
-reads the web, keeps a memory per project as Claude Code does, titles every
-session, lets sessions message each other, runs Claude Code's hooks, brings
-over Claude Code's subagents, questions, side questions, goals, loops,
-scheduled prompts, diff view, agent panel, and Remote Control for the Claude
-app, reads and changes OpenProject and GitLab, controls your Chrome, and keeps
-requests alive through network trouble.
+over what Claude Code does: Pi runs Claude models on your Claude subscription,
+shows a status line with the subscription limits, searches and reads the web,
+keeps a memory per project as Claude Code does, titles every session, lets
+sessions message each other, runs Claude Code's hooks, brings over Claude
+Code's subagents, questions, side questions, goals, loops, scheduled prompts,
+diff view, agent panel, and Remote Control for the Claude app, reads and
+changes OpenProject and GitLab, reads and writes the clipboard, controls your
+Chrome, and keeps requests alive through network trouble.
 
 The repository mirrors `~/.pi/agent/`: a file at `extensions/<name>.ts`
 belongs at `~/.pi/agent/extensions/<name>.ts`.
@@ -21,6 +21,7 @@ belongs at `~/.pi/agent/extensions/<name>.ts`.
 | `web-tools.ts`             | Adds `web_fetch`: reads a page locally and lets a small model answer from it              | —                                                                |
 | `openproject.ts`           | Adds `openproject`: reads and changes OpenProject through its API v3, as you              | An OpenProject API token for each instance                       |
 | `gitlab.ts`                | Adds `gitlab`: reads and changes GitLab through its REST API v4 and GraphQL, as you       | A GitLab personal access token for each instance                 |
+| `clipboard.ts`             | Adds `clipboard`: the model reads and writes the clipboard, text and images               | Linux: `wl-clipboard` (Wayland) or `xclip`                       |
 | `memory.ts`                | Keeps a memory per project, shared with Claude Code's auto memory when it is there        | —                                                                |
 | `session-title.ts`         | Names each session after its first prompt and shows it in the terminal title              | —                                                                |
 | `session-socket.ts`        | Lets sessions message each other and your Claude Code sessions, as Claude Code does       | Linux or macOS                                                   |
@@ -586,6 +587,37 @@ written with your permissions.
   only what you asked for and to read a single issue or merge request before
   changing its description.
 - Git itself — clone, fetch, push — stays with `git`.
+
+## clipboard
+
+Adds the `clipboard` tool, with which the model reads and writes the system
+clipboard on Linux and macOS: "look at the screenshot I copied", "copy the
+command for me".
+
+- `read` returns what the clipboard holds: text, an image, and on macOS the
+  paths of files copied in Finder. An image comes as PNG, JPEG, WebP, or GIF
+  (other formats are converted to PNG) and is scaled down as Pi's
+  `images.autoResize` says, as with the `read` tool. `format` `text` or
+  `image` asks for one of them only. Text beyond 50 KB or 2,000 lines is cut,
+  the full text saved to a private temp file that goes when the session ends.
+- `write` puts text on the clipboard with Pi's own copy routine, the one
+  behind `/copy`: `wl-copy`, `xclip`, or `xsel` on Linux, the native helper or
+  `pbcopy` on macOS, and over SSH OSC 52 to the terminal of your own machine.
+  Writing never asks.
+- Reading asks first: what the model reads goes to its provider, a password
+  just copied from a password manager as much as anything else. The question
+  names what the clipboard holds — text with its length, an image with its
+  format and size — never the content. `{"confirmRead": false}` in
+  `~/.pi/agent/clipboard.json` reads without asking. Without a UI (`pi -p`,
+  subagents), reading is refused unless that is set.
+- Linux reads through `wl-paste` on Wayland, else `xclip` on X11 (XWayland
+  included), else Pi's native X11 helper with `xsel` for text; `wl-clipboard`
+  or `xclip` covers everything. macOS needs nothing: Pi's native helper reads
+  text, images, and files, and `pbpaste` stands in for text. Over SSH, the
+  clipboard of the machine in front of you cannot be read; writing reaches it
+  through OSC 52.
+- For yourself, Pi already has `/copy` and `Ctrl+X` (copy the last answer)
+  and `Ctrl+V` (paste text or an image into the editor).
 
 ## memory
 
