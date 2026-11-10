@@ -1275,9 +1275,16 @@ time out.
   woke from sleep, or after the network interfaces changed (a VPN coming up,
   Wi-Fi to cable; not the bridges of containers and virtual machines, WSL
   included) is aborted 10 seconds later and the run resumes: a note in
-  the transcript tells the model the response was lost. The same happens to a
-  request silent for 5 minutes while the host answers. At most three restarts
-  follow each other without a response in between.
+  the transcript tells the model the response was lost. Data in the first 5
+  seconds after a change does not count: it can be the last bytes of a
+  connection the change already cut. Sleep is noticed on Linux, macOS, and
+  Windows alike.
+- A change also concerns the requests that start after it, until data comes
+  through. Claude Code sends them over a connection opened before the change,
+  which never answers, and gives up on it only after three to four minutes.
+  Such a request is restarted after 30 seconds without data, once per change.
+- A request silent for 5 minutes while the host answers is restarted too. At
+  most three restarts follow each other without a response in between.
 - Before every request that follows a connection error, Pi's own retries
   included, the host is checked. While it does not answer, Pi waits and checks
   every 3 seconds instead of spending its retries, for up to 30 minutes per

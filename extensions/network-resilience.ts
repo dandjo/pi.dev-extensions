@@ -12,10 +12,13 @@
  *
  * - Stall notice: after 20 s without a stream event, the working message counts the wait and says whether the API
  *   host answers a TCP probe (DNS and connect, through HTTPS_PROXY when one is set).
- * - Restart on a fresh connection: a request that gets no data although the network came back, the machine woke from
+ * - Restart on a fresh connection: a request that gets no data after the network came back, the machine woke from
  *   sleep, or the network interfaces changed (a VPN coming up, Wi-Fi to cable) is aborted 10 s later, and the run
- *   resumes with a note to the model. So is a request silent for 5 min while the host answers. At most three
- *   restarts follow each other without a response in between.
+ *   resumes with a note to the model. Data in the first 5 s after a change does not count: it can be the last bytes
+ *   of a connection the change already cut. A change also concerns the requests that start after it, until data
+ *   comes through: Claude Code, for one, sends them over a connection opened before the change, which never answers.
+ *   Such a request is restarted after 30 s without data. So is any request silent for 5 min while the host answers.
+ *   At most three restarts follow each other without a response in between.
  * - Waiting for the network: before every request that follows a connection error, Pi's own retries included, the
  *   API host is probed. While it does not answer, Pi waits and probes every 3 s instead of spending its retries, for
  *   up to 30 min per outage. Esc interrupts the wait.
@@ -45,12 +48,20 @@ const CONFIG_FILE = path.join(getAgentDir(), "network-resilience.json");
 const STATUS_KEY = "network";
 const MESSAGE_TYPE = "network-resilience";
 const TICK_MS = 1_000;
-/** The wall clock ran ahead of the monotonic clock by more than this: the machine slept. */
+/** A tick came this much later than due: the machine slept. */
 const SLEEP_GAP_MS = 5_000;
 const PROBE_TIMEOUT_MS = 5_000;
 const PROBE_INTERVAL_MS = 5_000;
 const OFFLINE_PROBE_INTERVAL_MS = 3_000;
 const NET_CHECK_MS = 2_000;
+/** Data this soon after a change can be the last bytes of a connection the change cut: it does not show that it works. */
+const SETTLE_MS = 5_000;
+/**
+ * How long a request that starts after a change waits for its first data. It may go out over a connection opened
+ * before the change, which then never answers. A fresh connection answers within seconds, a long uncached context
+ * takes longer, and a restart costs the request: so this is longer than the grace.
+ */
+const REUSED_WAIT_MS = 30_000;
 /**
  * Interfaces of containers and virtual machines come and go without touching the route to the API: Linux names, the
  * macOS VM bridges and Apple's peer-to-peer links, and the Windows adapters of WSL, Hyper-V, VirtualBox, and VMware.
@@ -280,13 +291,20 @@ function interfaceChange(before: Map<string, string>, after: Map<string, string>
 
 // --- Extension ------------------------------------------------------------------------------------------------------
 
+/** Something that may have killed open connections. */
+interface Disruption {
+	reason: string;
+	at: number;
+	/** Only data after this shows a working connection. */
+	countsFrom: number;
+	/** Without such data this long after countsFrom and the host's first answer, the request restarts. */
+	waitMs: number;
+}
+
 interface Request {
 	started: number;
 	lastData: number;
-	interfaces: Map<string, string>;
-	interfacesCheckedAt: number;
-	/** Something that kills open connections happened, and no data has come since `at`. */
-	disruption?: { reason: string; at: number };
+	disruption?: Disruption;
 	/** First answered probe after the disruption. */
 	onlineSince?: number;
 	/** First unanswered probe of the current outage. */
@@ -325,6 +343,11 @@ export default function (pi: ExtensionAPI): void {
 	/** Data arrived while a probe failed: the probe target does not reflect this network, so probing stops. */
 	let probeUntrusted = false;
 	let status: string | undefined;
+	/** Watched all the time, not per request: a change between requests kills the connections the next one reuses. */
+	let knownInterfaces = interfaces();
+	let interfacesCheckedAt = performance.now();
+	/** The last change no data has come through since. */
+	let pendingChange: { reason: string; at: number } | undefined;
 
 	function ui() {
 		return ctxRef?.hasUI ? ctxRef.ui : undefined;
@@ -338,7 +361,18 @@ export default function (pi: ExtensionAPI): void {
 
 	function startRequest(): void {
 		const now = performance.now();
-		request = { started: now, lastData: now, interfaces: interfaces(), interfacesCheckedAt: now, probing: false, lastProbeAt: 0, shown: false, gaveUp: false };
+		request = { started: now, lastData: now, probing: false, lastProbeAt: 0, shown: false, gaveUp: false };
+		if (pendingChange) request.disruption = { reason: pendingChange.reason, at: pendingChange.at, countsFrom: now, waitMs: REUSED_WAIT_MS };
+	}
+
+	/** The request goes out: its silence counts from here, and so does a change before it, which data has to clear. */
+	function sent(): void {
+		const r = request;
+		if (!r) return;
+		const now = performance.now();
+		r.lastData = now;
+		if (r.disruption && r.disruption.countsFrom < now) r.disruption.countsFrom = now;
+		if (r.shown) render();
 	}
 
 	function endRequest(): void {
@@ -349,23 +383,26 @@ export default function (pi: ExtensionAPI): void {
 	}
 
 	function data(): void {
+		const now = performance.now();
+		if (pendingChange && now > pendingChange.at + SETTLE_MS) pendingChange = undefined;
 		const r = request;
 		if (!r) return;
-		r.lastData = performance.now();
+		r.lastData = now;
 		// Data after a failed probe: probe again, so the footer does not keep saying offline.
 		if (r.probe?.ok === false && !r.probing && !probeUntrusted) void probeNow(r);
 		if (r.shown) render();
 	}
 
-	function disrupt(reason: string): void {
+	function networkChanged(reason: string, at: number): void {
+		pendingChange = { reason, at };
 		if (!request) return;
-		request.disruption = { reason, at: performance.now() };
+		request.disruption = { reason, at, countsFrom: at + SETTLE_MS, waitMs: config.graceSeconds * 1000 };
 		request.onlineSince = undefined;
 		request.lastProbeAt = 0;
 	}
 
 	function disrupted(r: Request): boolean {
-		return r.disruption !== undefined && r.lastData <= r.disruption.at;
+		return r.disruption !== undefined && r.lastData <= r.disruption.countsFrom;
 	}
 
 	async function probeNow(r: Request): Promise<void> {
@@ -390,7 +427,7 @@ export default function (pi: ExtensionAPI): void {
 		if (!result.ok) {
 			r.offlineSince ??= result.at;
 			r.onlineSince = undefined;
-			if (!disrupted(r)) r.disruption = { reason: `${result.label} was unreachable`, at: result.at };
+			if (!disrupted(r)) r.disruption = { reason: `${result.label} was unreachable`, at: result.at, countsFrom: result.at, waitMs: config.graceSeconds * 1000 };
 		} else {
 			r.offlineSince = undefined;
 			if (disrupted(r)) r.onlineSince ??= result.at;
@@ -410,6 +447,8 @@ export default function (pi: ExtensionAPI): void {
 		}
 		restarts++;
 		restartReason = reason;
+		// The restart goes out on fresh connections; waiting for data again would restart it for the same change.
+		pendingChange = undefined;
 		ui()?.setWorkingMessage(`${capitalize(reason)} · restarting the request`);
 		request = undefined;
 		ctx.abort();
@@ -429,7 +468,7 @@ export default function (pi: ExtensionAPI): void {
 			text = `Offline ${clock(now - (r.offlineSince ?? now))} · ${cause(p.code, p.label)}`;
 			setStatus(`⚠ offline · ${p.label}`);
 		} else if (r.disruption && disrupted(r)) {
-			const wait = back === undefined ? " · checking the network" : ` · restart in ${Math.max(0, Math.ceil((back + config.graceSeconds * 1000 - now) / 1000))}s`;
+			const wait = back === undefined ? " · checking the network" : ` · restart in ${Math.max(0, Math.ceil((back + r.disruption.waitMs - now) / 1000))}s`;
 			text = `${capitalize(r.disruption.reason)} · no data for ${clock(silence)}${wait}`;
 		} else if (silence >= config.noticeSeconds * 1000) {
 			const reach = probeUntrusted ? "" : p?.ok ? ` · ${p.label} reachable` : " · checking the network";
@@ -449,19 +488,21 @@ export default function (pi: ExtensionAPI): void {
 	function tick(): void {
 		const wall = Date.now();
 		const now = performance.now();
-		const slept = wall - lastWall - (now - lastMono);
+		// Linux's monotonic clock stops while the machine sleeps, those of macOS and Windows run on: the larger gap of
+		// the two clocks shows the sleep on all three.
+		const slept = Math.max(wall - lastWall, now - lastMono) - TICK_MS;
 		lastWall = wall;
 		lastMono = now;
+		if (slept > SLEEP_GAP_MS) networkChanged(`woke from sleep after ${clock(slept)}`, now);
+		if (now - interfacesCheckedAt >= NET_CHECK_MS) {
+			const current = interfaces();
+			const change = interfaceChange(knownInterfaces, current);
+			knownInterfaces = current;
+			interfacesCheckedAt = now;
+			if (change) networkChanged(`the network changed (${change})`, now);
+		}
 		const r = request;
 		if (!r) return;
-		if (slept > SLEEP_GAP_MS) disrupt(`woke from sleep after ${clock(slept)}`);
-		if (now - r.interfacesCheckedAt >= NET_CHECK_MS) {
-			const current = interfaces();
-			const change = interfaceChange(r.interfaces, current);
-			r.interfaces = current;
-			r.interfacesCheckedAt = now;
-			if (change) disrupt(`the network changed (${change})`);
-		}
 		const silence = now - r.lastData;
 		const broken = disrupted(r);
 		const wanted = !probeUntrusted && (broken || silence >= config.noticeSeconds * 1000);
@@ -469,7 +510,7 @@ export default function (pi: ExtensionAPI): void {
 		if (wanted && !r.probing && now - r.lastProbeAt >= interval) void probeNow(r);
 		const back = restartFrom(r);
 		if (r.disruption && broken) {
-			if (back !== undefined && now - back >= config.graceSeconds * 1000) return restart(r.disruption.reason);
+			if (back !== undefined && now - back >= r.disruption.waitMs) return restart(r.disruption.reason);
 		} else if (config.stallSeconds > 0 && silence >= config.stallSeconds * 1000 && (probeUntrusted || r.probe?.ok)) {
 			return restart(`no data for ${clock(silence)}`);
 		}
@@ -479,8 +520,8 @@ export default function (pi: ExtensionAPI): void {
 	/** When the grace for a disrupted request starts: once the host answers again, or at once without probing. */
 	function restartFrom(r: Request): number | undefined {
 		if (!r.disruption || !disrupted(r)) return undefined;
-		if (probeUntrusted) return r.disruption.at;
-		return r.onlineSince === undefined ? undefined : Math.max(r.onlineSince, r.disruption.at);
+		if (probeUntrusted) return r.disruption.countsFrom;
+		return r.onlineSince === undefined ? undefined : Math.max(r.onlineSince, r.disruption.countsFrom);
 	}
 
 	/**
@@ -561,7 +602,7 @@ export default function (pi: ExtensionAPI): void {
 
 	pi.on("before_provider_request", (_event, ctx) => {
 		ctxRef = ctx;
-		data();
+		sent();
 		return undefined;
 	});
 	pi.on("after_provider_response", () => data());
