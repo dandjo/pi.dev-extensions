@@ -1277,12 +1277,21 @@ time out.
   included) is aborted 10 seconds later and the run resumes: a note in
   the transcript tells the model the response was lost. Data in the first 5
   seconds after a change does not count: it can be the last bytes of a
-  connection the change already cut. Sleep is noticed on Linux, macOS, and
-  Windows alike.
+  connection the change already cut.
+- An interface changes when an IPv4 address or an IPv6 /64 prefix comes or
+  goes. IPv6 privacy addresses rotate within their prefix every day without
+  cutting a connection, so they do not count, and neither do link-local
+  addresses.
+- Linux notices sleep after 5 seconds. On macOS and Windows the clocks run on
+  while the machine sleeps, so only a sleep of more than 60 seconds shows
+  there; a Pi that hung for a few seconds is no sleep.
 - A change also concerns the requests that start after it, until data comes
   through. Claude Code sends them over a connection opened before the change,
   which never answers, and gives up on it only after three to four minutes.
   Such a request is restarted after 30 seconds without data, once per change.
+  When the last response is more than 5 minutes old, the prompt cache is cold
+  and the API reads the whole context first, which took Claude Opus up to 42
+  seconds: then the restart waits 60 seconds.
 - A request silent for 5 minutes while the host answers is restarted too. At
   most three restarts follow each other without a response in between.
 - Before every request that follows a connection error, Pi's own retries

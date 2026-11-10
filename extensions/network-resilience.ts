@@ -13,12 +13,14 @@
  * - Stall notice: after 20 s without a stream event, the working message counts the wait and says whether the API
  *   host answers a TCP probe (DNS and connect, through HTTPS_PROXY when one is set).
  * - Restart on a fresh connection: a request that gets no data after the network came back, the machine woke from
- *   sleep, or the network interfaces changed (a VPN coming up, Wi-Fi to cable) is aborted 10 s later, and the run
- *   resumes with a note to the model. Data in the first 5 s after a change does not count: it can be the last bytes
- *   of a connection the change already cut. A change also concerns the requests that start after it, until data
- *   comes through: Claude Code, for one, sends them over a connection opened before the change, which never answers.
- *   Such a request is restarted after 30 s without data. So is any request silent for 5 min while the host answers.
- *   At most three restarts follow each other without a response in between.
+ *   sleep, or the network interfaces changed (a VPN coming up, Wi-Fi to cable; IPv4 addresses and IPv6 /64 prefixes
+ *   count, so rotating IPv6 privacy addresses do not) is aborted 10 s later, and the run resumes with a note to the
+ *   model. Data in the first 5 s after a change does not count: it can be the last bytes of a connection the change
+ *   already cut. A change also concerns the requests that start after it, until data comes through: Claude Code, for
+ *   one, sends them over a connection opened before the change, which never answers. Such a request is restarted
+ *   after 30 s without data, or after 60 s when the last response is more than 5 min old and the prompt cache cold.
+ *   So is any request silent for 5 min while the host answers. At most three restarts follow each other without a
+ *   response in between.
  * - Waiting for the network: before every request that follows a connection error, Pi's own retries included, the
  *   API host is probed. While it does not answer, Pi waits and probes every 3 s instead of spending its retries, for
  *   up to 30 min per outage. Esc interrupts the wait.
@@ -48,8 +50,14 @@ const CONFIG_FILE = path.join(getAgentDir(), "network-resilience.json");
 const STATUS_KEY = "network";
 const MESSAGE_TYPE = "network-resilience";
 const TICK_MS = 1_000;
-/** A tick came this much later than due: the machine slept. */
+/** The wall clock ran ahead of the monotonic clock by more than this: the machine slept. Linux's stops meanwhile. */
 const SLEEP_GAP_MS = 5_000;
+/**
+ * A tick came this much later than due: the machine slept. The monotonic clocks of macOS and Windows run on while it
+ * sleeps, so only the delay shows it there, and a Pi that froze for some seconds must not count. A shorter sleep goes
+ * unnoticed there; it seldom cuts a connection, and a Wi-Fi that dropped shows as an interface change.
+ */
+const LATE_TICK_MS = 60_000;
 const PROBE_TIMEOUT_MS = 5_000;
 const PROBE_INTERVAL_MS = 5_000;
 const OFFLINE_PROBE_INTERVAL_MS = 3_000;
@@ -58,10 +66,17 @@ const NET_CHECK_MS = 2_000;
 const SETTLE_MS = 5_000;
 /**
  * How long a request that starts after a change waits for its first data. It may go out over a connection opened
- * before the change, which then never answers. A fresh connection answers within seconds, a long uncached context
- * takes longer, and a restart costs the request: so this is longer than the grace.
+ * before the change, which then never answers. A fresh connection answers within seconds, and a restart costs the
+ * request: so this is longer than the grace.
  */
 const REUSED_WAIT_MS = 30_000;
+/**
+ * The same with a cold prompt cache, when the API reads the whole context first: 199 Claude Opus requests that wrote
+ * 100k to 950k tokens to the cache took up to 42 s to their first complete content block (November 2026).
+ */
+const REUSED_COLD_WAIT_MS = 60_000;
+/** Anthropic's prompt cache lives 5 min by default: a response this recent leaves it warm. */
+const CACHE_WARM_MS = 5 * 60_000;
 /**
  * Interfaces of containers and virtual machines come and go without touching the route to the API: Linux names, the
  * macOS VM bridges and Apple's peer-to-peer links, and the Windows adapters of WSL, Hyper-V, VirtualBox, and VMware.
@@ -268,13 +283,38 @@ function sleep(ms: number, signal: AbortSignal | undefined): Promise<void> {
 	});
 }
 
-/** IPv4 addresses per physical or VPN interface. */
+/**
+ * The /64 prefix of a global or unique local IPv6 address; undefined for link-local addresses, which every interface
+ * has without reaching the API, and for Teredo addresses, which change with the NAT mapping rather than the network.
+ */
+function ipv6Prefix(address: string): string | undefined {
+	const [left, right] = address.split("%")[0].toLowerCase().split("::");
+	const head = left ? left.split(":") : [];
+	const tail = right ? right.split(":") : [];
+	// An IPv4 address at the end takes the room of two groups.
+	const size = (groups: string[]) => groups.length + (groups.at(-1)?.includes(".") ? 1 : 0);
+	const groups = right === undefined ? head : [...head, ...Array(Math.max(0, 8 - size(head) - size(tail))).fill("0"), ...tail];
+	const top = groups.slice(0, 4).map((g) => Number.parseInt(g, 16));
+	if (top.length < 4 || top.some((g) => Number.isNaN(g))) return undefined;
+	if ((top[0] & 0xffc0) === 0xfe80 || (top[0] === 0x2001 && top[1] === 0)) return undefined;
+	return `${top.map((g) => g.toString(16)).join(":")}::/64`;
+}
+
+/**
+ * IPv4 addresses and IPv6 /64 prefixes per physical or VPN interface. Prefixes rather than addresses: IPv6 privacy
+ * addresses rotate within theirs every day, and the old ones keep serving the connections opened with them.
+ */
 function interfaces(): Map<string, string> {
 	const result = new Map<string, string>();
 	for (const [name, addresses] of Object.entries(os.networkInterfaces())) {
 		if (VIRTUAL_INTERFACE.test(name)) continue;
-		const v4 = (addresses ?? []).filter((a) => !a.internal && a.family === "IPv4").map((a) => a.address);
-		if (v4.length > 0) result.set(name, v4.sort().join(" "));
+		const keys = new Set<string>();
+		for (const a of addresses ?? []) {
+			if (a.internal) continue;
+			const key = a.family === "IPv4" ? a.address : a.family === "IPv6" ? ipv6Prefix(a.address) : undefined;
+			if (key) keys.add(key);
+		}
+		if (keys.size > 0) result.set(name, [...keys].sort().join(" "));
 	}
 	return result;
 }
@@ -348,6 +388,8 @@ export default function (pi: ExtensionAPI): void {
 	let interfacesCheckedAt = performance.now();
 	/** The last change no data has come through since. */
 	let pendingChange: { reason: string; at: number } | undefined;
+	/** When the provider last delivered data, for any request. */
+	let lastDataAt = Number.NEGATIVE_INFINITY;
 
 	function ui() {
 		return ctxRef?.hasUI ? ctxRef.ui : undefined;
@@ -362,7 +404,10 @@ export default function (pi: ExtensionAPI): void {
 	function startRequest(): void {
 		const now = performance.now();
 		request = { started: now, lastData: now, probing: false, lastProbeAt: 0, shown: false, gaveUp: false };
-		if (pendingChange) request.disruption = { reason: pendingChange.reason, at: pendingChange.at, countsFrom: now, waitMs: REUSED_WAIT_MS };
+		if (pendingChange) {
+			const waitMs = now - lastDataAt < CACHE_WARM_MS ? REUSED_WAIT_MS : REUSED_COLD_WAIT_MS;
+			request.disruption = { reason: pendingChange.reason, at: pendingChange.at, countsFrom: now, waitMs };
+		}
 	}
 
 	/** The request goes out: its silence counts from here, and so does a change before it, which data has to clear. */
@@ -384,6 +429,7 @@ export default function (pi: ExtensionAPI): void {
 
 	function data(): void {
 		const now = performance.now();
+		lastDataAt = now;
 		if (pendingChange && now > pendingChange.at + SETTLE_MS) pendingChange = undefined;
 		const r = request;
 		if (!r) return;
@@ -488,12 +534,12 @@ export default function (pi: ExtensionAPI): void {
 	function tick(): void {
 		const wall = Date.now();
 		const now = performance.now();
-		// Linux's monotonic clock stops while the machine sleeps, those of macOS and Windows run on: the larger gap of
-		// the two clocks shows the sleep on all three.
-		const slept = Math.max(wall - lastWall, now - lastMono) - TICK_MS;
+		const missed = wall - lastWall - (now - lastMono);
+		const late = now - lastMono - TICK_MS;
 		lastWall = wall;
 		lastMono = now;
-		if (slept > SLEEP_GAP_MS) networkChanged(`woke from sleep after ${clock(slept)}`, now);
+		if (missed > SLEEP_GAP_MS) networkChanged(`woke from sleep after ${clock(missed)}`, now);
+		else if (late > LATE_TICK_MS) networkChanged(`woke from sleep after ${clock(late)}`, now);
 		if (now - interfacesCheckedAt >= NET_CHECK_MS) {
 			const current = interfaces();
 			const change = interfaceChange(knownInterfaces, current);
