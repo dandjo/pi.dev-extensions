@@ -8,7 +8,8 @@ sessions message each other, runs Claude Code's hooks, brings over Claude
 Code's subagents, questions, side questions, goals, loops, scheduled prompts,
 diff view, agent panel, and Remote Control for the Claude app, reads and
 changes OpenProject and GitLab, reads and writes the clipboard, controls your
-Chrome, and keeps requests alive through network trouble.
+Chrome, keeps requests alive through network trouble, and keeps the Claude
+Agent SDK current.
 
 The repository mirrors `~/.pi/agent/`: a file at `extensions/<name>.ts`
 belongs at `~/.pi/agent/extensions/<name>.ts`.
@@ -36,6 +37,7 @@ belongs at `~/.pi/agent/extensions/<name>.ts`.
 | `claude-remote-control.ts` | `/remote-control`: drive the session from the Claude app and claude.ai/code               | A Claude model on the Claude Code login                          |
 | `background-agents.ts`     | The agent panel below the prompt: ↓ to the agents, Enter opens one, Ctrl+B to background  | `subagents.ts`                                                   |
 | `claude-stream-only.ts`    | Keeps Claude Code on streamed responses, so a stalled one cannot leave Pi waiting         | `pi-claude-subscription`                                         |
+| `claude-sdk-update.ts`     | Installs a newer Claude Agent SDK, and with it Claude Code, as soon as there is one       | `pi-claude-subscription`, npm                                    |
 | `network-resilience.ts`    | Claude Code's handling of dropped connections: stall notice, restart, network wait        | —                                                                |
 
 Every extension is a single file that works on its own. Code that several of
@@ -48,7 +50,7 @@ other copies. `web_search` comes from the npm package `pi-web-access`; see
 ## Set up Pi
 
 Follow the steps in order — together they are the complete setup: Pi itself,
-the Claude subscription, all twenty-one extensions, and the browser connection.
+the Claude subscription, all twenty-two extensions, and the browser connection.
 Every step except the Chrome switch in step 4 is a
 shell command, so an agent can carry them out as well.
 
@@ -109,9 +111,14 @@ context window minus 23k tokens, so at 977k for a 1M model, and answers
 compacting at 983,616. Pi does recover from the error by compacting and
 retrying, but the turn fails first.
 
+The package brings the Claude Agent SDK, and with it Claude Code, at the
+version of its first install, and `pi update` does not move it.
+`claude-sdk-update.ts` from step 3 keeps it current, so that Claude Code knows
+the newest models; see [claude-sdk-update](#claude-sdk-update).
+
 ### 3. Install the extensions
 
-Link all twenty-one from the clone, so that `git pull` updates them:
+Link all twenty-two from the clone, so that `git pull` updates them:
 
 ```bash
 mkdir -p ~/.pi/agent/extensions
@@ -1252,6 +1259,36 @@ Pi while Pi waits for the answer, until the run is aborted.
   kept.
 - Claude Code processes started before the extension was loaded keep their
   environment; start Pi anew to apply it.
+
+## claude-sdk-update
+
+Keeps the Claude Agent SDK of `pi-claude-subscription` current. The SDK brings
+Claude Code along, and Claude Code takes each model's context window from a
+list built into it: a model newer than the bundled Claude Code counts as 200k,
+so Claude Code refuses a longer session with "Prompt is too long" before any
+request, although the model takes 1M. `pi update` does not move the SDK,
+since npm keeps a dependency at the version of `package-lock.json`.
+
+- At every start in the terminal, Pi compares the SDK in `~/.pi/agent/npm`
+  with the npm registry in the background. Print, JSON, and RPC mode,
+  subagents, and `PI_OFFLINE` skip the check.
+- A newer version within the range the installed packages allow
+  (`pi-claude-subscription` asks for `^0.3.289`) is installed right away, with
+  `npm update @anthropic-ai/claude-agent-sdk --legacy-peer-deps` as Pi
+  installs its packages: without the flag, npm would install Pi itself as a
+  peer dependency. A notice names the old and the new SDK and Claude Code
+  version, and Pi processes started from then on use them. Running sessions
+  keep the SDK they loaded; start them anew.
+- A newer version outside the range is reported once per version: it needs a
+  new `pi-claude-subscription` first (`pi update npm:pi-claude-subscription`).
+- `/claude-sdk-update` checks and installs at once and reports the state,
+  also when nothing is due.
+- Pi processes starting together update one at a time, through a lock file
+  in `~/.pi/agent/npm`. While npm replaces the package, Claude Code is missing
+  for a few seconds; a request that starts Claude Code just then fails and
+  can be repeated.
+- Works with npm, Pi's default. With an `npmCommand` setting for pnpm or Bun,
+  the extension does nothing.
 
 ## network-resilience
 
