@@ -2,14 +2,14 @@
 
 Extensions for [Pi](https://pi.dev), the terminal coding agent, that bring
 over what Claude Code does: Pi runs Claude models on your Claude subscription,
-shows a status line with the subscription limits, draws tool calls as compact
-teasers, searches and reads the web, keeps a memory per project as Claude Code
-does, titles every session, lets sessions message each other, runs Claude
-Code's hooks, brings over Claude Code's subagents, questions, side questions,
-goals, loops, scheduled prompts, diff view, agent panel, and Remote Control
-for the Claude app, reads and changes OpenProject and GitLab, reads and writes
-the clipboard, controls your Chrome, keeps requests alive through network
-trouble, and keeps the Claude Agent SDK current.
+shows a status line with the subscription limits, searches and reads the web,
+keeps a memory per project as Claude Code does, titles every session, lets
+sessions message each other, runs Claude Code's hooks, brings over Claude
+Code's subagents, questions, side questions, goals, loops, scheduled prompts,
+diff view, agent panel, and Remote Control for the Claude app, reads and
+changes OpenProject and GitLab, reads and writes the clipboard, controls your
+Chrome, keeps requests alive through network trouble, and keeps the Claude
+Agent SDK current.
 
 The repository mirrors `~/.pi/agent/`: a file at `extensions/<name>.ts`
 belongs at `~/.pi/agent/extensions/<name>.ts`.
@@ -19,7 +19,6 @@ belongs at `~/.pi/agent/extensions/<name>.ts`.
 | `claude-marketplaces.ts`   | Loads the plugins of Claude Code marketplaces into Pi and keeps them current              | Git access to each marketplace                                   |
 | `statusline.ts`            | Replaces Pi's footer with a Claude Code style status line, for any provider               | —                                                                |
 | `claude-usage.ts`          | Adds the Claude subscription limits and usage credits to the status line                  | `statusline.ts`, a Claude subscription login (Pi or Claude Code) |
-| `compact-tools.ts`         | Draws every tool call as a teaser, as Claude Code does; Ctrl+O shows all of it            | —                                                                |
 | `web-tools.ts`             | Adds `web_fetch`: reads a page locally and lets a small model answer from it              | —                                                                |
 | `openproject.ts`           | Adds `openproject`: reads and changes OpenProject through its API v3, as you              | An OpenProject API token for each instance                       |
 | `gitlab.ts`                | Adds `gitlab`: reads and changes GitLab through its REST API v4 and GraphQL, as you       | A GitLab personal access token for each instance                 |
@@ -51,7 +50,7 @@ other copies. `web_search` comes from the npm package `pi-web-access`; see
 ## Set up Pi
 
 Follow the steps in order — together they are the complete setup: Pi itself,
-the Claude subscription, all twenty-four extensions, and the browser connection.
+the Claude subscription, all twenty-three extensions, and the browser connection.
 Every step except the Chrome switch in step 4 is a
 shell command, so an agent can carry them out as well.
 
@@ -119,7 +118,7 @@ the newest models; see [claude-sdk-update](#claude-sdk-update).
 
 ### 3. Install the extensions
 
-Link all twenty-four from the clone, so that `git pull` updates them:
+Link all twenty-three from the clone, so that `git pull` updates them:
 
 ```bash
 mkdir -p ~/.pi/agent/extensions
@@ -198,8 +197,6 @@ choose **Allow**. What the connection can see and why it is set up this way:
 Start Pi in a project, or run `/reload` in a running session:
 
 - The footer shows the status line with your subscription limits.
-- A tool call is one line, `Bash(…)`, with a few lines of its result below;
-  Ctrl+O shows all of it.
 - "Search the web for …" answers through `web_search`.
 - "Read https://… and tell me …" answers through `web_fetch`.
 - "Which statuses does OpenProject have?" answers through `openproject`.
@@ -380,52 +377,6 @@ time of the next attempt.
 | `⚠ no valid OAuth token`    | No unexpired token in either file, and Claude Code could not renew its login: run `claude`, then `/login` |
 | `⚠ HTTP 401`                | The endpoint rejected the token            |
 | `⚠ endpoint unreachable`    | Offline, or no answer within 10 seconds    |
-
-## compact-tools
-
-Draws every tool call as a teaser, the way Claude Code does, instead of Pi's
-tall boxed rows:
-
-```
-Bash(git status --short)
-  ⎿  M src/index.ts
-     M README.md
-     … +4 lines (ctrl+o to expand)
-
-Read(src/index.ts)
-  ⎿  Read 212 lines
-
-Update(src/index.ts)
-  ⎿  Added 3 lines, removed 1 line
-     …the diff, up to ten lines…
-```
-
-- The first line names the call: the tool and the argument that matters — the
-  command, the path, the URL, the request — cut after two terminal lines.
-  Pi's tools carry Claude Code's names: `Bash`, `Read`, `Update`, `Write`,
-  `Search`, `List`; an MCP tool reads `server - tool (MCP)`, a subagent by
-  its type.
-- The row keeps the background of Pi's rows, which shows the state: pending
-  while the tool runs, then success or error, in the theme's `toolPendingBg`,
-  `toolSuccessBg`, and `toolErrorBg`. Only the blank lines of padding above
-  and below are gone.
-- Below it comes the result as a teaser. Where a summary says more than the
-  output, it stands alone: `Read 212 lines`, `Wrote 40 lines`, `Found 14
-  lines`, `Listed 22 paths`, and for a subagent `Done (15 tool uses · 40.2k
-  tokens · 1m 3s)`. An edit shows its line counts and the first ten lines of
-  the diff. Everything else shows its first three lines and how many more
-  there are. A failed call shows its last three lines instead, in red, since
-  that is where the error stands, and a running one its latest output.
-- Ctrl+O, or in fullscreen mode a click on the row, expands all rows: the
-  call with its full arguments, and the result drawn by the tool's own
-  renderer — highlighted file content, the whole diff, a subagent's report.
-- It covers every tool — Pi's own, those of other extensions, and MCP tools —
-  through `pi.registerToolRenderer()`. What the model sees does not change,
-  and the HTML export shows the same rows. Tools whose own result is a teaser
-  already (`AskUserQuestion`, `CronCreate`) keep it.
-- The constants at the top of the file set the amounts: `PREVIEW_LINES` (3),
-  `DIFF_PREVIEW_LINES` (10, `0` for the summary alone), and `CALL_LINES` (2).
-- Without the file, the rows are Pi's again; nothing is stored.
 
 ## web-tools
 
