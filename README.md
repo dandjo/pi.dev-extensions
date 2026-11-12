@@ -395,8 +395,8 @@ $ git status --short
   first loses its blank lines. If it still does not fit, it shows its first
   lines — the call, then the result — and as the fourth line how many lines
   are hidden. Shell output shows its last lines instead, as Pi's own preview
-  does, with that line between the command and the output. The time a
-  command took is left out of a cut row.
+  does, with that line between the command and the output. The line with the
+  time a command took stays below as the last line and does not count.
 - Ctrl+O, or in fullscreen mode a click on the row, shows the row in full, as
   Pi does.
 - `codemode` keeps Pi's row as it is: its own preview already limits the

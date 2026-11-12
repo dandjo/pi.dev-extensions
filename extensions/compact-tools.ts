@@ -5,7 +5,7 @@
  *   lines. If it still does not fit, it shows its first lines (the call, then the result) and, as its last line, how
  *   many lines are hidden, in Pi's form "... (N more lines, ctrl+o to expand)". Shell output shows its last lines
  *   instead, as Pi's own preview does, with that line between the command and the output, where the hidden lines
- *   are. The time a shell command took is left out of a cut row.
+ *   are. The line with the time a shell command took stays below as the last line and does not count.
  * - Expanding (ctrl+o, or a click on the row) shows the row as Pi does, in full.
  * - The tools in UNCUT keep Pi's row as it is: codemode, whose own preview already limits the script, its calls and
  *   its output.
@@ -150,17 +150,17 @@ function layout(row: Row, width: number): Layout {
 	const call = lines(row.call.collapsed);
 	const result = lines(row.result?.collapsed);
 	if (call.length + result.length <= MAX_LINES) return done(call, result);
+	// The shell timer stays the last line of the row and does not count.
 	const compactCall = call.filter((line) => !isBlank(line));
 	const compactResult = result.filter((line) => !isBlank(line));
-	if (compactCall.length + compactResult.length <= MAX_LINES) return done(compactCall, compactResult);
-
-	// Cut: the content without blank lines and the shell timer. Where Pi's collapsed form is too long for its share,
-	// the full content is cut instead, so that Pi's own "more lines" notes do not stand in the middle and the count of
-	// hidden lines is right.
+	const timer = compactResult.filter(isTimer);
 	const content = (from: string[]) => from.filter((line) => !isBlank(line) && !isTimer(line));
 	let callLines = content(compactCall);
 	let resultLines = content(compactResult);
-	if (callLines.length + resultLines.length <= MAX_LINES) return done(callLines, resultLines);
+	if (callLines.length + resultLines.length <= MAX_LINES) return done(callLines, [...resultLines, ...timer]);
+
+	// Cut. Where Pi's collapsed form is too long for its share, the full content is cut instead, so that Pi's own
+	// "more lines" notes do not stand in the middle and the count of hidden lines is right.
 
 	const room = MAX_LINES - 1;
 	// The call takes at most two lines while there is a result, so that a line of the result shows.
@@ -171,14 +171,14 @@ function layout(row: Row, width: number): Layout {
 	if (resultLines.length > resultRoom) resultLines = content(lines(full(row.result)));
 	const shownResult = row.fromEnd ? resultLines.slice(-resultRoom || resultLines.length) : resultLines.slice(0, resultRoom);
 	const hidden = callLines.length - shownCall.length + (resultLines.length - shownResult.length);
-	if (hidden === 0) return done(shownCall, shownResult);
+	if (hidden === 0) return done(shownCall, [...shownResult, ...timer]);
 
 	// The note stands where the lines are hidden: before the end of shell output, else at the end.
 	const tail = row.fromEnd && shownResult.length > 0;
 	const earlier = tail && shownCall.length === callLines.length;
 	const hint = truncateToWidth(row.hint(hidden, earlier), width, "");
 	if (!row.result) return done([...shownCall, hint], []);
-	return done(shownCall, tail ? [hint, ...shownResult] : [...shownResult, hint]);
+	return done(shownCall, tail ? [hint, ...shownResult, ...timer] : [...shownResult, hint, ...timer]);
 }
 
 /** The call as Pi draws it for a tool without a call renderer: the name and the arguments. */
