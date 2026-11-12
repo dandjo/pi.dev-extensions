@@ -1,19 +1,19 @@
 /**
  * Compact tools: draws every tool call as a teaser, the way Claude Code does, instead of Pi's tall boxed rows.
  *
- *   ● Bash(git status --short)
+ *   Bash(git status --short)
  *     ⎿  M src/index.ts
  *        M README.md
  *        … +4 lines (ctrl+o to expand)
  *
- *   ● Read(src/index.ts)
+ *   Read(src/index.ts)
  *     ⎿  Read 212 lines
  *
- * - One line names the call: a bullet, the tool, and the argument that matters (the command, the path, the URL), cut
- *   after CALL_LINES terminal lines.
+ * - One line names the call: the tool and the argument that matters (the command, the path, the URL), cut after
+ *   CALL_LINES terminal lines.
  * - The row keeps the background of Pi's rows, which shows the state: pending while the tool runs, then success or
- *   error, in the theme's toolPendingBg, toolSuccessBg and toolErrorBg. The bullet takes the matching colour. The
- *   blank lines of padding above and below are gone.
+ *   error, in the theme's toolPendingBg, toolSuccessBg and toolErrorBg. The blank lines of padding above and below
+ *   are gone.
  * - Below it the result as a teaser: a summary where one says more than the output ("Read 212 lines", "Found 14
  *   matches", "Added 3 lines, removed 1 line"), else the first PREVIEW_LINES lines and how many more there are. A
  *   failed call shows its last lines instead, since that is where the error stands. An edit shows its diff up to
@@ -45,7 +45,6 @@ const CALL_LINES = 2;
 /** Tools whose own result renderer is a teaser already: collapsed rows show it as it is. */
 const OWN_RESULT = new Set(["AskUserQuestion", "CronCreate"]);
 
-const BULLET = "●";
 const ELBOW = "⎿";
 /** Columns before the result text: two spaces, the elbow, two spaces. */
 const GUTTER = 5;
@@ -430,7 +429,6 @@ function compact(tool: string, base: Renderers | undefined): Renderers {
 			const args = (rawArgs && typeof rawArgs === "object" ? rawArgs : {}) as Args;
 			const component = context.lastComponent instanceof Lines ? context.lastComponent : new Lines();
 			const pad = " ".repeat(context.outputPad);
-			const bullet = theme.fg(context.isPartial ? "muted" : context.isError ? "error" : "success", BULLET);
 			const name = theme.fg("toolTitle", theme.bold(displayName(tool, args)));
 			const summary = callSummary(tool, args, context.cwd);
 			const note = summary.note ? theme.fg("dim", ` ${summary.note}`) : "";
@@ -443,7 +441,7 @@ function compact(tool: string, base: Renderers | undefined): Renderers {
 					const text = summary.text.split("\n").join("\n  ");
 					const call = wrapTextWithAnsi(`${name}(${theme.fg("toolTitle", text)})${note}`, room);
 					const detail = summary.complete ? [] : argumentLines(tool, args, theme).flatMap((line) => wrapTextWithAnsi(line, room - 2));
-					return [...call.map((line, i) => `${pad}${i === 0 ? bullet : " "} ${line}`), ...detail.map((line) => `${pad}    ${line}`)];
+					return [...call.map((line, i) => `${pad}${i === 0 ? "" : "  "}${line}`), ...detail.map((line) => `${pad}    ${line}`)];
 				}
 				// One logical line: a command over several lines shows its first and says that more follows.
 				const [first, ...rest] = summary.text.split("\n");
@@ -454,7 +452,7 @@ function compact(tool: string, base: Renderers | undefined): Renderers {
 					call = call.slice(0, CALL_LINES);
 					call[CALL_LINES - 1] = truncateToWidth(call[CALL_LINES - 1], Math.max(1, room - visibleWidth(end)), "") + end;
 				}
-				return call.map((line, i) => `${pad}${i === 0 ? bullet : " "} ${line}`);
+				return call.map((line, i) => `${pad}${i === 0 ? "" : "  "}${line}`);
 			};
 			return component;
 		},

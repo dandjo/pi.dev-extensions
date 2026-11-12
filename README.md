@@ -198,7 +198,7 @@ choose **Allow**. What the connection can see and why it is set up this way:
 Start Pi in a project, or run `/reload` in a running session:
 
 - The footer shows the status line with your subscription limits.
-- A tool call is one line, `● Bash(…)`, with a few lines of its result below;
+- A tool call is one line, `Bash(…)`, with a few lines of its result below;
   Ctrl+O shows all of it.
 - "Search the web for …" answers through `web_search`.
 - "Read https://… and tell me …" answers through `web_fetch`.
@@ -387,28 +387,28 @@ Draws every tool call as a teaser, the way Claude Code does, instead of Pi's
 tall boxed rows:
 
 ```
-● Bash(git status --short)
+Bash(git status --short)
   ⎿  M src/index.ts
      M README.md
      … +4 lines (ctrl+o to expand)
 
-● Read(src/index.ts)
+Read(src/index.ts)
   ⎿  Read 212 lines
 
-● Update(src/index.ts)
+Update(src/index.ts)
   ⎿  Added 3 lines, removed 1 line
      …the diff, up to ten lines…
 ```
 
-- The first line names the call: a bullet, the tool, and the argument that
-  matters — the command, the path, the URL, the request — cut after two
-  terminal lines. Pi's tools carry Claude Code's names: `Bash`, `Read`,
-  `Update`, `Write`, `Search`, `List`; an MCP tool reads
-  `server - tool (MCP)`, a subagent by its type.
+- The first line names the call: the tool and the argument that matters — the
+  command, the path, the URL, the request — cut after two terminal lines.
+  Pi's tools carry Claude Code's names: `Bash`, `Read`, `Update`, `Write`,
+  `Search`, `List`; an MCP tool reads `server - tool (MCP)`, a subagent by
+  its type.
 - The row keeps the background of Pi's rows, which shows the state: pending
   while the tool runs, then success or error, in the theme's `toolPendingBg`,
-  `toolSuccessBg`, and `toolErrorBg`. The bullet takes the matching colour.
-  Only the blank lines of padding above and below are gone.
+  `toolSuccessBg`, and `toolErrorBg`. Only the blank lines of padding above
+  and below are gone.
 - Below it comes the result as a teaser. Where a summary says more than the
   output, it stands alone: `Read 212 lines`, `Wrote 40 lines`, `Found 14
   lines`, `Listed 22 paths`, and for a subagent `Done (15 tool uses · 40.2k
