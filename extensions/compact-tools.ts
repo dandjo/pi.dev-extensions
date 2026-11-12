@@ -1,5 +1,5 @@
 /**
- * Compact tools: draws every tool call as a teaser, the way Claude Code does, instead of Pi's boxed rows.
+ * Compact tools: draws every tool call as a teaser, the way Claude Code does, instead of Pi's tall boxed rows.
  *
  *   ● Bash(git status --short)
  *     ⎿  M src/index.ts
@@ -9,8 +9,11 @@
  *   ● Read(src/index.ts)
  *     ⎿  Read 212 lines
  *
- * - One line names the call: a bullet that shows the state (grey while it runs, green when it succeeded, red when it
- *   failed), the tool, and the argument that matters (the command, the path, the URL), cut to the terminal width.
+ * - One line names the call: a bullet, the tool, and the argument that matters (the command, the path, the URL), cut
+ *   after CALL_LINES terminal lines.
+ * - The row keeps the background of Pi's rows, which shows the state: pending while the tool runs, then success or
+ *   error, in the theme's toolPendingBg, toolSuccessBg and toolErrorBg. The bullet takes the matching colour. The
+ *   blank lines of padding above and below are gone.
  * - Below it the result as a teaser: a summary where one says more than the output ("Read 212 lines", "Found 14
  *   matches", "Added 3 lines, removed 1 line"), else the first PREVIEW_LINES lines and how many more there are. A
  *   failed call shows its last lines instead, since that is where the error stands. An edit shows its diff up to
@@ -75,8 +78,9 @@ interface Renderers {
 /** A component drawn by a function of the width, so a line can be cut to the terminal instead of wrapped. */
 class Lines implements Component {
 	build: (width: number) => string[] = () => [];
+	bg: Background = (text) => text;
 	render(width: number): string[] {
-		return fit(this.build(Math.max(1, width)), width);
+		return shade(fit(this.build(Math.max(1, width)), width), width, this.bg);
 	}
 	invalidate(): void {}
 }
@@ -86,6 +90,7 @@ class Gutter implements Component {
 	inner: Component | undefined;
 	pad = 0;
 	style: (text: string) => string = (text) => text;
+	bg: Background = (text) => text;
 	render(width: number): string[] {
 		if (!this.inner) return [];
 		const lines = this.inner.render(Math.max(1, width - this.pad - GUTTER));
@@ -93,7 +98,7 @@ class Gutter implements Component {
 		let end = lines.length;
 		while (start < end && isBlank(lines[start])) start++;
 		while (end > start && isBlank(lines[end - 1])) end--;
-		return fit(gutter(lines.slice(start, end), this.pad, this.style), width);
+		return shade(fit(gutter(lines.slice(start, end), this.pad, this.style), width), width, this.bg);
 	}
 	invalidate(): void {
 		this.inner?.invalidate?.();
@@ -103,6 +108,23 @@ class Gutter implements Component {
 /** No line may be wider than the terminal, however narrow it is. */
 function fit(lines: string[], width: number): string[] {
 	return lines.map((line) => (visibleWidth(line) > width ? truncateToWidth(line, Math.max(1, width), "") : line));
+}
+
+type Background = (text: string) => string;
+
+/** The background of a row by its state, as Pi's boxed rows have it. */
+function background(theme: Theme, isPartial: boolean, isError: boolean): Background {
+	const token = isPartial ? "toolPendingBg" : isError ? "toolErrorBg" : "toolSuccessBg";
+	return (text) => theme.bg(token, text);
+}
+
+/** Lines on a background over the full width. A full reset inside a line would end it there, so it starts anew. */
+function shade(lines: string[], width: number, bg: Background): string[] {
+	const open = bg("").replace(/\x1b\[49m$/, "");
+	return lines.map((line) => {
+		const padded = line + " ".repeat(Math.max(0, width - visibleWidth(line)));
+		return bg(open ? padded.replace(/\x1b\[0?m/g, (reset) => reset + open) : padded);
+	});
 }
 
 function isBlank(line: string): boolean {
@@ -414,6 +436,7 @@ function compact(tool: string, base: Renderers | undefined): Renderers {
 			const note = summary.note ? theme.fg("dim", ` ${summary.note}`) : "";
 			const expanded = context.expanded;
 
+			component.bg = background(theme, context.isPartial, context.isError);
 			component.build = (width) => {
 				const room = Math.max(10, width - context.outputPad * 2 - 2);
 				if (expanded) {
@@ -439,6 +462,7 @@ function compact(tool: string, base: Renderers | undefined): Renderers {
 		renderResult(result: Result, options: RenderOptions, theme: Theme, context: RenderContext): Component {
 			const args = (context.args && typeof context.args === "object" ? context.args : {}) as Args;
 			const elbow = (text: string) => theme.fg("muted", text);
+			const bg = background(theme, options.isPartial, context.isError);
 
 			// Expanded, and for tools that tease already: the tool's own renderer, behind the gutter.
 			const own = options.expanded || (OWN_RESULT.has(tool) && !context.isError);
@@ -450,6 +474,7 @@ function compact(tool: string, base: Renderers | undefined): Renderers {
 					wrapper.inner = inner;
 					wrapper.pad = context.outputPad;
 					wrapper.style = elbow;
+					wrapper.bg = bg;
 					return wrapper;
 				} catch {
 					// Fall through to the plain text below.
@@ -457,6 +482,7 @@ function compact(tool: string, base: Renderers | undefined): Renderers {
 			}
 
 			const component = context.lastComponent instanceof Lines ? context.lastComponent : new Lines();
+			component.bg = bg;
 			if (options.expanded) {
 				// A write's result says only that it happened: the content written is the detail.
 				const content = tool === "write" && !context.isError ? clean(str(args.content)).trimEnd() : "";

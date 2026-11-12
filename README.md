@@ -384,7 +384,7 @@ time of the next attempt.
 ## compact-tools
 
 Draws every tool call as a teaser, the way Claude Code does, instead of Pi's
-boxed rows with their background and padding:
+tall boxed rows:
 
 ```
 ● Bash(git status --short)
@@ -400,12 +400,15 @@ boxed rows with their background and padding:
      …the diff, up to ten lines…
 ```
 
-- The first line names the call: a bullet for the state (grey while the tool
-  runs, green when it succeeded, red when it failed), the tool, and the
-  argument that matters — the command, the path, the URL, the request — cut
-  after two terminal lines. Pi's tools carry Claude Code's names: `Bash`,
-  `Read`, `Update`, `Write`, `Search`, `List`; an MCP tool reads
+- The first line names the call: a bullet, the tool, and the argument that
+  matters — the command, the path, the URL, the request — cut after two
+  terminal lines. Pi's tools carry Claude Code's names: `Bash`, `Read`,
+  `Update`, `Write`, `Search`, `List`; an MCP tool reads
   `server - tool (MCP)`, a subagent by its type.
+- The row keeps the background of Pi's rows, which shows the state: pending
+  while the tool runs, then success or error, in the theme's `toolPendingBg`,
+  `toolSuccessBg`, and `toolErrorBg`. The bullet takes the matching colour.
+  Only the blank lines of padding above and below are gone.
 - Below it comes the result as a teaser. Where a summary says more than the
   output, it stands alone: `Read 212 lines`, `Wrote 40 lines`, `Found 14
   lines`, `Listed 22 paths`, and for a subagent `Done (15 tool uses · 40.2k
