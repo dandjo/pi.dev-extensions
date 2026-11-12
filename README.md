@@ -19,6 +19,7 @@ belongs at `~/.pi/agent/extensions/<name>.ts`.
 | `claude-marketplaces.ts`   | Loads the plugins of Claude Code marketplaces into Pi and keeps them current              | Git access to each marketplace                                   |
 | `statusline.ts`            | Replaces Pi's footer with a Claude Code style status line, for any provider               | —                                                                |
 | `claude-usage.ts`          | Adds the Claude subscription limits and usage credits to the status line                  | `statusline.ts`, a Claude subscription login (Pi or Claude Code) |
+| `compact-tools.ts`         | Cuts each collapsed tool row to four lines; Ctrl+O shows all of it                        | —                                                                |
 | `web-tools.ts`             | Adds `web_fetch`: reads a page locally and lets a small model answer from it              | —                                                                |
 | `openproject.ts`           | Adds `openproject`: reads and changes OpenProject through its API v3, as you              | An OpenProject API token for each instance                       |
 | `gitlab.ts`                | Adds `gitlab`: reads and changes GitLab through its REST API v4 and GraphQL, as you       | A GitLab personal access token for each instance                 |
@@ -50,7 +51,7 @@ other copies. `web_search` comes from the npm package `pi-web-access`; see
 ## Set up Pi
 
 Follow the steps in order — together they are the complete setup: Pi itself,
-the Claude subscription, all twenty-three extensions, and the browser connection.
+the Claude subscription, all twenty-four extensions, and the browser connection.
 Every step except the Chrome switch in step 4 is a
 shell command, so an agent can carry them out as well.
 
@@ -118,7 +119,7 @@ the newest models; see [claude-sdk-update](#claude-sdk-update).
 
 ### 3. Install the extensions
 
-Link all twenty-three from the clone, so that `git pull` updates them:
+Link all twenty-four from the clone, so that `git pull` updates them:
 
 ```bash
 mkdir -p ~/.pi/agent/extensions
@@ -377,6 +378,32 @@ time of the next attempt.
 | `⚠ no valid OAuth token`    | No unexpired token in either file, and Claude Code could not renew its login: run `claude`, then `/login` |
 | `⚠ HTTP 401`                | The endpoint rejected the token            |
 | `⚠ endpoint unreachable`    | Offline, or no answer within 10 seconds    |
+
+## compact-tools
+
+Cuts each collapsed tool row to four lines and leaves everything else as Pi
+draws it:
+
+```
+$ git status --short
+ M src/index.ts
+ M README.md
+... (6 more lines, ctrl+o to expand)
+```
+
+- A row that fits in four lines stays exactly as Pi draws it. A longer one
+  first loses its blank lines. If it still does not fit, it shows its first
+  lines — the call, then the result — and as the fourth line how many lines
+  are hidden. Shell output shows its last lines instead, as Pi's own preview
+  does, with that line between the command and the output. The time a
+  command took is left out of a cut row.
+- Ctrl+O, or in fullscreen mode a click on the row, shows the row in full, as
+  Pi does.
+- `codemode` keeps Pi's row as it is: its own preview already limits the
+  script, its calls, and its output.
+- It covers Pi's tools, those of other extensions, and MCP tools, through
+  `pi.registerToolRenderer()`. What the model sees does not change, and
+  nothing is stored. `MAX_LINES` at the top of the file sets the four lines.
 
 ## web-tools
 
