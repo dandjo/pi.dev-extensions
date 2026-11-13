@@ -50,9 +50,10 @@
  *   provider runs it, which is why Remote Control is offered only while a Claude model is active: switching to another
  *   model ends the connection. Pi's own Anthropic login (~/.pi/agent/auth.json) is the fallback. Claude Code renews the
  *   token only when it makes a request, so after hours without a prompt it has run out and the four-hourly renewal of
- *   the worker credential fails; then a short Claude Code process is asked for its usage, which renews the token under
- *   Claude Code's own lock (renewClaudeLogin below). A renewal that keeps failing for five minutes goes into the
- *   session log with its reason, and so does the reconnect after it.
+ *   the worker credential fails; then claude-login.ts is asked ("claude-login:source" on the event bus) to have
+ *   Claude Code renew it, under Claude Code's own lock. Without that extension a login that ran out stays run out
+ *   until a prompt renews it. A renewal that keeps failing for five minutes goes into the session log with its
+ *   reason, and so does the reconnect after it.
  * - What the app sees: the conversation so far, then every user prompt, assistant message (text, thinking, tool calls
  *   under Claude Code's tool names) and tool result, and a result after each run. Permission prompts do not exist in
  *   Pi, so the app never has to approve anything.
@@ -252,8 +253,8 @@ const execFileAsync = promisify(execFile);
  * Claude Code's stored login, the JSON with claudeAiOauth, or undefined. On macOS Claude Code keeps it in the login
  * keychain as the generic password "Claude Code-credentials" (with CLAUDE_CONFIG_DIR set, followed by "-" and the first
  * eight hex digits of that directory's SHA-256), and .credentials.json is only its fallback; elsewhere the file is the
- * store. macOS 26 prints a password with non-ASCII content as hex, which is decoded here. claude-usage.ts carries a
- * copy of this function: change them alike.
+ * store. macOS 26 prints a password with non-ASCII content as hex, which is decoded here.
+ * claude-login.ts, claude-usage.ts carry a copy of this function: change them alike.
  */
 async function claudeCodeCredentials(): Promise<any> {
 	if (process.platform === "darwin") {
@@ -303,7 +304,7 @@ function globalNpmRoot(): string | undefined {
  * The Claude Agent SDK that pi-claude-subscription brings, wherever Pi installed that package: in the user scope
  * (~/.pi/agent/npm), the project scope (.pi/npm), or npm's global root (Pi's legacy installs); hoisted, or below the
  * package itself. Undefined when it is in none of them.
- * claude-usage.ts carries a copy of this function: change them alike.
+ * claude-login.ts carries a copy of this function: change them alike.
  */
 function claudeSdkDir(): string | undefined {
 	const find = (roots: string[]) => {
@@ -324,7 +325,7 @@ function claudeSdkDir(): string | undefined {
 
 /**
  * The claude.ai access token: Claude Code's first (it carries the sessions scope), then Pi's own Anthropic login. Claude
- * Code renews its token only when it makes a request (see renewClaudeLogin). Never printed, never written anywhere.
+ * Code renews its token only when it makes a request (see claude-login.ts). Never printed, never written anywhere.
  */
 async function readAccessToken(): Promise<Token | null> {
 	const now = Date.now() + 60_000;
@@ -347,6 +348,8 @@ async function readAccessToken(): Promise<Token | null> {
 }
 
 const LOGIN_HINT = "Remote Control needs a claude.ai login: run `claude`, then /login, and try /remote-control again.";
+/** Added to LOGIN_HINT while claude-login.ts is not loaded: the login may only have run out. */
+const NO_RENEWAL_HINT = " A login that ran out while Pi idled is renewed by claude-login.ts, which is not loaded.";
 
 function clock(ms: number): string {
 	return new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
@@ -1041,115 +1044,15 @@ interface SubagentView {
 	error?: string;
 }
 
-/**
- * Claude Code's claude.ai login, renewed once it has run out. Claude Code renews its OAuth token only when it makes a
- * request, and the claude-sdk provider ends its processes when they idle, so after about eight hours without a prompt
- * the token has run out: Remote Control cannot renew its connection, and the status line gets no plan limits.
- *
- * Pi never refreshes the token itself: that would rotate Claude Code's refresh token behind its back. A short Claude
- * Code process (Agent SDK, no prompt, no settings, nothing persisted) is asked for its usage instead (get_usage): a
- * request without a model call, which Claude Code sends only after renewing the token under its own lock.
- *
- * One renewal runs at a time in a Pi process, whichever extension asks, and the next one waits RETRY_MS after it
- * started. After one that leaves no valid token the wait doubles, up to MAX_RETRY_MS, so a login that needs /login
- * does not start a Claude Code process every few minutes while Pi stays open.
- *
- * claude-usage.ts carries a copy of this block, or of a part of it: change them alike.
- */
-const RETRY_MS = 5 * 60_000;
-const MAX_RETRY_MS = 60 * 60_000;
-const TIMEOUT_MS = 30_000;
-/** A token that runs out within this margin counts as run out. */
-const MARGIN_MS = 60_000;
-
-/** The part of the Agent SDK's query that a renewal uses. */
-interface ClaudeSdk {
-	query(args: { prompt: AsyncIterable<never>; options: Record<string, unknown> }): {
-		usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET(opts?: { skipBehaviors?: boolean }): Promise<unknown>;
-		close(): void;
-	};
-}
-
-/** Process-wide, so the extensions and the runtimes /reload replaces share one renewal and one wait. */
-interface Gate {
-	running: Promise<boolean> | null;
-	nextAt: number;
-	retryMs: number;
-}
-
-const gate = ((globalThis as Record<symbol, unknown>)[Symbol.for("pi.claude-login.renewal.v1")] ??= {
-	running: null,
-	nextAt: 0,
-	retryMs: RETRY_MS,
-}) as Gate;
-
-/** Whether Claude Code's access token is valid for at least another minute. */
-async function claudeCodeLoginValid(): Promise<boolean> {
-	try {
-		const o = (await claudeCodeCredentials())?.claudeAiOauth;
-		return typeof o?.accessToken === "string" && o.accessToken !== "" && (!o.expiresAt || o.expiresAt > Date.now() + MARGIN_MS);
-	} catch {
-		return false;
-	}
-}
-
-async function askClaudeCodeForUsage(): Promise<void> {
-	const sdkDir = claudeSdkDir();
-	if (!sdkDir) throw new Error("The Claude Agent SDK is not installed: `pi install npm:pi-claude-subscription` brings it (see the README).");
-	const sdk = (await import(pathToFileURL(path.join(sdkDir, "sdk.mjs")).href)) as ClaudeSdk;
-	const idle: AsyncIterable<never> = { [Symbol.asyncIterator]: () => ({ next: () => new Promise<IteratorResult<never>>(() => {}) }) };
-	const env: Record<string, string | undefined> = {
-		...process.env,
-		// The subscription login, as the claude-sdk provider runs Claude Code; and usage counts as nonessential traffic.
-		ANTHROPIC_API_KEY: undefined,
-		ANTHROPIC_AUTH_TOKEN: undefined,
-		CLAUDE_CODE_USE_BEDROCK: undefined,
-		CLAUDE_CODE_USE_VERTEX: undefined,
-		CLAUDE_CODE_USE_FOUNDRY: undefined,
-		CLAUDECODE: undefined,
-		CLAUDE_CODE_ENTRYPOINT: undefined,
-		CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: undefined,
-	};
-	const q = sdk.query({
-		prompt: idle,
-		options: { cwd: os.tmpdir(), tools: [], mcpServers: {}, settingSources: [], strictMcpConfig: true, persistSession: false, env, stderr: () => {} },
-	});
-	try {
-		await Promise.race([
-			q.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET({ skipBehaviors: true }),
-			new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), TIMEOUT_MS).unref?.()),
-		]);
-	} finally {
-		try {
-			q.close();
-		} catch {
-			// already gone
-		}
-	}
-}
-
-/**
- * Has Claude Code renew its run-out claude.ai login; true when its token is valid afterwards. Joins a renewal that is
- * running, and answers false at once while the wait after the last one lasts.
- */
-function renewClaudeLogin(): Promise<boolean> {
-	if (gate.running) return gate.running;
-	if (Date.now() < gate.nextAt) return Promise.resolve(false);
-	gate.nextAt = Date.now() + gate.retryMs;
-	const running = askClaudeCodeForUsage()
-		.catch(() => {
-			// whether the token is valid now decides
-		})
-		.then(() => claudeCodeLoginValid())
-		.then((valid) => {
-			gate.retryMs = valid ? RETRY_MS : Math.min(gate.retryMs * 2, MAX_RETRY_MS);
-			return valid;
-		})
-		.finally(() => {
-			if (gate.running === running) gate.running = null;
-		});
-	gate.running = running;
-	return running;
+// A copy of ClaudeLoginSource from claude-login.ts, the event-bus contract between the two: change both alike.
+/** What "claude-login:source" carries. */
+interface ClaudeLoginSource {
+	/**
+	 * Has Claude Code renew its run-out claude.ai login; true when its token is valid afterwards. Joins a renewal that is
+	 * running, and answers false at once while the wait after the last one lasts. Never rejects. To be called once the
+	 * caller found no valid token, not before.
+	 */
+	renew(): Promise<boolean>;
 }
 
 /**
@@ -2278,6 +2181,8 @@ export default function (pi: ExtensionAPI) {
 
 	/** claude-usage.ts's plan limits, through the event bus; null without that extension. */
 	let usageSource: ClaudeUsageSource | null = null;
+	/** claude-login.ts, once it answered; without it a run-out login is not renewed. */
+	let loginSource: ClaudeLoginSource | null = null;
 
 	/** The plan limits as Claude Code forwards its rate limits: a rate_limit_event and rate_limit_info in the worker metadata. */
 	function reportRateLimits(c: Connection, force = false): void {
@@ -2580,17 +2485,19 @@ export default function (pi: ExtensionAPI) {
 
 	// --- Credentials and recovery --------------------------------------------------------------------------------------
 
+	const loginHint = () => (loginSource ? LOGIN_HINT : LOGIN_HINT + NO_RENEWAL_HINT);
+
 	/** The access token, after having Claude Code renew its login if it has run out; a renewal goes into the session log. */
 	async function accessToken(): Promise<Token | null> {
 		const token = await readAccessToken();
-		if (token || !(await renewClaudeLogin())) return token;
+		if (token || !(await loginSource?.renew())) return token;
 		note("Remote Control had Claude Code renew the claude.ai login, which had run out.");
 		return readAccessToken();
 	}
 
 	async function fetchCredentials(module: BridgeModule, sessionId: string): Promise<RemoteCredentials | { error: string; terminal: boolean }> {
 		const token = await accessToken();
-		if (!token) return { error: LOGIN_HINT, terminal: false };
+		if (!token) return { error: loginHint(), terminal: false };
 		const result = await module.fetchRemoteCredentials(sessionId, API_BASE_URL, token.value, HTTP_TIMEOUT_MS);
 		if (result && typeof result === "object" && typeof (result as Json).worker_jwt === "string") return result as RemoteCredentials;
 		if (module.isCredentialsRejection(result)) return { error: "Claude.ai login was rejected — run /login in Claude Code, then /remote-control.", terminal: true };
@@ -2872,7 +2779,7 @@ export default function (pi: ExtensionAPI) {
 		setStatus("⇄ /rc connecting…");
 		try {
 			const token = await accessToken();
-			if (!token) throw new Error(LOGIN_HINT);
+			if (!token) throw new Error(loginHint());
 			const loaded = await loadBridge();
 			version = loaded.version;
 			const patches = loaded.patches;
@@ -3037,6 +2944,10 @@ export default function (pi: ExtensionAPI) {
 		pi.events.on("claude-usage:changed", () => {
 			if (alive && connection) reportRateLimits(connection);
 		}),
+		pi.events.on("claude-login:source", (data) => {
+			const source = data as ClaudeLoginSource | undefined;
+			if (typeof source?.renew === "function") loginSource = source;
+		}),
 		pi.events.on("subagents:state", (data) => {
 			if (!Array.isArray(data)) return;
 			subagents = data as SubagentView[];
@@ -3044,6 +2955,7 @@ export default function (pi: ExtensionAPI) {
 		}),
 	];
 	pi.events.emit("claude-usage:source-request", undefined);
+	pi.events.emit("claude-login:source-request", undefined);
 
 	pi.registerFlag("remote-control", { description: "Connect the session to claude.ai and the Claude app at start", type: "boolean", default: false });
 

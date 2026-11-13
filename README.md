@@ -19,6 +19,7 @@ belongs at `~/.pi/agent/extensions/<name>.ts`.
 | `claude-marketplaces.ts`   | Loads the plugins of Claude Code marketplaces into Pi and keeps them current              | Git access to each marketplace                                   |
 | `statusline.ts`            | Replaces Pi's footer with a Claude Code style status line, for any provider               | —                                                                |
 | `claude-usage.ts`          | Adds the Claude subscription limits and usage credits to the status line                  | `statusline.ts`, a Claude subscription login (Pi or Claude Code) |
+| `claude-login.ts`          | Has Claude Code renew a run-out login, for the status line limits and Remote Control      | `pi-claude-subscription`, a Claude Code login                    |
 | `compact-tools.ts`         | Cuts each collapsed tool row to four lines; Ctrl+O shows all of it                        | —                                                                |
 | `web-tools.ts`             | Adds `web_fetch`: reads a page locally and lets a small model answer from it              | —                                                                |
 | `openproject.ts`           | Adds `openproject`: reads and changes OpenProject through its API v3, as you              | An OpenProject API token for each instance                       |
@@ -45,13 +46,16 @@ Every extension is a single file that works on its own. Code that several of
 them need — the [small model](#small-model) choice, the overlay frame,
 Claude Code's tool names, the instances and tokens of `gitlab.json` and
 `openproject.json` — is copied into each of them, with a note that names the
-other copies. `web_search` comes from the npm package `pi-web-access`; see
+other copies. What one extension does for others while Pi runs goes through
+Pi's event bus instead: [claude-login](#claude-login) renews the login for
+`claude-usage.ts` and `claude-remote-control.ts`, and each of the two goes
+without the renewal when that file is missing. `web_search` comes from the npm package `pi-web-access`; see
 [Web search](#web-search).
 
 ## Set up Pi
 
 Follow the steps in order — together they are the complete setup: Pi itself,
-the Claude subscription, all twenty-four extensions, and the browser connection.
+the Claude subscription, all twenty-five extensions, and the browser connection.
 Every step except the Chrome switch in step 4 is a
 shell command, so an agent can carry them out as well.
 
@@ -119,7 +123,7 @@ the newest models; see [claude-sdk-update](#claude-sdk-update).
 
 ### 3. Install the extensions
 
-Link all twenty-four from the clone, so that `git pull` updates them:
+Link all twenty-five from the clone, so that `git pull` updates them:
 
 ```bash
 mkdir -p ~/.pi/agent/extensions
@@ -359,12 +363,10 @@ as other programs on the machine do: `Di., 10.11., 13:28` and `$ 12,34` under
 reads `LANG` alone.
 
 Claude Code renews its token only when it makes a request, so after hours
-without a prompt neither token is valid. The extension then starts a short
-Claude Code process that asks for its usage (no model request, nothing
-persisted); Claude Code renews the token under its own lock before it sends
-that request, and the limits come back with the next fetch. A renewal runs at
-most every five minutes, shared with [Remote Control](#claude-remote-control);
-after one that leaves no valid token the wait doubles, up to an hour.
+without a prompt neither token is valid. The extension then asks
+[claude-login](#claude-login) to have Claude Code renew it, and the limits
+come back with the next fetch. Without `claude-login.ts` the limits stay away
+until a prompt has renewed the token.
 
 Other extensions get the answer through Pi's event bus: `claude-usage:source`
 carries a source with the latest answer and a refresh under the same
@@ -379,9 +381,38 @@ time of the next attempt.
 | :-------------------------- | :----------------------------------------- |
 | `loading…`                  | The first answer is on its way             |
 | `⚠ rate limited (HTTP 429)` | The endpoint turned the request away       |
-| `⚠ no valid OAuth token`    | No unexpired token in either file, and Claude Code could not renew its login: run `claude`, then `/login` |
+| `⚠ no valid OAuth token`    | No unexpired token in either file, and Claude Code could not renew its login: run `claude`, then `/login`. Or `claude-login.ts` is not loaded, and the login ran out while Pi idled |
 | `⚠ HTTP 401`                | The endpoint rejected the token            |
 | `⚠ endpoint unreachable`    | Offline, or no answer within 10 seconds    |
+
+## claude-login
+
+Has Claude Code renew its claude.ai login once it has run out, for the
+extensions that need a valid token while no prompt runs:
+[claude-usage](#claude-usage) for the plan limits and
+[Remote Control](#claude-remote-control) for its connection. On its own it
+does nothing — no request and no process until one of them asks. It needs the
+Claude Agent SDK that `pi-claude-subscription` brings.
+
+Claude Code renews its token only when it makes a request, and the
+`claude-sdk` provider ends idle Claude Code processes, so after about eight
+hours without a prompt the token has run out. Pi never refreshes it itself:
+that would rotate Claude Code's refresh token behind its back. The extension
+starts a short Claude Code process instead that asks for its usage (no model
+request, no settings, nothing persisted); Claude Code renews the token under
+its own lock before it sends that request.
+
+One renewal runs at a time in a Pi process, whichever extension asks, and the
+next one waits five minutes. After one that leaves no valid token the wait
+doubles, up to an hour, so a login that needs `/login` does not start a Claude
+Code process every few minutes.
+
+Other extensions reach it through Pi's event bus, whatever the load order:
+`claude-login:source` carries a source with `renew()`, at load and again on
+every `claude-login:source-request`. `renew()` answers whether Claude Code's
+token is valid afterwards; it joins a renewal that is running, answers `false`
+at once while the wait lasts, and never rejects. Call it once no valid token
+was found, not before.
 
 ## compact-tools
 
@@ -1258,12 +1289,12 @@ and you can work on from there while Pi keeps running on your machine.
 - Overnight: Claude Code renews its token only when it makes a request, and the
   provider ends idle Claude Code processes, so after about eight hours without
   a prompt the token has run out and the four-hourly renewal of the connection
-  fails. The extension then starts a short Claude Code process that asks for
-  its usage (no model request, nothing persisted); Claude Code renews the token
-  under its own lock before it sends that request, and the connection is
-  renewed with it — at most every five minutes, and after a renewal that
-  fails the wait doubles, up to an hour. The status line
-  ([claude-usage](#claude-usage)) shares the renewal. The session log notes such a
+  fails. The extension then asks [claude-login](#claude-login) to have Claude
+  Code renew the token, and the connection is renewed with it — at most every
+  five minutes, and after a renewal that fails the wait doubles, up to an
+  hour. The status line ([claude-usage](#claude-usage)) shares the renewal.
+  Without `claude-login.ts` the token stays run out until a prompt renews it,
+  and the connection is lost overnight. The session log notes such a
   renewal (`Remote Control had Claude Code renew the claude.ai login …`), a
   renewal that keeps failing for five minutes with its reason, and the
   reconnect after it.
