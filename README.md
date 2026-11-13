@@ -560,11 +560,13 @@ of the API v3.
   PATCH with the `lockVersion` of a fresh GET, and to validate an unclear
   payload against the form endpoint first.
 - Out of reach, because no API offers them: PDF, CSV, and XLS exports and a
-  meeting's iCal file. Of a wiki page, stock OpenProject gives the title and
-  the attachments only. An instance whose API adds the text to
-  `/wiki_pages/{id}` and lists a project's pages under
-  `/projects/{id}/wiki_pages` is read like any other path; the tool's
-  description names both.
+  meeting's iCal file.
+- Of a wiki page, stock OpenProject gives the title and the attachments only.
+  An instance whose API extends the wiki is used like any other path, and the
+  tool's description tells the model how: `GET /wiki_pages/{id}` with the
+  page's text and `lockVersion`, `GET /projects/{id}/wiki_pages` for a
+  project's pages, `POST /projects/{id}/wiki_pages` to create a page, and
+  `PATCH /wiki_pages/{id}` to change its title, text, or parent.
 
 ## gitlab
 
