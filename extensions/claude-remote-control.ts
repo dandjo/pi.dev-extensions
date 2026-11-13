@@ -461,6 +461,10 @@ function requestHeaders(token: string, version: string): Record<string, string> 
 
 // --- Helpers ----------------------------------------------------------------------------------------------------------
 
+/**
+ * Whether a model is Claude: one of the providers that only carry Claude models, or "claude" in the id elsewhere.
+ * claude-usage.ts carries a copy of this function: change them alike.
+ */
 function isClaudeModel(model: Model<any> | undefined): boolean {
 	if (!model) return false;
 	return model.provider === "claude-sdk" || model.provider === "anthropic" || /claude/i.test(model.id);

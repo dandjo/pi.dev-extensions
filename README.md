@@ -347,7 +347,11 @@ here and never written to the cache.
 
 Without any Claude login, neither Pi's OAuth login nor Claude Code's, there
 are no rows and no requests: someone on another provider sees nothing of
-this. With `PI_OFFLINE` set (Pi's `--offline`), the rows show what another
+this. While the session's model is not a Claude model — any model of the
+providers `claude-sdk` and `anthropic`, elsewhere one with `claude` in its id
+— or the session has none, the rows are hidden as well. The limits are still
+fetched then, so they stand there as soon as a Claude model is chosen again.
+With `PI_OFFLINE` set (Pi's `--offline`), the rows show what another
 session fetched last, and this one fetches nothing. Reset times, dates, and
 credit amounts follow `LC_TIME` and `LC_MONETARY` (or `LC_ALL`, else `LANG`),
 as other programs on the machine do: `Di., 10.11., 13:28` and `$ 12,34` under

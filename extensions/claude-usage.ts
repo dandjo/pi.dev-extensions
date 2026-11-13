@@ -5,8 +5,10 @@
  * Rows: the 5h session, the 7d week, and model-scoped weekly windows such as Fable, each with its local reset time,
  * and the usage credits while they are enabled or anything was spent. Without a usable answer, a single "Limits" row
  * says why (loading, rate limited, no token, …). Without any Claude login (Pi's own or Claude Code's) there are no
- * rows and no requests at all, so a user of another provider sees nothing of this. With PI_OFFLINE set, the rows show
- * what another session fetched last, and this one fetches nothing.
+ * rows and no requests at all, so a user of another provider sees nothing of this. While the session's model is not a
+ * Claude model (or it has none), the rows are hidden as well; the limits are still fetched, so they stand there as soon
+ * as a Claude model is chosen again. With PI_OFFLINE set, the rows show what another session fetched last, and this
+ * one fetches nothing.
  *
  * Times, dates, and amounts follow the locale of LC_TIME and LC_MONETARY (or LC_ALL, else LANG), as other programs
  * on the machine do; Node's own Intl default reads LANG alone.
@@ -240,6 +242,15 @@ async function readAccessToken(): Promise<string | null> {
 		if (o?.accessToken && (!o.expiresAt || o.expiresAt > now)) return o.accessToken;
 	} catch {}
 	return null;
+}
+
+/**
+ * Whether a model is Claude: one of the providers that only carry Claude models, or "claude" in the id elsewhere.
+ * claude-remote-control.ts carries a copy of this function: change them alike.
+ */
+function isClaudeModel(model: { provider: string; id: string } | undefined): boolean {
+	if (!model) return false;
+	return model.provider === "claude-sdk" || model.provider === "anthropic" || /claude/i.test(model.id);
 }
 
 /** The last answer of hasClaudeLogin, kept LOGIN_CHECK_MS so a macOS keychain is not asked at every poll. */
@@ -516,6 +527,8 @@ export default function (pi: ExtensionAPI) {
 	let polledAt = 0;
 	/** Undefined until the first check; false hides the rows and stops the requests. */
 	let loggedIn: boolean | undefined;
+	/** Whether the session's model is a Claude model; false hides the rows, the requests go on. */
+	let claudeModel = false;
 
 	const changed = () => {
 		pi.events.emit("statusline:changed", undefined);
@@ -580,7 +593,7 @@ export default function (pi: ExtensionAPI) {
 			void refreshUsage();
 		}
 
-		if (!loggedIn) return [];
+		if (!loggedIn || !claudeModel) return [];
 		const sep = separator(theme);
 		const lines: string[] = [];
 		const snap = state?.snapshot;
@@ -632,6 +645,16 @@ export default function (pi: ExtensionAPI) {
 		}
 		return lines;
 	}
+
+	const modelChanged = (model: { provider: string; id: string } | undefined) => {
+		const claude = isClaudeModel(model);
+		if (claude === claudeModel) return;
+		claudeModel = claude;
+		pi.events.emit("statusline:changed", undefined);
+	};
+	// A restored session fires no model_select, so session_start reads the model as well
+	pi.on("session_start", (_event, ctx) => modelChanged(ctx.model));
+	pi.on("model_select", (event) => modelChanged(event.model));
 
 	const section: StatuslineSection = { id: SECTION_ID, render };
 	pi.events.on("statusline:section-request", () => pi.events.emit("statusline:section", section));
