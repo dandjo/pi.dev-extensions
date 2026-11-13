@@ -814,7 +814,11 @@ export default function (pi: ExtensionAPI) {
 			"/projects/{id}/wiki_pages lists a project's pages without text, POST /projects/{id}/wiki_pages creates one " +
 			"({\"title\": \"…\", \"text\": {\"raw\": \"markdown\"}, \"_links\": {\"parent\": {\"href\": " +
 			"\"/api/v3/wiki_pages/{id}\"}}}, only title required), and PATCH /wiki_pages/{id} with lockVersion changes " +
-			"title, text (replaces all of it), or parent (href null = top level); pages cannot be deleted. Attachments: GET /{work_packages|meetings|wiki_pages|posts|activities}/{id}/attachments lists them, " +
+			"title, text (replaces all of it), or parent (href null = top level). DELETE /wiki_pages/{id} removes a page for " +
+			"good, with its versions, attachments, and redirects (no trash): delete only a page the user named, and ask first " +
+			"when subpages are involved and the user did not say what happens to them; a page with subpages needs the query " +
+			"children = nullify (direct subpages move to the top level), destroy (all pages below are deleted too), or " +
+			"reassign with reassignTo = the id of another page. Attachments: GET /{work_packages|meetings|wiki_pages|posts|activities}/{id}/attachments lists them, " +
 			"GET /attachments/{id}/content downloads one (to a temp file, or saveTo), POST to such an attachments path with " +
 			"files {\"file\": path} uploads one (POST /attachments: without a container, to be claimed later), DELETE " +
 			"/attachments/{id} removes one. text sends plain text (POST /render/markdown or /render/plain return HTML). " +

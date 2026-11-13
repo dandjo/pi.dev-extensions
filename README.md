@@ -565,8 +565,12 @@ of the API v3.
   An instance whose API extends the wiki is used like any other path, and the
   tool's description tells the model how: `GET /wiki_pages/{id}` with the
   page's text and `lockVersion`, `GET /projects/{id}/wiki_pages` for a
-  project's pages, `POST /projects/{id}/wiki_pages` to create a page, and
-  `PATCH /wiki_pages/{id}` to change its title, text, or parent.
+  project's pages, `POST /projects/{id}/wiki_pages` to create a page,
+  `PATCH /wiki_pages/{id}` to change its title, text, or parent, and
+  `DELETE /wiki_pages/{id}` to delete it. A deleted page is gone with its
+  versions and attachments, so the description tells the model to delete only
+  a page you named and to ask first when subpages are involved and you did not
+  say what happens to them.
 
 ## gitlab
 
