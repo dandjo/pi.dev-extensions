@@ -808,7 +808,9 @@ export default function (pi: ExtensionAPI) {
 			"string, edits one), /work_packages/{id}/relations, /projects, " +
 			"/projects/{id}/work_packages, /time_entries, /versions, /statuses, /types, /priorities, /users/me, /meetings " +
 			"(filters, pageSize), /meetings/{id}/agenda_items, /meetings/{id}/sections, /recurring_meetings, /news, " +
-			"/documents, /wiki_pages/{id}, /notifications, /queries, /grids, /file_links, /spec.json (the full API " +
+			"/documents, /wiki_pages/{id} (title and attachments; its text only where the instance adds it), " +
+			"/projects/{id}/wiki_pages (a project's wiki pages without their text, only where the instance offers it: stock " +
+			"OpenProject answers 404), /notifications, /queries, /grids, /file_links, /spec.json (the full API " +
 			"description). Attachments: GET /{work_packages|meetings|wiki_pages|posts|activities}/{id}/attachments lists them, " +
 			"GET /attachments/{id}/content downloads one (to a temp file, or saveTo), POST to such an attachments path with " +
 			"files {\"file\": path} uploads one (POST /attachments: without a container, to be claimed later), DELETE " +

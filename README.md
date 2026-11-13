@@ -559,9 +559,12 @@ of the API v3.
   only what you asked for, to upload only files you named for that, to send a
   PATCH with the `lockVersion` of a fresh GET, and to validate an unclear
   payload against the form endpoint first.
-- Out of reach, because no API offers them: PDF, CSV, and XLS exports, a
-  meeting's iCal file, and the text of a wiki page (the API gives a wiki page's
-  title and attachments only).
+- Out of reach, because no API offers them: PDF, CSV, and XLS exports and a
+  meeting's iCal file. Of a wiki page, stock OpenProject gives the title and
+  the attachments only. An instance whose API adds the text to
+  `/wiki_pages/{id}` and lists a project's pages under
+  `/projects/{id}/wiki_pages` is read like any other path; the tool's
+  description names both.
 
 ## gitlab
 
