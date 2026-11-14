@@ -899,7 +899,9 @@ through it, such as setup wizards, work unchanged.
   terminal only for button motion, so there the highlight does not follow a
   pointer that merely moves.
 - RPC clients get one select dialog per question. In `pi -p` and JSON mode the
-  call fails with a note to decide alone. Subagents do not get the tool.
+  call fails with a note to decide alone.
+- A subagent asks that way: its dialogs open in the session that started it,
+  titled with the agent (see [subagents](#subagents)).
 - With Remote Control active the questions can also be answered in the Claude
   app (see claude-remote-control). The first answer wins, from either place,
   and closes the other. Interrupting the run withdraws the questions.
@@ -908,7 +910,8 @@ through it, such as setup wizards, work unchanged.
 
 The `Agent` tool, after [Claude Code's subagents](https://code.claude.com/docs/en/sub-agents):
 a subagent is a separate Pi process with its own context window, and only its
-final report comes back.
+final report comes back. Beyond Claude Code, you can write to a subagent,
+interrupt it, and answer its questions, and it stays alive after its report.
 
 - Agent types: the built-ins `general-purpose`, `Explore`, and `Plan` (the
   last two without `edit` and `write`), and definitions in Claude Code's format
@@ -919,10 +922,15 @@ final report comes back.
   plugins.
 - A subagent gets the parent's active tools, narrowed by its definition, whose
   `tools` and `disallowedTools` name Pi tools (`read`, `bash`, …). It never
-  gets `AskUserQuestion`, the cron tools, `ListAgents`, or `SendMessage`, and
-  subagents nest at most three levels deep. MCP servers start in it only when
-  its tools name an MCP tool. Hooks run inside it too, with `agent_id` and
-  `agent_type` in every event.
+  gets the cron tools, `ListAgents`, or `SendMessage`, and subagents nest at
+  most three levels deep. MCP servers start in it only when its tools name an
+  MCP tool. Hooks run inside it too, with `agent_id` and `agent_type` in every
+  event.
+- A subagent's dialogs open in your session, one at a time, titled with the
+  agent: the questions of `AskUserQuestion`, which it has where the session
+  has a user interface, and a hook's confirmation. Without a user interface
+  they are declined. Its notifications, status entries, and widgets stay with
+  it.
 - Model: the call's `model` (a full model id), else the definition's, else the
   current one. [claude-agents](#claude-agents) adds the families `sonnet`,
   `opus`, `haiku`, and `fable`, and a default model.
@@ -932,7 +940,24 @@ final report comes back.
   running foreground subagent can be moved to the background (Ctrl+B in
   [background-agents](#background-agents)); its `Agent` call then returns at
   once in the same way. `resume` with an agent ID continues that subagent
-  with its history.
+  with its history. `fork: true` starts a new one with a copy of the
+  conversation so far, up to the turn that makes the call; a fork starts no
+  fork of its own.
+- A subagent runs as Pi in RPC mode and stays alive after its report: five
+  minutes without work, three idle ones at most, the one used longest ago
+  ending first. A `resume` or a message then continues it at once; later it
+  starts again from its session file. `PI_SUBAGENT_IDLE_MS` sets another time,
+  and `0` ends the process with its report.
+- You can write to a subagent (from its transcript in
+  [background-agents](#background-agents)). While it works it reads the
+  message after its current step, and its report tells the model, in Pi's
+  words, what you wrote. After its report the message starts it again, and
+  its answer goes into the conversation without starting a turn. An interrupt
+  stops what it is doing and leaves it waiting for your instruction, for five
+  minutes; without one it counts as stopped.
+- A subagent that keeps working by itself after its report, because a
+  background agent of its own finished, is listed again, and what it writes
+  then goes into the conversation the same way.
 - Subagent sessions are stored in `~/.pi/agent/subagents/<session id>/` and
   deleted after 30 days. `/agents` lists the agent types and this session's
   subagents; `/agents stop <id>` stops a background one.
@@ -940,9 +965,10 @@ final report comes back.
   instructions in it carry no authority.
 - The running and recently finished subagents are published on the event bus
   (`subagents:state`), where [background-agents](#background-agents) reads
-  them; `subagents:stop` with an agent ID stops one, and
-  `subagents:background` with an agent ID moves a running foreground one to
-  the background.
+  them; `subagents:stop` with an agent ID stops one, `subagents:interrupt`
+  interrupts it, `subagents:message` with `{ agentId, text, images? }` writes
+  to it, and `subagents:background` with an agent ID moves a running
+  foreground one to the background.
 - Other extensions extend the `Agent` tool through the event bus: they emit
   `subagents:provider` with a `SubagentsProvider` — agent directories, a
   translation of tool names, model families, a default model, limits — at load
@@ -977,7 +1003,8 @@ Without `subagents.ts` it does nothing.
 The agent panel below the prompt, after Claude Code's: while subagents run, in
 the background or in the foreground, the panel lists them, ↓ from the prompt
 moves into it, Enter shows an agent's live transcript in place of the
-conversation, and Ctrl+B moves a foreground agent to the background.
+conversation, and Ctrl+B moves a foreground agent to the background. Beyond
+Claude Code, the prompt writes to the agent shown, and Esc interrupts it.
 
 - The panel appears under the editor as soon as a subagent runs: a
   `main` row, then one row per agent with its type, description, elapsed time,
@@ -991,7 +1018,8 @@ conversation, and Ctrl+B moves a foreground agent to the background.
   selected agent (on `main` it shows the conversation again and returns to
   the prompt), `x` stops a running
   agent or clears a finished one, Esc returns to the prompt, and any typed
-  character goes into the prompt. `/tasks` offers the same list as a dialog.
+  character goes into the prompt. `/tasks` lists every agent the session
+  still knows as a dialog, also the finished ones the panel no longer shows.
 - An open agent replaces the conversation above the prompt, as in Claude
   Code; the prompt and the panel stay where they are. The view shows the
   agent's type, task, state, tokens, and model, then its transcript as it is
@@ -1001,10 +1029,20 @@ conversation, and Ctrl+B moves a foreground agent to the background.
   [diff](#diff) panel too. The viewed agent is marked `●` in the panel and
   `main` becomes `◯`; ↓ Enter (`main`) shows the conversation again, at the
   scroll position it had.
-- Subagents cannot be messaged — Pi runs them as one-shot processes — so the
-  prompt stays with `main`: sending a prompt or a `!` command while an agent
-  is shown brings the conversation back, with the new message in it. The
-  agent's report arrives in the conversation when it finishes.
+- While an agent is shown, the prompt writes to it. A working agent reads
+  the message after its current step; until then it stands under the
+  transcript as not read yet. A finished agent starts again with it and
+  answers in its transcript and, as a note, in the conversation. Skill
+  commands and prompt templates expand in the agent. A `!` command still
+  goes to `main` and brings the conversation back.
+- Esc on a working agent interrupts it: it stops what it is doing and waits
+  for your instruction, while a foreground agent's `Agent` call keeps
+  waiting. Esc again stops it. Esc on an agent that does not work shows the
+  conversation again. The line under the agent's state says what the prompt
+  and Esc do right now.
+- A row reads `asks you` while one of the agent's dialogs is open and
+  `waits for you` after an interrupt. The agent's report arrives in the
+  conversation when it finishes.
 - Foreground subagents (without `run_in_background`) are listed too; their
   tool call still shows their progress in the conversation. Ctrl+B moves them
   to the background, as in Claude Code: the one selected in the panel, or else

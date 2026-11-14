@@ -1034,6 +1034,8 @@ interface SubagentView {
 	type: string;
 	description: string;
 	status: "running" | "completed" | "failed" | "aborted";
+	/** While running: the user interrupted it and it waits for an instruction, or one of its dialogs is open. */
+	waiting?: "instruction" | "answer";
 	background: boolean;
 	model: string;
 	startedAt: number;

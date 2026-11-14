@@ -11,6 +11,8 @@
  *   gets a lighter background, a click on an option picks it as Enter does (toggles it in a multi-select), a click on a
  *   tab opens it, a click on the submit line on the Submit tab submits, and the wheel moves the highlight.
  * - RPC clients get one select dialog per question. Without any UI the call fails with a note to decide alone.
+ * - A subagent (subagents.ts) asks that way too: it runs as an RPC client of the session that started it, where its
+ *   dialogs open, titled with the agent. Whether a subagent has the tool at all is decided there.
  * - `answers` (question -> answer), as a PreToolUse hook can supply it through updatedInput, skips the dialog.
  * - Answers from elsewhere: while the dialog is open, the event ask-user-question:open (QuestionsOpen) offers the
  *   questions to other extensions — claude-remote-control.ts puts them in the Claude app. The first answer wins, from
@@ -569,8 +571,6 @@ async function ask(pi: ExtensionAPI, ctx: ExtensionContext, toolCallId: string, 
 }
 
 export default function (pi: ExtensionAPI) {
-	if (Number(process.env.PI_SUBAGENT_DEPTH || 0) > 0) return;
-
 	pi.registerTool<typeof Params, Details>({
 		name: "AskUserQuestion",
 		label: "Ask user",

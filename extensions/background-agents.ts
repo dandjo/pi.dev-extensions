@@ -17,8 +17,11 @@
  * - Opening an agent shows its transcript as it is written — the task, the assistant's text, its tool calls and
  *   results — in place of the conversation above the prompt, as Claude Code does; the panel marks the agent shown
  *   with ●. The view follows the end while the agent works and scrolls like the conversation (wheel, PgUp PgDn).
- *   Subagents cannot be messaged, so the prompt stays with main: sending a prompt or a ! command shows the
- *   conversation again. Their report arrives in the conversation when they finish.
+ * - While an agent is shown, the prompt writes to it (subagents:message): a working agent reads the message after
+ *   its current step, a finished one starts again with it, and the message stands under the transcript until the
+ *   agent has read it. Esc interrupts a working agent (subagents:interrupt), which then waits for an instruction;
+ *   Esc again stops it, and Esc on an agent that does not work shows the conversation again. A ! command still
+ *   goes to main and shows the conversation. An agent's report arrives in the conversation when it finishes.
  * - The swap exchanges the children of Pi's document container (the first component of the TUI, in fullscreen the
  *   child of the transcript's ScrollView) and restores them, and the conversation's scroll position, on return and at
  *   session_shutdown. Pi keeps writing to its own containers meanwhile. When Pi's tree does not have that shape, the
@@ -59,6 +62,8 @@ const TICK_MS = 1_000;
 const TRANSCRIPT_POLL_MS = 500;
 const MAX_NAME_WIDTH = 28;
 const RESULT_PREVIEW_LINES = 4;
+/** How long a message the agent has not read yet stays under its transcript. */
+const SENT_TTL_MS = 10 * 60 * 1000;
 
 type Theme = ExtensionContext["ui"]["theme"];
 
@@ -123,14 +128,15 @@ function sessionFileOf(sessionId: string, agentId: string): string | undefined {
 	}
 }
 
-/** The transcript of a subagent session file as terminal lines for `width`. */
-function transcriptLines(file: string, width: number, theme: Theme): string[] {
+/** The transcript of a subagent session file as terminal lines for `width`, and how many user messages it holds. */
+function transcriptLines(file: string, width: number, theme: Theme): { lines: string[]; users: number } {
 	let text: string;
 	try {
 		text = readFileSync(file, "utf8");
 	} catch {
-		return [theme.fg("dim", "The agent's session file is not there yet.")];
+		return { lines: [theme.fg("dim", "The agent's session file is not there yet.")], users: 0 };
 	}
+	let users = 0;
 	const lines: string[] = [];
 	const wrap = (s: string) => (s ? wrapTextWithAnsi(s, width) : [""]);
 	for (const raw of text.split("\n")) {
@@ -144,6 +150,7 @@ function transcriptLines(file: string, width: number, theme: Theme): string[] {
 		if (entry.type !== "message") continue;
 		const message = entry.message;
 		if (message.role === "user") {
+			users++;
 			const content = typeof message.content === "string" ? message.content : message.content.map((p: any) => (p.type === "text" ? p.text : "[image]")).join("\n");
 			lines.push(...wrap(theme.fg("accent", `❯ ${content.split("\n")[0]}`)));
 			for (const line of content.split("\n").slice(1)) lines.push(...wrap(`  ${line}`));
@@ -169,7 +176,7 @@ function transcriptLines(file: string, width: number, theme: Theme): string[] {
 			lines.push("");
 		}
 	}
-	return lines.length ? lines : [theme.fg("dim", "Nothing yet.")];
+	return { lines: lines.length ? lines : [theme.fg("dim", "Nothing yet.")], users };
 }
 
 // --- Extension -----------------------------------------------------------------------------------------------------------------
@@ -237,6 +244,8 @@ interface SubagentView {
 	type: string;
 	description: string;
 	status: "running" | "completed" | "failed" | "aborted";
+	/** While running: the user interrupted it and it waits for an instruction, or one of its dialogs is open. */
+	waiting?: "instruction" | "answer";
 	background: boolean;
 	model: string;
 	startedAt: number;
@@ -263,6 +272,8 @@ export default function (pi: ExtensionAPI) {
 	let widgetTui: TUI | null = null;
 	let editorTui: TUI | null = null;
 	let ticker: NodeJS.Timeout | null = null;
+	/** What was written to an agent from its transcript and is not in its session file yet, by agentId. */
+	const sent = new Map<string, { text: string; after: number; at: number }[]>();
 
 	const agentRows = (): Row[] => {
 		const now = Date.now();
@@ -431,7 +442,7 @@ export default function (pi: ExtensionAPI) {
 
 	function statusText(row: Row): string {
 		const parts: string[] = [];
-		if (row.status === "running") parts.push(elapsed(Date.now() - row.startedAt));
+		if (row.status === "running") parts.push(row.waiting === "instruction" ? "waits for you" : `${row.waiting === "answer" ? "asks you · " : ""}${elapsed(Date.now() - row.startedAt)}`);
 		else parts.push(row.status === "completed" ? `done ${elapsed(row.durationMs ?? 0)}` : row.status === "aborted" ? "stopped" : "failed");
 		if (row.tokens > 0) parts.push(`${row.status === "running" && row.toolCount === 0 ? "↑" : "↓"} ${compact(row.tokens)} tokens`);
 		return parts.join(" · ");
@@ -521,6 +532,10 @@ export default function (pi: ExtensionAPI) {
 		handleInput(data: string): void {
 			if (matchesKey(data, Key.ctrl("b")) && moveToBackground()) return;
 			if (selected >= 0 && panelKey(data, this.kb)) return;
+			if (swap && selected < 0 && matchesKey(data, Key.escape) && !this.isShowingAutocomplete()) {
+				escapeAgent(swap.agentId);
+				return;
+			}
 			if ((matchesKey(data, Key.down) || this.kb.matches(data, "tui.editor.cursorDown")) && this.atPromptEnd() && focusPanel()) return;
 			super.handleInput(data);
 		}
@@ -590,8 +605,16 @@ export default function (pi: ExtensionAPI) {
 		return undefined;
 	}
 
+	/** Esc on the agent shown: interrupts it while it works, stops it while it waits after that, else shows main. */
+	function escapeAgent(agentId: string): void {
+		const row = rows.get(agentId);
+		if (row?.status !== "running") showMain();
+		else pi.events.emit(row.waiting === "instruction" ? "subagents:stop" : "subagents:interrupt", agentId);
+	}
+
 	function stateLine(current: Row, theme: Theme): string {
-		if (current.status === "running") return theme.fg("warning", `running · ${elapsed(Date.now() - current.startedAt)}`);
+		if (current.status === "running" && current.waiting === "instruction") return theme.fg("warning", "interrupted · waits for your instruction");
+		if (current.status === "running") return theme.fg("warning", `${current.waiting === "answer" ? "asks you" : "running"} · ${elapsed(Date.now() - current.startedAt)}`);
 		if (current.status === "completed") return theme.fg("success", `✔ completed · ${elapsed(current.durationMs ?? 0)}`);
 		return theme.fg("error", `${current.status === "aborted" ? "stopped" : "✘ failed"}${current.error ? ` · ${current.error.split("\n")[0]}` : ""}`);
 	}
@@ -605,7 +628,12 @@ export default function (pi: ExtensionAPI) {
 		/** The width of the last render, which is the transcript's content width. */
 		width = 80;
 		private file: string | undefined;
-		private cache: { width: number; size: number; lines: string[] } | undefined;
+		private cache: { width: number; size: number; lines: string[]; users: number } | undefined;
+
+		/** The user messages in the session file at the last render. */
+		get users(): number {
+			return this.cache?.users ?? 0;
+		}
 
 		constructor(
 			readonly row: Row,
@@ -635,16 +663,32 @@ export default function (pi: ExtensionAPI) {
 			const inner = Math.max(1, width - 2);
 			const size = this.size();
 			if (!this.cache || this.cache.width !== inner || this.cache.size !== size) {
-				const body = this.file ? transcriptLines(this.file, inner, theme) : [theme.fg("dim", "The agent has not started writing yet.")];
-				this.cache = { width: inner, size, lines: body.map((line) => ` ${line}`) };
+				const body = this.file ? transcriptLines(this.file, inner, theme) : { lines: [theme.fg("dim", "The agent has not started writing yet.")], users: 0 };
+				this.cache = { width: inner, size, lines: body.lines.map((line) => ` ${line}`), users: body.users };
 			}
 			const current = rows.get(this.row.agentId) ?? this.row;
+			const working = current.status === "running";
+			const help = !working
+				? "The prompt writes to this agent, which then goes on · Esc shows the conversation again"
+				: current.waiting === "instruction"
+					? "The prompt gives this agent its instruction · Esc stops it"
+					: "The prompt writes to this agent · Esc interrupts it · ↓ then Enter on main shows the conversation again";
 			const head = [
 				`${theme.fg("accent", "●")} ${theme.bold(current.type)} ${theme.fg("dim", "›")} ${current.description || current.agentId}`,
 				`${stateLine(current, theme)}  ${usageLine(current, theme)}`,
-				theme.fg("dim", "Prompts go to main · ↓ then Enter on main shows the conversation again"),
+				theme.fg("dim", help),
 			];
-			return ["", ...head.map((line) => truncateToWidth(` ${line}`, width, "…")), "", ...this.cache.lines];
+			// What the user wrote and the agent has not read: it reads a message after its current step.
+			const now = Date.now();
+			const unread = (sent.get(this.row.agentId) ?? []).filter((m) => this.cache!.users <= m.after && now - m.at < SENT_TTL_MS);
+			if (unread.length) sent.set(this.row.agentId, unread);
+			else sent.delete(this.row.agentId);
+			const waiting = unread.flatMap((m) => [
+				...wrapTextWithAnsi(theme.fg("accent", `❯ ${m.text.trim()}`), inner).map((line) => ` ${line}`),
+				` ${theme.fg("dim", working ? "  not read yet: the agent reads it after its current step" : "  starting the agent…")}`,
+				"",
+			]);
+			return ["", ...head.map((line) => truncateToWidth(` ${line}`, width, "…")), "", ...this.cache.lines, ...waiting];
 		}
 
 		invalidate(): void {
@@ -754,7 +798,7 @@ export default function (pi: ExtensionAPI) {
 						const now = size();
 						if (!cache || cache.width !== width || cache.size !== now) {
 							const inner = Math.max(1, width - 4);
-							cache = { width, size: now, lines: file ? transcriptLines(file, inner, theme) : [theme.fg("dim", "The agent has not started writing yet.")] };
+							cache = { width, size: now, lines: file ? transcriptLines(file, inner, theme).lines : [theme.fg("dim", "The agent has not started writing yet.")] };
 						}
 						return cache.lines;
 					};
@@ -830,6 +874,7 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_start", (_event, context) => {
 		ctx = context;
 		rows.clear();
+		sent.clear();
 		scheduled = [];
 		selected = -1;
 		if (context.mode === "tui") context.ui.setEditorComponent((tui, theme, keybindings) => new AgentsEditor(tui, theme, keybindings));
@@ -849,9 +894,21 @@ export default function (pi: ExtensionAPI) {
 		ctx = null;
 	});
 
-	// The prompt stays with main: what is sent from it shows the conversation again.
+	// While an agent is shown the prompt writes to it; otherwise what is sent shows the conversation again.
 	pi.on("input", (event) => {
-		if (event.source === "interactive") showMain();
+		if (event.source !== "interactive") return undefined;
+		const current = swap;
+		if (!current || !event.text.trim()) {
+			showMain();
+			return undefined;
+		}
+		const list = sent.get(current.agentId) ?? [];
+		list.push({ text: event.text, after: current.component.users + list.length, at: Date.now() });
+		sent.set(current.agentId, list);
+		pi.events.emit("subagents:message", { agentId: current.agentId, text: event.text, images: event.images });
+		current.scroll?.scrollToEnd();
+		current.tui.requestRender();
+		return { action: "handled" as const };
 	});
 	pi.on("user_bash", () => {
 		showMain();
@@ -864,9 +921,10 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("tasks", {
-		description: "List the agents of this session and open one",
+		description: "List the agents of this session and open one, also to write to it",
 		handler: async (_args, command) => {
-			const list = agentRows();
+			// Every agent the session still knows, not only those the panel lists: a finished one can be continued.
+			const list = [...rows.values()].sort((a, b) => Number(b.status === "running") - Number(a.status === "running") || b.startedAt - a.startedAt);
 			if (list.length === 0) {
 				command.ui.notify("No agents right now.", "info");
 				return;
