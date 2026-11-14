@@ -1393,9 +1393,17 @@ since npm keeps a dependency at the version of `package-lock.json`.
 - `/claude-sdk-update` checks and installs at once and reports the state,
   also when nothing is due.
 - Pi processes starting together update one at a time, through a lock file
-  in `~/.pi/agent/npm`. While npm replaces the package, Claude Code is missing
-  for a few seconds; a request that starts Claude Code just then fails and
-  can be repeated.
+  in `~/.pi/agent/npm`.
+- Claude Code stays startable during the update. npm writes a package into
+  its place file by file, and an executable of a few hundred MB can be
+  neither found nor started for the seconds that takes (`spawn ETXTBSY`). So
+  the new version is installed into a folder beside `node_modules` first, and
+  its packages, complete, take the place of the old ones with a rename each;
+  `package-lock.json` gets their entries, and the `npm update` that follows
+  finds them in place and only settles the rest. Where the folders cannot be
+  renamed (Windows, while Claude Code runs), `npm update` installs in place
+  as before, and a request that starts Claude Code just then fails and can be
+  repeated.
 - Works with npm, Pi's default. With an `npmCommand` setting for pnpm or Bun,
   the extension does nothing.
 

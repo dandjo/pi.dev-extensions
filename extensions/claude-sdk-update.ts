@@ -18,20 +18,30 @@
  *   declares the range first (`pi update npm:pi-claude-subscription`).
  * - /claude-sdk-update checks and installs at once and reports the state, also when nothing is due.
  * - One update at a time: Pi processes starting together share a lock file in the npm root, a lock older than 15
- *   minutes counts as left over. During the update, Claude Code is missing for a few seconds; a request that starts
- *   Claude Code just then fails and can be repeated.
+ *   minutes counts as left over.
+ * - Claude Code stays startable during the update. npm writes a package into its place file by file, and an
+ *   executable of a few hundred MB can be neither found nor started for the seconds that takes ("spawn ETXTBSY").
+ *   So the new version is installed into a folder beside node_modules first, and its packages, complete, take the
+ *   place of the old ones with a rename each; package-lock.json gets their entries, and the `npm update` that follows
+ *   finds them in place and only settles the rest. Where the folders cannot be renamed (Windows, while Claude Code
+ *   runs), `npm update` installs in place as before, and a request that starts Claude Code just then fails and can be
+ *   repeated.
  * - Works with npm, Pi's default. With an `npmCommand` setting for pnpm or Bun, the extension does nothing.
  */
 
 import { type ExtensionAPI, type ExtensionContext, getAgentDir } from "@earendil-works/pi-coding-agent";
 import { execFile } from "node:child_process";
-import { closeSync, openSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync, writeSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync, writeSync } from "node:fs";
 import * as path from "node:path";
 import { promisify } from "node:util";
 
 const SDK = "@anthropic-ai/claude-agent-sdk";
 const ROOT = path.join(getAgentDir(), "npm");
 const LOCK_FILE = path.join(ROOT, ".claude-sdk-update.lock");
+/** Where a new version is installed before it moves into node_modules: on the same file system, so the move is a rename. */
+const STAGE = path.join(ROOT, ".claude-sdk-update");
+/** What a package folder is called for the moment its successor takes its place. */
+const RETIRED = /\.retired-\d+$/;
 /** The newest version outside the ranges already reported, so the start reports it once. */
 const STATE_FILE = path.join(getAgentDir(), "claude-sdk-update.json");
 const COMMAND = "claude-sdk-update";
@@ -45,6 +55,8 @@ interface Sdk {
 	version: string;
 	/** The Claude Code version the SDK brings, from its package.json. */
 	claudeCode?: string;
+	/** Its folder below the npm root, which is also its key in package-lock.json. */
+	location: string;
 }
 
 /** A package that declares a range for the SDK, from package-lock.json. */
@@ -94,7 +106,7 @@ function lockPackages(): Record<string, Record<string, unknown>> {
 
 /** The SDK in the npm root, hoisted or below the package that needs it; null when no package there brings it. */
 function installedSdk(): Sdk | null {
-	const hoisted = path.join("node_modules", SDK);
+	const hoisted = `node_modules/${SDK}`;
 	const nested = Object.keys(lockPackages()).filter((key) => key.endsWith(`/node_modules/${SDK}`));
 	for (const dir of [hoisted, ...nested]) {
 		try {
@@ -103,6 +115,7 @@ function installedSdk(): Sdk | null {
 			return {
 				version: manifest.version,
 				claudeCode: typeof manifest.claudeCodeVersion === "string" ? manifest.claudeCodeVersion : undefined,
+				location: dir,
 			};
 		} catch {
 			// Not there: the next place.
@@ -144,9 +157,9 @@ function compare(a: string, b: string): number {
 
 const newest = (versions: string[]) => versions.reduce<string | null>((max, v) => (max === null || compare(v, max) > 0 ? v : max), null);
 
-async function npm(command: { command: string; args: string[] }, args: string[], timeout: number): Promise<string> {
+async function npm(command: { command: string; args: string[] }, args: string[], timeout: number, cwd = ROOT): Promise<string> {
 	const { stdout } = await run(command.command, [...command.args, ...args], {
-		cwd: ROOT,
+		cwd,
 		timeout,
 		maxBuffer: 16 * 1024 * 1024,
 		env: { ...process.env, npm_config_update_notifier: "false" },
@@ -185,6 +198,70 @@ function takeLock(retry = true): boolean {
 	}
 }
 
+/** Removes what an interrupted update left beside the packages. */
+function clearStage(location: string): void {
+	rmSync(STAGE, { recursive: true, force: true });
+	const scope = path.dirname(path.join(ROOT, location));
+	try {
+		for (const name of readdirSync(scope)) if (RETIRED.test(name)) rmSync(path.join(scope, name), { recursive: true, force: true });
+	} catch {
+		// No such folder: nothing was left there.
+	}
+}
+
+/**
+ * Installs `version` of the SDK beside node_modules and moves its packages, complete, into the place of the installed
+ * ones: the SDK and the platform packages with Claude Code, which are named after it. package-lock.json gets their
+ * entries, so the `npm update` that follows takes them as installed. Throws when a folder cannot be moved; what was
+ * moved until then stays, and that `npm update` completes it in place.
+ */
+async function installBeside(command: { command: string; args: string[] }, version: string, location: string): Promise<void> {
+	clearStage(location);
+	mkdirSync(STAGE, { recursive: true });
+	writeFileSync(path.join(STAGE, "package.json"), "{}\n");
+	const stage = realpathSync(STAGE);
+	await npm(command, ["install", `${SDK}@${version}`, "--prefix", stage, "--legacy-peer-deps", "--no-audit", "--no-fund"], UPDATE_TIMEOUT_MS, stage);
+	try {
+		const staged: Record<string, Record<string, unknown>> = JSON.parse(readFileSync(path.join(stage, "package-lock.json"), "utf8"))?.packages ?? {};
+		const lockFile = path.join(ROOT, "package-lock.json");
+		const lock = JSON.parse(readFileSync(lockFile, "utf8"));
+		const own = `node_modules/${SDK}`;
+		// Where the installed SDK lies, its platform packages lie beside it.
+		const base = location.slice(0, location.length - SDK.length);
+		// Claude Code first, the SDK that starts it last.
+		const keys = Object.keys(staged)
+			.filter((key) => key === own || key.startsWith(`${own}-`))
+			.sort((a, b) => Number(a === own) - Number(b === own));
+		for (const key of keys) {
+			const target = base + key.slice("node_modules/".length);
+			const from = path.join(stage, key);
+			// The platform packages of other systems are in the lock file only.
+			if (existsSync(from)) {
+				const to = path.join(ROOT, target);
+				const retired = `${to}.retired-${process.pid}`;
+				mkdirSync(path.dirname(to), { recursive: true });
+				const had = existsSync(to);
+				if (had) renameSync(to, retired);
+				try {
+					renameSync(from, to);
+				} catch (error) {
+					if (had) renameSync(retired, to);
+					throw error;
+				}
+				if (had) rmSync(retired, { recursive: true, force: true });
+			}
+			const flags = Object.fromEntries(Object.entries(lock.packages?.[target] ?? {}).filter(([field]) => ["dev", "optional", "devOptional", "peer"].includes(field)));
+			lock.packages[target] = { ...staged[key], ...flags };
+		}
+		writeFileSync(`${lockFile}.new`, `${JSON.stringify(lock, null, 2)}\n`);
+		renameSync(`${lockFile}.new`, lockFile);
+		// npm's own note of what node_modules holds is older than the folders now, and npm reads them again.
+		rmSync(path.join(ROOT, "node_modules", ".package-lock.json"), { force: true });
+	} finally {
+		clearStage(location);
+	}
+}
+
 /** Checks the registry and installs the newest version the ranges allow. */
 async function check(onUpdate: (from: Sdk, to: string) => void): Promise<Result> {
 	const command = npmCommand();
@@ -208,6 +285,11 @@ async function check(onUpdate: (from: Sdk, to: string) => void): Promise<Result>
 	if (!takeLock()) return { kind: "busy", installed };
 	try {
 		onUpdate(installed, wanted);
+		try {
+			await installBeside(command, wanted, installed.location);
+		} catch {
+			// The update below installs in place what could not be moved there, or reports why nothing can be installed.
+		}
 		await npm(command, ["update", SDK, "--prefix", realpathSync(ROOT), "--legacy-peer-deps", "--no-audit", "--no-fund"], UPDATE_TIMEOUT_MS);
 	} finally {
 		rmSync(LOCK_FILE, { force: true });
