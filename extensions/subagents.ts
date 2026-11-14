@@ -27,12 +27,14 @@
  *   instruction (five minutes, then it counts as stopped); "subagents:stop" ends it. background-agents.ts offers all
  *   three in the agent's transcript.
  * - A subagent's dialogs (AskUserQuestion, a hook's confirmation) open in this session, titled with the agent, one
- *   at a time; without a user interface here they are declined.
+ *   at a time; without a user interface here they are declined. Its AskUserQuestion questions come as one request
+ *   (QUESTIONS_RELAY) and are shown by ask-user-question.ts in the dialog this session's own questions get.
  * - Subagent sessions live in ~/.pi/agent/subagents/<parent session id>/ and are removed after 30 days.
  * - /agents lists the agent types and this session's subagents; /agents stop <id> stops a background one.
  *
  * The child process gets PI_SUBAGENT_DEPTH, PI_SUBAGENT_ID, and PI_SUBAGENT_TYPE, which the other extensions read to
- * behave as Claude Code does inside a subagent.
+ * behave as Claude Code does inside a subagent, and PI_SUBAGENT_QUESTIONS, which tells ask-user-question.ts that this
+ * session takes its questions as one request.
  *
  * Other extensions follow the subagents through the event bus: "subagents:state" carries a SubagentView[] of the
  * running and recently finished ones whenever something changes, "subagents:request" asks for it, "subagents:stop"
@@ -101,6 +103,16 @@ const SESSIONS_ROOT = path.join(getAgentDir(), "subagents");
 const NEVER = new Set(["CronCreate", "CronDelete", "CronList", "ScheduleWakeup", "ListAgents", "SendMessage"]);
 /** The tool a subagent asks the user with: its dialogs open in the session that started it, when that one has a UI. */
 const ASK = "AskUserQuestion";
+/**
+ * A copy of QUESTIONS_RELAY and Asker from ask-user-question.ts, the contract between a subagent's AskUserQuestion and
+ * the session that started it: an editor request with this title carries the questions as JSON in its prefill, and
+ * its value is the reply as JSON ({ unsupported: true } without an Asker here). "ask-user-question:asker" on the
+ * event bus carries the Asker, at load and on every "ask-user-question:asker-request".
+ */
+const QUESTIONS_RELAY = "ask-user-question:relay:v1";
+interface Asker {
+	ask(ctx: ExtensionContext, relay: string, options?: { from?: string; signal?: AbortSignal }): Promise<string>;
+}
 const READ_ONLY = new Set(["Explore", "Plan"]);
 const THINKING = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
 
@@ -871,6 +883,7 @@ function spawnChild(meta: Meta, systemPromptFile: string, trusted: boolean, pare
 			PI_SUBAGENT_ID: meta.agentId,
 			PI_SUBAGENT_TYPE: meta.type,
 			PI_SUBAGENT_PARENT_SESSION: parentSession,
+			PI_SUBAGENT_QUESTIONS: "1",
 			...(meta.fork ? { PI_SUBAGENT_FORK: "1" } : {}),
 		},
 	});
@@ -1198,6 +1211,13 @@ export default function (pi: ExtensionAPI) {
 	});
 	pi.events.emit("subagents:provider-request", undefined);
 
+	let asker: Asker | undefined;
+	pi.events.on("ask-user-question:asker", (data) => {
+		const a = data as Asker | undefined;
+		if (typeof a?.ask === "function") asker = a;
+	});
+	pi.events.emit("ask-user-question:asker-request", undefined);
+
 	const backgroundIds = new Set<string>();
 
 	function view(d: RunDetails, background: boolean): SubagentView {
@@ -1280,6 +1300,12 @@ export default function (pi: ExtensionAPI) {
 				publish();
 			}
 			try {
+				if (method === "editor" && request.title === QUESTIONS_RELAY) {
+					const from = `${child.meta.type} agent${child.meta.description ? `: ${child.meta.description.replace(/\s+/g, " ").trim().slice(0, 80)}` : ""}`;
+					const value = asker ? await asker.ask(ctx, typeof request.prefill === "string" ? request.prefill : "", { from, signal }) : JSON.stringify({ unsupported: true });
+					answer({ value });
+					return;
+				}
 				if (method === "confirm") {
 					answer({ confirmed: await ctx.ui.confirm(title, typeof request.message === "string" ? request.message : "", opts) });
 					return;

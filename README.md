@@ -889,7 +889,8 @@ through it, such as setup wizards, work unchanged.
 - Several questions get a tab each and a Submit tab. Up/Down or the digits
   pick, Space toggles in a multi-select, Enter confirms, Tab/Left/Right switch
   questions, Esc dismisses.
-- The highlighted option has the selection background, as in Claude Code.
+- The highlighted option has the selection background, as in Claude Code,
+  and an arrow (`→`) in front, as in Pi's own lists.
 - In fullscreen mode (`tuiMode`) the mouse works as well: the highlight follows
   the pointer, a tab under the pointer gets a lighter background than the open
   one, a click on an option picks it as Enter does (toggles it in a
@@ -900,8 +901,11 @@ through it, such as setup wizards, work unchanged.
   pointer that merely moves.
 - RPC clients get one select dialog per question. In `pi -p` and JSON mode the
   call fails with a note to decide alone.
-- A subagent asks that way: its dialogs open in the session that started it,
-  titled with the agent (see [subagents](#subagents)).
+- A subagent's questions open in the session that started it, in this same
+  dialog, under a line that names the agent (see [subagents](#subagents)).
+  The subagent hands them over as one request; a session that does not take
+  such requests (one started before this change, or without this extension)
+  gets one select dialog per question instead.
 - With Remote Control active the questions can also be answered in the Claude
   app (see claude-remote-control). The first answer wins, from either place,
   and closes the other. Interrupting the run withdraws the questions.
@@ -928,9 +932,11 @@ interrupt it, and answer its questions, and it stays alive after its report.
   event.
 - A subagent's dialogs open in your session, one at a time, titled with the
   agent: the questions of `AskUserQuestion`, which it has where the session
-  has a user interface, and a hook's confirmation. Without a user interface
-  they are declined. Its notifications, status entries, and widgets stay with
-  it.
+  has a user interface, and a hook's confirmation. The questions look as the
+  session's own do: tabs, multi-select, previews, and the mouse (see
+  [ask-user-question](#ask-user-question)). Without a user interface the
+  dialogs are declined. Its notifications, status entries, and widgets stay
+  with it.
 - Model: the call's `model` (a full model id), else the definition's, else the
   current one. [claude-agents](#claude-agents) adds the families `sonnet`,
   `opus`, `haiku`, and `fable`, and a default model.
@@ -1012,6 +1018,8 @@ Claude Code, the prompt writes to the agent shown, and Esc interrupts it.
   with `↑ N more` and `↓ N more` for the rest. Finished agents stay 30
   seconds — completed ones with a green mark, failed or stopped ones with a red
   one — then disappear. The footer reads `↓ to manage` while the panel exists.
+  The selected row has an arrow (`→`), the accent colour, and the selection
+  background, as in Pi's own lists and the `AskUserQuestion` dialog.
 - ↓ on the last line of the prompt (not while browsing history or with the
   autocomplete open) selects the `main` row; the footer then says what the
   keys do. ↑/↓ move, ↑ from `main` returns to the prompt, Enter opens the

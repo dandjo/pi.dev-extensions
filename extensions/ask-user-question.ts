@@ -11,8 +11,12 @@
  *   gets a lighter background, a click on an option picks it as Enter does (toggles it in a multi-select), a click on a
  *   tab opens it, a click on the submit line on the Submit tab submits, and the wheel moves the highlight.
  * - RPC clients get one select dialog per question. Without any UI the call fails with a note to decide alone.
- * - A subagent (subagents.ts) asks that way too: it runs as an RPC client of the session that started it, where its
- *   dialogs open, titled with the agent. Whether a subagent has the tool at all is decided there.
+ * - A subagent (subagents.ts) runs as an RPC client of the session that started it. Where that session says it takes
+ *   whole question sets (PI_SUBAGENT_QUESTIONS), the subagent hands its questions over in one editor request titled
+ *   QUESTIONS_RELAY, and the session shows them as its own, in the same dialog, under a line naming the agent
+ *   ("ask-user-question:asker" on the event bus carries the Asker that subagents.ts calls for it, at load and on every
+ *   "ask-user-question:asker-request"). Otherwise it asks as any RPC client does. Whether a subagent has the tool at
+ *   all is decided in subagents.ts.
  * - `answers` (question -> answer), as a PreToolUse hook can supply it through updatedInput, skips the dialog.
  * - Answers from elsewhere: while the dialog is open, the event ask-user-question:open (QuestionsOpen) offers the
  *   questions to other extensions — claude-remote-control.ts puts them in the Claude app. The first answer wins, from
@@ -38,6 +42,15 @@ import { Type } from "typebox";
 const OTHER = "Other";
 const QUESTIONS_OPEN = "ask-user-question:open";
 const QUESTIONS_CLOSE = "ask-user-question:close";
+const ASKER = "ask-user-question:asker";
+const ASKER_REQUEST = "ask-user-question:asker-request";
+/**
+ * The title of the editor request a subagent hands its questions to the session that started it with. The prefill is
+ * a QuestionsRelay as JSON, the value a QuestionsReply as JSON; a cancelled request means dismissed.
+ */
+const QUESTIONS_RELAY = "ask-user-question:relay:v1";
+/** Set by a session that takes QUESTIONS_RELAY requests from its subagents (subagents.ts). */
+const RELAYS = Boolean(process.env.PI_SUBAGENT_ID && process.env.PI_SUBAGENT_QUESTIONS);
 
 const OptionSchema = Type.Object({
 	label: Type.String({ description: "The display text for this option, 1-5 words." }),
@@ -119,6 +132,25 @@ interface QuestionsClose {
 	answers?: Record<string, string>;
 }
 
+/** The prefill of a QUESTIONS_RELAY request: the questions, and who asks when a subagent of the subagent does. */
+interface QuestionsRelay {
+	questions: Question[];
+	from?: string;
+}
+
+/** The value of a QUESTIONS_RELAY request: answers by question index, dismissed (message: what the user wrote instead), or no Asker there. */
+interface QuestionsReply {
+	answers?: Answer[];
+	message?: string;
+	unsupported?: boolean;
+}
+
+/** ask-user-question:asker: asks questions that are not this session's own, as subagents.ts does for a subagent. */
+interface Asker {
+	/** relay: a QuestionsRelay as JSON. from: who asks, shown above the questions. Resolves to a QuestionsReply as JSON. */
+	ask(ctx: ExtensionContext, relay: string, options?: { from?: string; signal?: AbortSignal }): Promise<string>;
+}
+
 const DESCRIPTION = [
 	"Asks the user multiple-choice questions to gather information, clarify ambiguity, understand preferences, make decisions, or offer choices.",
 	"",
@@ -175,7 +207,7 @@ type LineHit =
 	| { kind: "submit" };
 
 /** Interactive terminal dialog. Resolves to the answers by question index, or undefined when dismissed or closed. */
-function askInTerminal(ctx: ExtensionContext, questions: Question[], signal: AbortSignal): Promise<Map<number, Answer> | undefined> {
+function askInTerminal(ctx: ExtensionContext, questions: Question[], signal: AbortSignal, from?: string): Promise<Map<number, Answer> | undefined> {
 	return ctx.ui.custom<Map<number, Answer> | undefined>((tui, theme, _keybindings, done) => {
 		if (signal.aborted) done(undefined);
 		else signal.addEventListener("abort", () => done(undefined), { once: true });
@@ -401,6 +433,10 @@ function askInTerminal(ctx: ExtensionContext, questions: Question[], signal: Abo
 				});
 
 			push(theme.fg("accent", "─".repeat(w)));
+			if (from) {
+				wrap(theme.fg("dim", from), " ");
+				push("");
+			}
 			if (tabbed) {
 				// The open tab has the selection background, the one under the pointer a lighter one.
 				const chip = (i: number, label: string, color: "success" | "muted" | "dim") =>
@@ -451,7 +487,7 @@ function askInTerminal(ctx: ExtensionContext, questions: Question[], signal: Abo
 					const isOther = i === q.options.length;
 					const mark = q.multiSelect ? (isOther ? (custom ? "[x] " : "[ ] ") : toggled[tab].has(i) ? "[x] " : "[ ] ") : "";
 					const chosen = !q.multiSelect && answers.get(tab)?.labels[0] === option.label;
-					const label = `${focused ? theme.fg("accent", "> ") : "  "}${i + 1}. ${mark}${option.label}${chosen ? " ✓" : ""}`;
+					const label = `${focused ? theme.fg("accent", "→ ") : "  "}${i + 1}. ${mark}${option.label}${chosen ? " ✓" : ""}`;
 					wrap(focused ? theme.fg("accent", label) : label, " ", { kind: "option", index: i }, focused);
 					if (option.description) wrap(theme.fg("muted", option.description), "       ", { kind: "option", index: i }, focused);
 				});
@@ -499,12 +535,12 @@ function askInTerminal(ctx: ExtensionContext, questions: Question[], signal: Abo
 }
 
 /** RPC clients: one select per question, "Other…" opens a text input. */
-async function askWithDialogs(ctx: ExtensionContext, questions: Question[], signal: AbortSignal): Promise<Map<number, Answer> | undefined> {
+async function askWithDialogs(ctx: ExtensionContext, questions: Question[], signal: AbortSignal, from?: string): Promise<Map<number, Answer> | undefined> {
 	const answers = new Map<number, Answer>();
 	for (const [i, q] of questions.entries()) {
 		if (signal.aborted) return undefined;
 		const labels = q.options.map((o) => `${o.label} — ${o.description}`);
-		const choice = await ctx.ui.select(`${q.header}: ${q.question}${q.multiSelect ? " (one choice here)" : ""}`, [...labels, `${OTHER}…`], { signal });
+		const choice = await ctx.ui.select(`${from ? `[${from}] ` : ""}${q.header}: ${q.question}${q.multiSelect ? " (one choice here)" : ""}`, [...labels, `${OTHER}…`], { signal });
 		if (choice === undefined) return undefined;
 		const index = labels.indexOf(choice);
 		if (index >= 0) {
@@ -516,6 +552,67 @@ async function askWithDialogs(ctx: ExtensionContext, questions: Question[], sign
 		answers.set(i, { labels: [], custom: text });
 	}
 	return answers;
+}
+
+/** A QuestionsRelay from JSON: what a subagent sent is checked like the tool's parameters, and undefined when it does not hold. */
+function parseRelay(json: string): QuestionsRelay | undefined {
+	let data: any;
+	try {
+		data = JSON.parse(json);
+	} catch {
+		return undefined;
+	}
+	if (!Array.isArray(data?.questions) || data.questions.length < 1 || data.questions.length > 4) return undefined;
+	const questions: Question[] = [];
+	for (const q of data.questions) {
+		if (typeof q?.question !== "string" || typeof q.header !== "string" || !Array.isArray(q.options)) return undefined;
+		if (q.options.length < 2 || q.options.length > 4) return undefined;
+		const options: QuestionOption[] = [];
+		for (const o of q.options) {
+			if (typeof o?.label !== "string") return undefined;
+			options.push({
+				label: o.label,
+				description: typeof o.description === "string" ? o.description : "",
+				...(typeof o.preview === "string" && { preview: o.preview }),
+			});
+		}
+		questions.push({ question: q.question, header: q.header, options, ...(q.multiSelect === true && { multiSelect: true }) });
+	}
+	return { questions, ...(typeof data.from === "string" && data.from.trim() && { from: data.from.trim().slice(0, 200) }) };
+}
+
+/**
+ * A subagent's questions, handed to the session that started it. Resolves to how they ended there, or to undefined
+ * when that session cannot ask them (no Asker): the questions then go out as dialogs.
+ */
+async function askThroughParent(ctx: ExtensionContext, questions: Question[], from?: string): Promise<Outcome | undefined> {
+	const value = await ctx.ui.editor(QUESTIONS_RELAY, JSON.stringify({ questions, ...(from && { from }) } satisfies QuestionsRelay));
+	if (value === undefined) return {};
+	let reply: QuestionsReply;
+	try {
+		reply = JSON.parse(value);
+	} catch {
+		return undefined;
+	}
+	if (!reply || typeof reply !== "object" || reply.unsupported) return undefined;
+	if (!Array.isArray(reply.answers)) return { message: typeof reply.message === "string" ? reply.message.trim() || undefined : undefined };
+	const answers = new Map<number, Answer>();
+	questions.forEach((_, i) => {
+		const answer = reply.answers?.[i];
+		const custom = typeof answer?.custom === "string" && answer.custom.trim() ? answer.custom.trim() : undefined;
+		answers.set(i, { labels: Array.isArray(answer?.labels) ? answer.labels.map(String) : [], ...(custom && { custom }) });
+	});
+	return { answers };
+}
+
+/** The questions where this session's user is: in the terminal, in the session that started this subagent, or in an RPC client's dialogs. */
+async function present(ctx: ExtensionContext, questions: Question[], signal: AbortSignal, from?: string): Promise<Outcome> {
+	if (ctx.mode === "tui") return { answers: await askInTerminal(ctx, questions, signal, from) };
+	if (RELAYS) {
+		const outcome = await askThroughParent(ctx, questions, from);
+		if (outcome) return outcome;
+	}
+	return { answers: await askWithDialogs(ctx, questions, signal, from) };
 }
 
 /**
@@ -547,8 +644,8 @@ async function ask(pi: ExtensionAPI, ctx: ExtensionContext, toolCallId: string, 
 		decline: (message) => settle({ message: message?.trim() || undefined }),
 	};
 	pi.events.emit(QUESTIONS_OPEN, open);
-	(ctx.mode === "tui" ? askInTerminal(ctx, questions, close.signal) : askWithDialogs(ctx, questions, close.signal)).then(
-		(answers) => settle({ answers }),
+	present(ctx, questions, close.signal).then(
+		(result) => settle(result),
 		(error) => {
 			if (settled) return;
 			settled = true;
@@ -571,6 +668,21 @@ async function ask(pi: ExtensionAPI, ctx: ExtensionContext, toolCallId: string, 
 }
 
 export default function (pi: ExtensionAPI) {
+	// A subagent's questions, asked here for it. They are not offered to other extensions: no tool call of this session
+	// stands behind them.
+	const asker: Asker = {
+		async ask(ctx, relay, options) {
+			const parsed = parseRelay(relay);
+			if (!parsed || !ctx.hasUI || options?.signal?.aborted) return JSON.stringify({} satisfies QuestionsReply);
+			const from = [options?.from, parsed.from].filter(Boolean).join(" › ") || undefined;
+			const { answers, message } = await present(ctx, parsed.questions, options?.signal ?? new AbortController().signal, from);
+			const reply: QuestionsReply = answers ? { answers: parsed.questions.map((_, i) => answers.get(i) ?? { labels: [] }) } : { ...(message && { message }) };
+			return JSON.stringify(reply);
+		},
+	};
+	pi.events.on(ASKER_REQUEST, () => pi.events.emit(ASKER, asker));
+	pi.events.emit(ASKER, asker);
+
 	pi.registerTool<typeof Params, Details>({
 		name: "AskUserQuestion",
 		label: "Ask user",

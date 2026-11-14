@@ -402,14 +402,21 @@ export default function (pi: ExtensionAPI) {
 		scroll = Math.max(0, Math.min(scroll, Math.max(0, total - MAX_VISIBLE_ROWS)));
 		const visible = list.slice(scroll, scroll + MAX_VISIBLE_ROWS);
 
-		const mainPointer = selected === 0 ? theme.fg("accent", "❯ ") : "  ";
-		let main = `${mainPointer}${viewing ? "◯" : "●"} ${selected === 0 ? theme.bold("main") : focused ? "main" : theme.fg("dim", "main")}`;
+		// The selected row as Pi's own lists and the AskUserQuestion dialog mark theirs: an arrow, the accent colour, and
+		// the selection background across the width.
+		const pointer = (isSelected: boolean) => (isSelected ? theme.fg("accent", "→ ") : "  ");
+		const line = (text: string, isSelected: boolean) => {
+			const cut = truncateToWidth(text, width, "…");
+			return isSelected ? theme.bg("selectedBg", cut + " ".repeat(Math.max(0, width - visibleWidth(cut)))) : cut;
+		};
+
+		let main = `${pointer(selected === 0)}${viewing ? "◯" : "●"} ${selected === 0 ? theme.fg("accent", "main") : focused ? "main" : theme.fg("dim", "main")}`;
 		if (scroll > 0) {
 			const more = theme.fg("dim", `↑ ${scroll} more`);
 			main = `${truncateToWidth(main, Math.max(0, width - visibleWidth(more) - 1), "…")} ${more}`;
 		}
 		panelLines[lines.length] = 0;
-		lines.push(truncateToWidth(main, width, "…"));
+		lines.push(line(main, selected === 0));
 
 		const label = (entry: Entry) => (entry.kind === "agent" ? entry.row.type : entry.task.kind === "loop wakeup" ? "loop" : "scheduled");
 		const nameWidth = Math.min(MAX_NAME_WIDTH, Math.max(4, ...list.map((e) => label(e).length)));
@@ -418,23 +425,22 @@ export default function (pi: ExtensionAPI) {
 		visible.forEach((entry, i) => {
 			const index = scroll + i + 1;
 			const isSelected = selected === index;
-			const pointer = isSelected ? theme.fg("accent", "❯ ") : "  ";
 			const name = truncateToWidth(label(entry), nameWidth, "…").padEnd(nameWidth);
 			const descWidth = Math.max(8, width - 2 - 2 - nameWidth - 2 - statusWidth - 2);
 			const desc = truncateToWidth((entry.kind === "agent" ? entry.row.description : entry.task.prompt) || "", descWidth, "…").padEnd(descWidth);
 			let status = statuses[i].padStart(statusWidth);
-			status = status.replace(/\d+ queued/, (m) => theme.fg("warning", m));
-			const body = `${isSelected ? theme.bold(name) : name}  ${desc}  ${status}`;
+			if (!isSelected) status = status.replace(/\d+ queued/, (m) => theme.fg("warning", m));
+			const plain = `${name}  ${desc}  ${status}`;
 			panelLines[lines.length] = index;
+			const dim = !isSelected && !focused && (entry.kind === "scheduled" || entry.row.agentId !== viewing);
+			const body = isSelected ? theme.fg("accent", plain) : dim ? theme.fg("dim", plain) : plain;
 			if (entry.kind === "scheduled") {
-				const dim = !isSelected && !focused;
-				lines.push(truncateToWidth(`${pointer}${theme.fg("accent", "↻")} ${dim ? theme.fg("dim", body) : body}`, width, "…"));
+				lines.push(line(`${pointer(isSelected)}${theme.fg("accent", "↻")} ${body}`, isSelected));
 				return;
 			}
 			const row = entry.row;
 			const icon = row.status === "completed" ? theme.fg("success", "◯") : row.status === "running" ? "◯" : theme.fg("error", "◯");
-			const dim = !isSelected && row.agentId !== viewing && !focused;
-			lines.push(truncateToWidth(`${pointer}${row.agentId === viewing ? "●" : icon} ${dim ? theme.fg("dim", body) : body}`, width, "…"));
+			lines.push(line(`${pointer(isSelected)}${row.agentId === viewing ? "●" : icon} ${body}`, isSelected));
 		});
 		if (scroll + visible.length < total) lines.push(theme.fg("dim", `    ↓ ${total - scroll - visible.length} more`));
 		return lines;
