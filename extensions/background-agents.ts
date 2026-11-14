@@ -30,16 +30,25 @@
  *   replaces the editor with a subclass of Pi's own, so another extension that replaces the editor wins over it.
  * - Scheduled tasks (scheduled-tasks.ts, scheduled-tasks:state) are listed below the agents with their schedule and
  *   next run: Enter opens the task in its manager, x deletes it. The panel also exists while only tasks are scheduled.
- * - The mouse: a click on a row opens it, a click on `main` returns to the prompt, and a click on "↓ to manage" in
- *   the status line (statusline:status-click) moves into the panel.
+ * - The mouse: the row under the pointer gets the selection marker, and when the pointer leaves the panel the marker
+ *   goes back to the row selected with the keys (none while the prompt has the focus); Pi reports no leaving, so the
+ *   TUI's mouse moves are observed (observeMouseMoves). A key that acts on a row (↑↓, Enter, x) acts on the one with
+ *   the marker, as in the AskUserQuestion dialog. A click on a row opens it, a click on `main` returns to the
+ *   prompt, and a click on "↓ to manage" in the status line (statusline:status-click) moves into the panel.
  */
 
-import { type ExtensionAPI, type ExtensionContext, CustomEditor, getAgentDir, getMarkdownTheme } from "@earendil-works/pi-coding-agent";
+import {
+	type ExtensionAPI,
+	type ExtensionContext,
+	CustomEditor,
+	getAgentDir,
+	getMarkdownTheme,
+	type KeybindingsManager,
+} from "@earendil-works/pi-coding-agent";
 import {
 	type Component,
 	isViewportTUI,
 	Key,
-	type KeybindingsManager,
 	Markdown,
 	matchesKey,
 	type TUI,
@@ -52,6 +61,45 @@ import {
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+
+/**
+ * The mouse moves of the terminal, for the pointer leaving a component: Pi hands a move only to the component under the
+ * pointer, and its full-screen TUI takes mouse reports before onTerminalInput sees them. So the TUI's handleMouseEvent
+ * is wrapped, once per TUI, and calls the observers registered on it with every move before Pi dispatches it. Without
+ * that method (the regular TUI, another Pi version) nothing is observed. ask-user-question.ts and background-agents.ts
+ * carry a copy of this block: change both alike, and keep the key and the shape.
+ */
+const MOUSE_MOVES = Symbol.for("pi.tui.mouse-moves.v1");
+type MouseMoveObserver = (x: number, y: number) => void;
+function observeMouseMoves(tui: object, observer: MouseMoveObserver): () => void {
+	const host = tui as { [MOUSE_MOVES]?: Set<MouseMoveObserver>; handleMouseEvent?: unknown };
+	let observers = host[MOUSE_MOVES];
+	if (!observers) {
+		if (typeof host.handleMouseEvent !== "function") return () => {};
+		const original = host.handleMouseEvent as (raw: { button: number; x: number; y: number; release?: boolean }) => unknown;
+		const set = new Set<MouseMoveObserver>();
+		observers = set;
+		host[MOUSE_MOVES] = set;
+		host.handleMouseEvent = function (this: unknown, raw: { button: number; x: number; y: number; release?: boolean }) {
+			// A move: the motion bit without the wheel bit, and not a button release.
+			if (!raw.release && (raw.button & 32) !== 0 && (raw.button & 64) === 0) {
+				for (const observe of [...set]) {
+					try {
+						observe(raw.x, raw.y);
+					} catch {
+						// an observer's failure must not cost the TUI its mouse
+					}
+				}
+			}
+			return original.call(this, raw);
+		};
+	}
+	const own = observers;
+	own.add(observer);
+	return () => {
+		own.delete(observer);
+	};
+}
 
 const SESSIONS_ROOT = path.join(getAgentDir(), "subagents");
 const WIDGET_KEY = "background-agents";
@@ -266,6 +314,9 @@ export default function (pi: ExtensionAPI) {
 	let selected = -1;
 	/** The selection index of each line of the last panel render, for the mouse. */
 	let panelLines: (number | undefined)[] = [];
+	/** The row under the pointer (selection index), which has the marker while the pointer is there. */
+	let hovered: number | undefined;
+	let stopWatching: (() => void) | null = null;
 	let scroll = 0;
 	let viewing: string | null = null;
 	let widgetShown = false;
@@ -297,9 +348,26 @@ export default function (pi: ExtensionAPI) {
 			widgetShown = true;
 			ctx?.ui.setWidget(WIDGET_KEY, (tui, theme) => {
 				widgetTui = tui;
+				// The pointer leaving the panel: every move first clears the row under the pointer, and the panel's own move
+				// handler, which Pi calls right after for a move over the panel, sets it again. A move elsewhere leaves it clear.
+				stopWatching?.();
+				stopWatching = observeMouseMoves(tui, () => {
+					if (hovered === undefined) return;
+					hovered = undefined;
+					queueMicrotask(() => {
+						if (hovered === undefined) widgetTui?.requestRender();
+					});
+				});
 				return {
 					render: (width: number) => renderPanel(width, theme),
 					handleMouse: (event: TuiMouseEvent): TuiMouseEventResult | undefined => {
+						if (event.type === "move") {
+							const over = panelLines[event.y];
+							if (over === hovered) return undefined;
+							hovered = over;
+							widgetTui?.requestRender();
+							return { handled: true, render: true };
+						}
 						if (event.button !== "left" || (event.type !== "press" && event.type !== "click")) return undefined;
 						const index = panelLines[event.y];
 						if (index === undefined) return undefined;
@@ -314,6 +382,9 @@ export default function (pi: ExtensionAPI) {
 					invalidate() {},
 					dispose() {
 						if (widgetTui === tui) widgetTui = null;
+						stopWatching?.();
+						stopWatching = null;
+						hovered = undefined;
 					},
 				};
 			}, { placement: "belowEditor" });
@@ -395,6 +466,8 @@ export default function (pi: ExtensionAPI) {
 		panelLines = [];
 		if (list.length === 0) return [];
 		const focused = selected >= 0;
+		// The marker: on the row under the pointer, else on the row selected with the keys.
+		const marked = hovered !== undefined && hovered <= list.length ? hovered : selected;
 		const lines: string[] = [];
 		const total = list.length;
 		if (selected - 1 < scroll) scroll = Math.max(0, selected - 1);
@@ -410,13 +483,13 @@ export default function (pi: ExtensionAPI) {
 			return isSelected ? theme.bg("selectedBg", cut + " ".repeat(Math.max(0, width - visibleWidth(cut)))) : cut;
 		};
 
-		let main = `${pointer(selected === 0)}${viewing ? "◯" : "●"} ${selected === 0 ? theme.fg("accent", "main") : focused ? "main" : theme.fg("dim", "main")}`;
+		let main = `${pointer(marked === 0)}${viewing ? "◯" : "●"} ${marked === 0 ? theme.fg("accent", "main") : focused ? "main" : theme.fg("dim", "main")}`;
 		if (scroll > 0) {
 			const more = theme.fg("dim", `↑ ${scroll} more`);
 			main = `${truncateToWidth(main, Math.max(0, width - visibleWidth(more) - 1), "…")} ${more}`;
 		}
 		panelLines[lines.length] = 0;
-		lines.push(line(main, selected === 0));
+		lines.push(line(main, marked === 0));
 
 		const label = (entry: Entry) => (entry.kind === "agent" ? entry.row.type : entry.task.kind === "loop wakeup" ? "loop" : "scheduled");
 		const nameWidth = Math.min(MAX_NAME_WIDTH, Math.max(4, ...list.map((e) => label(e).length)));
@@ -424,7 +497,7 @@ export default function (pi: ExtensionAPI) {
 		const statusWidth = Math.max(...statuses.map((s) => s.length), 0);
 		visible.forEach((entry, i) => {
 			const index = scroll + i + 1;
-			const isSelected = selected === index;
+			const isSelected = marked === index;
 			const name = truncateToWidth(label(entry), nameWidth, "…").padEnd(nameWidth);
 			const descWidth = Math.max(8, width - 2 - 2 - nameWidth - 2 - statusWidth - 2);
 			const desc = truncateToWidth((entry.kind === "agent" ? entry.row.description : entry.task.prompt) || "", descWidth, "…").padEnd(descWidth);
@@ -473,6 +546,19 @@ export default function (pi: ExtensionAPI) {
 	function panelKey(data: string, keybindings: KeybindingsManager): boolean {
 		const list = entries();
 		if (selected < 0 || list.length === 0) return false;
+		// A key that acts on a row acts on the one with the marker, as in the AskUserQuestion dialog: the row under the
+		// pointer becomes the one selected with the keys.
+		const acts =
+			matchesKey(data, Key.down) ||
+			matchesKey(data, Key.up) ||
+			keybindings.matches(data, "tui.editor.cursorDown") ||
+			keybindings.matches(data, "tui.editor.cursorUp") ||
+			data === "\x0e" ||
+			data === "\x10" ||
+			matchesKey(data, Key.enter) ||
+			data === "x";
+		if (acts && hovered !== undefined && hovered <= list.length) selected = hovered;
+		if (acts) hovered = undefined;
 		if (matchesKey(data, Key.down) || keybindings.matches(data, "tui.editor.cursorDown") || data === "\x0e") {
 			selected = Math.min(list.length, selected + 1);
 			refresh();
@@ -883,6 +969,7 @@ export default function (pi: ExtensionAPI) {
 		sent.clear();
 		scheduled = [];
 		selected = -1;
+		hovered = undefined;
 		if (context.mode === "tui") context.ui.setEditorComponent((tui, theme, keybindings) => new AgentsEditor(tui, theme, keybindings));
 		pi.events.emit("subagents:request", undefined);
 		pi.events.emit("scheduled-tasks:request", undefined);
@@ -893,6 +980,9 @@ export default function (pi: ExtensionAPI) {
 		if (ticker) clearInterval(ticker);
 		ticker = null;
 		if (ctx?.mode === "tui") ctx.ui.setEditorComponent(undefined);
+		stopWatching?.();
+		stopWatching = null;
+		hovered = undefined;
 		if (widgetShown) ctx?.ui.setWidget(WIDGET_KEY, undefined);
 		widgetShown = false;
 		widgetTui = null;

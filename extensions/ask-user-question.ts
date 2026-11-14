@@ -7,8 +7,9 @@
  * - Interactive terminal: the questions replace the editor; several questions (or a multi-select one) get a tab per
  *   question and a Submit tab. Up/Down or the digit keys pick, Space toggles in a multi-select, Enter confirms,
  *   Tab/Left/Right move between questions, Esc dismisses. The highlighted option has the selection background, as in
- *   Claude Code. In fullscreen mode the mouse works too: the highlight follows the pointer, a tab under the pointer
- *   gets a lighter background, a click on an option picks it as Enter does (toggles it in a multi-select), a click on a
+ *   Claude Code. In fullscreen mode the mouse works too: the highlight follows the pointer and goes back to the option
+ *   chosen with the keys when the pointer leaves the options (a key acts on the option highlighted, and makes it the
+ *   one chosen with the keys), a tab under the pointer gets a lighter background, a click on an option picks it as Enter does (toggles it in a multi-select), a click on a
  *   tab opens it, a click on the submit line on the Submit tab submits, and the wheel moves the highlight.
  * - RPC clients get one select dialog per question. Without any UI the call fails with a note to decide alone.
  * - A subagent (subagents.ts) runs as an RPC client of the session that started it. Where that session says it takes
@@ -38,6 +39,45 @@ import {
 	wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
+
+/**
+ * The mouse moves of the terminal, for the pointer leaving a component: Pi hands a move only to the component under the
+ * pointer, and its full-screen TUI takes mouse reports before onTerminalInput sees them. So the TUI's handleMouseEvent
+ * is wrapped, once per TUI, and calls the observers registered on it with every move before Pi dispatches it. Without
+ * that method (the regular TUI, another Pi version) nothing is observed. ask-user-question.ts and background-agents.ts
+ * carry a copy of this block: change both alike, and keep the key and the shape.
+ */
+const MOUSE_MOVES = Symbol.for("pi.tui.mouse-moves.v1");
+type MouseMoveObserver = (x: number, y: number) => void;
+function observeMouseMoves(tui: object, observer: MouseMoveObserver): () => void {
+	const host = tui as { [MOUSE_MOVES]?: Set<MouseMoveObserver>; handleMouseEvent?: unknown };
+	let observers = host[MOUSE_MOVES];
+	if (!observers) {
+		if (typeof host.handleMouseEvent !== "function") return () => {};
+		const original = host.handleMouseEvent as (raw: { button: number; x: number; y: number; release?: boolean }) => unknown;
+		const set = new Set<MouseMoveObserver>();
+		observers = set;
+		host[MOUSE_MOVES] = set;
+		host.handleMouseEvent = function (this: unknown, raw: { button: number; x: number; y: number; release?: boolean }) {
+			// A move: the motion bit without the wheel bit, and not a button release.
+			if (!raw.release && (raw.button & 32) !== 0 && (raw.button & 64) === 0) {
+				for (const observe of [...set]) {
+					try {
+						observe(raw.x, raw.y);
+					} catch {
+						// an observer's failure must not cost the TUI its mouse
+					}
+				}
+			}
+			return original.call(this, raw);
+		};
+	}
+	const own = observers;
+	own.add(observer);
+	return () => {
+		own.delete(observer);
+	};
+}
 
 const OTHER = "Other";
 const QUESTIONS_OPEN = "ask-user-question:open";
@@ -208,7 +248,23 @@ type LineHit =
 
 /** Interactive terminal dialog. Resolves to the answers by question index, or undefined when dismissed or closed. */
 function askInTerminal(ctx: ExtensionContext, questions: Question[], signal: AbortSignal, from?: string): Promise<Map<number, Answer> | undefined> {
-	return ctx.ui.custom<Map<number, Answer> | undefined>((tui, theme, _keybindings, done) => {
+	return ctx.ui.custom<Map<number, Answer> | undefined>((tui, theme, _keybindings, finish) => {
+		/** The option under the pointer, on its tab: it has the highlight while the pointer is there. */
+		let hover: { tab: number; index: number } | undefined;
+		// The pointer leaving the dialog: every move first clears what is under the pointer, and the dialog's own move
+		// handler, which Pi calls right after for a move over the dialog, sets it again. A move elsewhere leaves it clear.
+		const stopWatching = observeMouseMoves(tui, () => {
+			if (hover === undefined && hoverTab === undefined) return;
+			hover = undefined;
+			hoverTab = undefined;
+			queueMicrotask(() => {
+				if (hover === undefined && hoverTab === undefined) refresh();
+			});
+		});
+		const done = (result: Map<number, Answer> | undefined) => {
+			stopWatching();
+			finish(result);
+		};
 		if (signal.aborted) done(undefined);
 		else signal.addEventListener("abort", () => done(undefined), { once: true });
 		const tabbed = questions.length > 1 || questions.some((q) => q.multiSelect);
@@ -241,6 +297,13 @@ function askInTerminal(ctx: ExtensionContext, questions: Question[], signal: Abo
 			tui.requestRender();
 		};
 		const rows = (q: number) => questions[q].options.length + 1;
+		/** The option highlighted on tab q: the one under the pointer, else the one chosen with the keys. */
+		const marked = (q: number) => (hover?.tab === q && !typing ? hover.index : cursor[q]);
+		/** A key acts on the option highlighted, which becomes the one chosen with the keys. */
+		const adopt = (q: number) => {
+			cursor[q] = marked(q);
+			hover = undefined;
+		};
 		const allAnswered = () => questions.every((_, i) => answers.has(i));
 
 		const advance = () => {
@@ -329,6 +392,7 @@ function askInTerminal(ctx: ExtensionContext, questions: Question[], signal: Abo
 				return;
 			}
 			const q = tab;
+			adopt(q);
 			if (matchesKey(data, Key.up)) {
 				cursor[q] = (cursor[q] + rows(q) - 1) % rows(q);
 				refresh();
@@ -362,15 +426,13 @@ function askInTerminal(ctx: ExtensionContext, questions: Question[], signal: Abo
 			if (!cache) render(event.width);
 			if (event.type === "move") {
 				// Hover: a tab under the pointer lights up, and the highlight follows the pointer over the options, so Enter
-				// picks what the pointer is on.
+				// picks what the pointer is on; off the options it goes back to the option chosen with the keys.
 				const hit = hits[event.y];
 				const overTab = hit?.kind === "tabs" ? hit.spans.find((s) => event.x >= s.from && event.x < s.to)?.tab : undefined;
-				let changed = overTab !== hoverTab;
+				const over = !typing && tab !== submitTab && hit?.kind === "option" ? { tab, index: hit.index } : undefined;
+				const changed = overTab !== hoverTab || over?.tab !== hover?.tab || over?.index !== hover?.index;
 				hoverTab = overTab;
-				if (!typing && tab !== submitTab && hit?.kind === "option" && cursor[tab] !== hit.index) {
-					cursor[tab] = hit.index;
-					changed = true;
-				}
+				hover = over;
 				if (!changed) return undefined;
 				refresh();
 				return { handled: true, render: true };
@@ -378,6 +440,7 @@ function askInTerminal(ctx: ExtensionContext, questions: Question[], signal: Abo
 			if (event.type === "wheel" && event.wheelDelta) {
 				if (typing || tab === submitTab) return undefined;
 				const q = tab;
+				adopt(q);
 				cursor[q] = Math.max(0, Math.min(rows(q) - 1, cursor[q] + (event.wheelDelta < 0 ? -1 : 1)));
 				refresh();
 				return { handled: true };
@@ -483,7 +546,7 @@ function askInTerminal(ctx: ExtensionContext, questions: Question[], signal: Abo
 				push("");
 				const custom = answers.get(tab)?.custom;
 				[...q.options, { label: OTHER, description: custom ? `"${custom}"` : "Type your own answer" }].forEach((option, i) => {
-					const focused = i === cursor[tab];
+					const focused = i === marked(tab);
 					const isOther = i === q.options.length;
 					const mark = q.multiSelect ? (isOther ? (custom ? "[x] " : "[ ] ") : toggled[tab].has(i) ? "[x] " : "[ ] ") : "";
 					const chosen = !q.multiSelect && answers.get(tab)?.labels[0] === option.label;
@@ -497,7 +560,7 @@ function askInTerminal(ctx: ExtensionContext, questions: Question[], signal: Abo
 				const previewHeight = Math.max(0, ...q.options.map((option) => previewLines(option).length));
 				if (previewHeight > 0 && !typing) {
 					push("");
-					const preview = previewLines(q.options[cursor[tab]]);
+					const preview = previewLines(q.options[marked(tab)]);
 					for (const line of preview) push(` ${theme.fg("dim", "│")} ${truncateToWidth(line, w - 4)}`);
 					for (let i = preview.length; i < previewHeight; i++) push("");
 				}

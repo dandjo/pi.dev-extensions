@@ -892,8 +892,10 @@ through it, such as setup wizards, work unchanged.
 - The highlighted option has the selection background, as in Claude Code,
   and an arrow (`→`) in front, as in Pi's own lists.
 - In fullscreen mode (`tuiMode`) the mouse works as well: the highlight follows
-  the pointer, a tab under the pointer gets a lighter background than the open
-  one, a click on an option picks it as Enter does (toggles it in a
+  the pointer and goes back to the option chosen with the keys when the pointer
+  leaves the options; a key acts on the option highlighted, which then becomes
+  the one chosen with the keys. A tab under the pointer gets a lighter
+  background than the open one, a click on an option picks it as Enter does (toggles it in a
   multi-select), a click on a tab opens it, a click on the submit line of the
   Submit tab submits, and the wheel moves the highlight. In the regular mode
   the terminal keeps the mouse. Under tmux, zellij, or screen Pi asks the
@@ -1062,9 +1064,16 @@ Claude Code, the prompt writes to the agent shown, and Esc interrupts it.
   agents, marked `↻`, with their prompt, schedule, and next run, and the panel
   also appears while only tasks are scheduled. Enter opens the task in the
   task manager, `x` deletes it.
-- In fullscreen mode a click on a row opens it, a click on `main` shows the
+- In fullscreen mode the row under the pointer gets the arrow and the
+  selection background, as in the `AskUserQuestion` dialog; when the pointer
+  leaves the panel, the marker goes back to the row selected with the keys, or
+  disappears while the prompt has the focus. ↑/↓, Enter, and `x` act on the
+  row with the marker. A click on a row opens it, a click on `main` shows the
   conversation and returns to the prompt, and a click on `↓ to manage` in the
-  footer moves into the panel.
+  footer moves into the panel. Pi tells a component nothing when the pointer
+  leaves it, so the panel and the dialog watch the pointer's moves in Pi's
+  fullscreen TUI; in a Pi version without that hook the marker simply stays
+  where the pointer left it.
 - The transcript comes from the agent's session file in
   `~/.pi/agent/subagents/<session id>/`. The swap exchanges the children of
   Pi's document container (the first component of its TUI, in fullscreen the

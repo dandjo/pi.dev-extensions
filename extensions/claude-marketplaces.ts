@@ -379,7 +379,9 @@ export default function (pi: ExtensionAPI) {
 
 	// State of this session runtime; Pi may reuse the loaded module for the next one.
 	let ctx: ExtensionContext | null = null;
-	let tui: TUI | null = null;
+	// Pi's TUI answers which component has the focus, though its TUI interface does not declare the method; without it
+	// the focus counts as the editor's.
+	let tui: (TUI & { getFocusedComponent?: () => unknown }) | null = null;
 	/** The mirror commit per marketplace whose plugins this runtime loaded. */
 	const loaded = new Map<string, string | null>();
 	// Pi emits resources_discover after session_start, at the start and at /reload alike.
@@ -397,7 +399,7 @@ export default function (pi: ExtensionAPI) {
 			!ctx.hasPendingMessages() &&
 			Date.now() - lastInput > INPUT_GRACE_MS &&
 			ctx.ui.getEditorText() === "" &&
-			tui.getFocusedComponent() instanceof CustomEditor
+			(typeof tui.getFocusedComponent !== "function" || tui.getFocusedComponent() instanceof CustomEditor)
 		);
 	}
 
