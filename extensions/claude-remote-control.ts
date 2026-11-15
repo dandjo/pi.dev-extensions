@@ -1017,15 +1017,13 @@ interface UsageSnapshot {
 	credits: Credits | null;
 	/** The endpoint's windows, limit rows and extra usage as it sent them (ANSWER_KEYS); absent in older cache files. */
 	answer?: Record<string, unknown>;
-	/** "token": read from the rate-limit headers of a model call with CLAUDE_CODE_OAUTH_TOKEN, not from the endpoint. */
-	via?: "token";
 }
 
 /** What "claude-usage:source" carries. */
 interface ClaudeUsageSource {
 	/** The latest answer younger than USAGE_MAX_AGE_MS, or null. */
 	snapshot(): UsageSnapshot | null;
-	/** Asks the endpoint unless the shared answer is younger than USAGE_TTL_MS (PROBE_TTL_MS for one via the token); settles once that is done. */
+	/** Asks the endpoint unless the shared answer is younger than USAGE_TTL_MS; settles once that is done. */
 	refresh(): Promise<void>;
 }
 

@@ -22,12 +22,6 @@
  * claude-login.ts is asked to have Claude Code renew its own ("claude-login:source" on the event bus), as it runs out
  * after hours without a prompt; without that extension the rows wait for the next prompt to renew it.
  *
- * Without either login, a CLAUDE_CODE_OAUTH_TOKEN (from `claude setup-token`) stands in. The usage endpoint turns it
- * away (it lacks the user:profile scope), so the limits come from the anthropic-ratelimit-unified-* headers of a real
- * model call instead: the newest Haiku the token may use, one output token, at most every PROBE_TTL_MS. Those headers
- * carry the 5h and 7d windows only when the API sends them (no model-scoped windows, no credits), and the rows say
- * "via CLAUDE_CODE_OAUTH_TOKEN". As soon as a login token is valid again, the endpoint takes over.
- *
  * The rows reach statusline.ts through the event bus ("statusline:section"); without it this file does nothing.
  * Other extensions read the answer through the event bus as well: "claude-usage:source" carries a ClaudeUsageSource,
  * at load and on every "claude-usage:source-request", and "claude-usage:changed" follows every new state.
@@ -49,12 +43,6 @@ const USAGE_STALE_MS = 600_000;
 const USAGE_MAX_AGE_MS = 3_600_000;
 const LOCK_STALE_MS = 30_000;
 const USAGE_URL = "https://api.anthropic.com/api/oauth/usage";
-/** The environment variable of a long-lived token from `claude setup-token`: model calls only, no usage endpoint. */
-const ENV_TOKEN = "CLAUDE_CODE_OAUTH_TOKEN";
-const MODELS_URL = "https://api.anthropic.com/v1/models?limit=100";
-const PROBE_URL = "https://api.anthropic.com/v1/messages";
-/** A probe is a model call billed to the plan, so it runs far less often than the endpoint is asked. */
-const PROBE_TTL_MS = 600_000;
 const CACHE_DIR = path.join(process.env.XDG_CACHE_HOME || path.join(os.homedir(), ".cache"), "pi-statusline");
 const CACHE_FILE = path.join(CACHE_DIR, "usage.json");
 const LOCK_FILE = path.join(CACHE_DIR, "usage.lock");
@@ -79,15 +67,13 @@ export interface UsageSnapshot {
 	credits: Credits | null;
 	/** The endpoint's windows, limit rows and extra usage as it sent them (ANSWER_KEYS); absent in older cache files. */
 	answer?: Record<string, unknown>;
-	/** "token": read from the rate-limit headers of a model call with CLAUDE_CODE_OAUTH_TOKEN, not from the endpoint. */
-	via?: "token";
 }
 
 /** What "claude-usage:source" carries. */
 export interface ClaudeUsageSource {
 	/** The latest answer younger than USAGE_MAX_AGE_MS, or null. */
 	snapshot(): UsageSnapshot | null;
-	/** Asks the endpoint unless the shared answer is younger than USAGE_TTL_MS (PROBE_TTL_MS for one via the token); settles once that is done. */
+	/** Asks the endpoint unless the shared answer is younger than USAGE_TTL_MS; settles once that is done. */
 	refresh(): Promise<void>;
 }
 
@@ -231,9 +217,8 @@ function isClaudeModel(model: { provider: string; id: string } | undefined): boo
 let loginCheck: { at: number; present: boolean } | undefined;
 const LOGIN_CHECK_MS = 60_000;
 
-/** Whether there is a Claude login at all, valid or not: Pi's own OAuth login, Claude Code's, or CLAUDE_CODE_OAUTH_TOKEN. */
+/** Whether there is a Claude login at all, valid or not: Pi's own OAuth login or Claude Code's. */
 async function hasClaudeLogin(): Promise<boolean> {
-	if (process.env[ENV_TOKEN]) return true;
 	if (loginCheck && Date.now() - loginCheck.at < LOGIN_CHECK_MS) return loginCheck.present;
 	let present = false;
 	try {
@@ -279,97 +264,11 @@ function parseUsage(json: any): UsageSnapshot {
 	return { fetchedAt: Date.now(), limits, credits, answer };
 }
 
-/** The headers of a model call with CLAUDE_CODE_OAUTH_TOKEN; the OAuth beta lets the API take the token as Bearer. */
-function probeHeaders(token: string): Record<string, string> {
-	return {
-		Authorization: `Bearer ${token}`,
-		"anthropic-beta": "oauth-2025-04-20",
-		"anthropic-version": "2023-06-01",
-		"content-type": "application/json",
-	};
-}
-
-/** The newest Haiku the token may use (the model list comes newest first), looked up once per process. */
-let probeModel: string | undefined;
-
-async function haikuModel(token: string): Promise<string | { error: string }> {
-	if (probeModel) return probeModel;
-	let res: Response;
-	try {
-		res = await fetch(MODELS_URL, { headers: probeHeaders(token), signal: AbortSignal.timeout(10_000) });
-	} catch {
-		return { error: "endpoint unreachable" };
-	}
-	if (!res.ok) return { error: `model list: HTTP ${res.status}` };
-	try {
-		const data = (await res.json())?.data;
-		const ids = Array.isArray(data) ? data.map((m: any) => m?.id).filter((id: unknown) => typeof id === "string") : [];
-		probeModel = ids.find((id: string) => /haiku/i.test(id));
-	} catch {
-		return { error: "unreadable model list" };
-	}
-	return probeModel ?? { error: "no Haiku model for the token" };
-}
-
-/**
- * The limits from the anthropic-ratelimit-unified-<window>-utilization (a fraction) and -reset (epoch seconds) headers
- * of a model call with one output token. A full plan answers 429 with the same headers, so they are read whatever the
- * status; only without them does the status become the error.
- */
-async function probeUsage(token: string): Promise<{ snapshot: UsageSnapshot } | { error: string }> {
-	const model = await haikuModel(token);
-	if (typeof model !== "string") return model;
-	let res: Response;
-	try {
-		res = await fetch(PROBE_URL, {
-			method: "POST",
-			headers: probeHeaders(token),
-			body: JSON.stringify({
-				model,
-				max_tokens: 1,
-				system: "You are Claude Code, Anthropic's official CLI for Claude.",
-				messages: [{ role: "user", content: "." }],
-			}),
-			signal: AbortSignal.timeout(20_000),
-		});
-		await res.text();
-	} catch {
-		return { error: "endpoint unreachable" };
-	}
-	if (res.status === 404) probeModel = undefined; // retired since the lookup: look again next time
-	const limits: LimitRow[] = [];
-	for (const [name, value] of res.headers) {
-		const window = /^anthropic-ratelimit-unified-(.+)-utilization$/.exec(name)?.[1];
-		const fraction = Number(value);
-		if (!window || value === "" || !Number.isFinite(fraction)) continue;
-		const reset = Number(res.headers.get(`anthropic-ratelimit-unified-${window}-reset`));
-		limits.push({
-			label: window,
-			percent: Math.round(fraction * 10_000) / 100,
-			resetsAt: reset > 0 ? new Date(reset * 1000).toISOString() : null,
-		});
-	}
-	if (limits.length === 0) {
-		if (res.status === 429) return { error: "rate limited (HTTP 429)" };
-		return { error: res.ok ? "no rate-limit headers" : `HTTP ${res.status}` };
-	}
-	// 5h before 7d before the rest, as the endpoint orders its rows
-	const rank = (label: string) => (label === "5h" ? 0 : label === "7d" ? 1 : 2);
-	limits.sort((a, b) => rank(a.label) - rank(b.label));
-	return { snapshot: { fetchedAt: Date.now(), limits, credits: null, via: "token" } };
-}
-
-/**
- * renew has Claude Code renew a run-out login (claude-login.ts) and answers whether its token is valid afterwards.
- * Without a valid login token, CLAUDE_CODE_OAUTH_TOKEN is probed instead.
- */
+/** renew has Claude Code renew a run-out login (claude-login.ts) and answers whether its token is valid afterwards. */
 async function fetchUsage(renew: () => Promise<boolean>): Promise<{ snapshot: UsageSnapshot } | { error: string }> {
 	let token = await readAccessToken();
 	if (!token && (await renew())) token = await readAccessToken();
-	if (!token) {
-		const envToken = process.env[ENV_TOKEN];
-		return envToken ? probeUsage(envToken) : { error: "no valid OAuth token" };
-	}
+	if (!token) return { error: "no valid OAuth token" };
 	let res: Response;
 	try {
 		res = await fetch(USAGE_URL, {
@@ -495,17 +394,6 @@ export default function (pi: ExtensionAPI) {
 		pi.events.emit("claude-usage:changed", undefined);
 	};
 
-	/** How long an attempt holds: longer after a probe, as each one is a model call. */
-	const holdMs = (s: UsageState | null) => (s?.snapshot?.via === "token" ? PROBE_TTL_MS : USAGE_TTL_MS);
-
-	/** Whether the next attempt is due; a probe's longer wait ends early once a login token is valid again. */
-	async function due(): Promise<boolean> {
-		const age = Date.now() - (state?.attemptAt ?? 0);
-		if (age < USAGE_TTL_MS) return false;
-		if (age >= holdMs(state)) return true;
-		return (await readAccessToken()) !== null;
-	}
-
 	/** Takes over a newer state another session wrote; true when it did. */
 	function adopt(shared: UsageState | null): boolean {
 		if (!shared || (state && shared.updatedAt <= state.updatedAt)) return false;
@@ -526,14 +414,14 @@ export default function (pi: ExtensionAPI) {
 			if (!login) return;
 			if (adopt(await readState())) changed();
 			if (process.env.PI_OFFLINE) return;
-			if (!(await due())) return;
+			if (Date.now() - (state?.attemptAt ?? 0) < USAGE_TTL_MS) return;
 
 			lock = await acquireLock();
 			if (lock === "busy") return; // the other session's answer arrives through the cache
 			if (lock === "acquired") {
 				// Another session may have finished between the read above and the lock
 				if (adopt(await readState())) changed();
-				if (!(await due())) return;
+				if (Date.now() - (state?.attemptAt ?? 0) < USAGE_TTL_MS) return;
 			}
 
 			const save = async (next: Omit<UsageState, "updatedAt">) => {
@@ -575,7 +463,7 @@ export default function (pi: ExtensionAPI) {
 			if (process.env.PI_OFFLINE) {
 				lines.push(head + theme.fg("dim", "not fetched while PI_OFFLINE is set"));
 			} else if (state?.error) {
-				const next = hhmm(new Date(Math.max(Date.now(), state.attemptAt + holdMs(state))));
+				const next = hhmm(new Date(Math.max(Date.now(), state.attemptAt + USAGE_TTL_MS)));
 				lines.push(head + theme.fg("warning", `⚠ ${state.error}`) + theme.fg("dim", ` · next try ${next}`));
 			} else {
 				lines.push(head + theme.fg("dim", "loading…"));
@@ -583,10 +471,8 @@ export default function (pi: ExtensionAPI) {
 			return lines;
 		}
 
-		const staleMs = usage.via === "token" ? PROBE_TTL_MS + USAGE_STALE_MS : USAGE_STALE_MS;
 		const stale =
-			Date.now() - usage.fetchedAt > staleMs ? theme.fg("dim", ` · as of ${hhmm(new Date(usage.fetchedAt))}`) : "";
-		let via = usage.via === "token" ? theme.fg("dim", ` · via ${ENV_TOKEN}`) : "";
+			Date.now() - usage.fetchedAt > USAGE_STALE_MS ? theme.fg("dim", ` · as of ${hhmm(new Date(usage.fetchedAt))}`) : "";
 
 		for (const row of usage.limits) {
 			let line = meter(theme, row.label, row.percent);
@@ -595,8 +481,7 @@ export default function (pi: ExtensionAPI) {
 				line += sep + `⏰ Resets ${theme.fg("accent", r.at)}`;
 				if (r.left) line += ` (in ${theme.fg("warning", r.left)})`;
 			}
-			lines.push(line + stale + via);
-			via = "";
+			lines.push(line + stale);
 		}
 
 		const c = usage.credits;

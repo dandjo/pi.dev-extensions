@@ -349,19 +349,8 @@ Code's `~/.claude/.credentials.json` (on macOS from the login keychain item
 `Claude Code-credentials`, where Claude Code keeps it). It is never refreshed
 here and never written to the cache.
 
-When neither login holds a valid token, a `CLAUDE_CODE_OAUTH_TOKEN` (from
-`claude setup-token`) stands in. The usage endpoint turns such a token away
-(HTTP 403, it lacks the `user:profile` scope), so the limits come from the
-`anthropic-ratelimit-unified-*` headers of a real model call instead: the
-newest Haiku the token may use, with one output token, at most every ten
-minutes. Each call counts a few tokens against the plan. The headers carry
-only the `5h` and `7d` windows, as far as the API sends them: no
-model-scoped windows such as Fable and no credits. The first row then ends in
-`· via CLAUDE_CODE_OAUTH_TOKEN`. Once a login token is valid again, the
-endpoint takes over with the next fetch.
-
-Without any Claude login, neither Pi's OAuth login nor Claude Code's nor
-`CLAUDE_CODE_OAUTH_TOKEN`, there are no rows and no requests: someone on another provider sees nothing of
+Without any Claude login, neither Pi's OAuth login nor Claude Code's, there
+are no rows and no requests: someone on another provider sees nothing of
 this. While the session's model is not a Claude model — any model of the
 providers `claude-sdk` and `anthropic`, elsewhere one with `claude` in its id
 — or the session has none, the rows are hidden as well. The limits are still
@@ -392,8 +381,7 @@ time of the next attempt.
 | :-------------------------- | :----------------------------------------- |
 | `loading…`                  | The first answer is on its way             |
 | `⚠ rate limited (HTTP 429)` | The endpoint turned the request away       |
-| `⚠ no valid OAuth token`    | No unexpired token in either file, Claude Code could not renew its login, and `CLAUDE_CODE_OAUTH_TOKEN` is not set: run `claude`, then `/login`. Or `claude-login.ts` is not loaded, and the login ran out while Pi idled |
-| `⚠ model list: HTTP …`      | `CLAUDE_CODE_OAUTH_TOKEN` stands in, and the API refused it the list of models (401: the token is invalid or revoked) |
+| `⚠ no valid OAuth token`    | No unexpired token in either file, and Claude Code could not renew its login: run `claude`, then `/login`. Or `claude-login.ts` is not loaded, and the login ran out while Pi idled |
 | `⚠ HTTP 401`                | The endpoint rejected the token            |
 | `⚠ endpoint unreachable`    | Offline, or no answer within 10 seconds    |
 
