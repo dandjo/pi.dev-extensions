@@ -11,8 +11,8 @@ changes OpenProject and GitLab, reads and writes the clipboard, controls your
 Chrome, keeps requests alive through network trouble, and keeps the Claude
 Agent SDK current.
 
-The repository mirrors `~/.pi/agent/`: a file at `extensions/<name>.ts`
-belongs at `~/.pi/agent/extensions/<name>.ts`.
+Install it as a Pi package (step 3 of the setup below); `extensions/` holds
+one file per extension.
 
 | Extension                  | What it does                                                                              | Needs                                                            |
 | :------------------------- | :---------------------------------------------------------------------------------------- | :--------------------------------------------------------------- |
@@ -64,13 +64,6 @@ What you need first:
 
 - Claude Code, installed and logged in with your Claude subscription
   (`claude`, then `/login`)
-- A clone of this repository — the commands below run from its root:
-
-  ```bash
-  git clone https://github.com/dandjo/pi.dev-extensions.git
-  cd pi.dev-extensions
-  ```
-
 - Google Chrome 144 or newer, for the browser connection
 
 ### 1. Install Pi
@@ -124,33 +117,24 @@ the newest models; see [claude-sdk-update](#claude-sdk-update).
 
 ### 3. Install the extensions
 
-Link all twenty-five from the clone, so that `git pull` updates them:
+Install this repository as a Pi package:
 
 ```bash
-mkdir -p ~/.pi/agent/extensions
-for f in "$PWD"/extensions/*.ts; do ln -sf "$f" ~/.pi/agent/extensions/; done
+pi install git:github.com/dandjo/pi.dev-extensions
 ```
 
-Or copy them, if the clone may move:
+Pi clones it into `~/.pi/agent/git/` and loads all twenty-five extensions from
+there; `pi list` shows the package, and `pi update --extensions` brings new
+versions, new and renamed extensions included. There is no build step and no
+`npm install`: the extensions import only packages Pi provides itself. Each
+file stands on its own; `pi config` turns single ones off.
+
+Coming from links or copies in `~/.pi/agent/extensions/` (the setup before
+November 2026): remove them, or Pi loads every extension twice:
 
 ```bash
-mkdir -p ~/.pi/agent/extensions
-cp extensions/*.ts ~/.pi/agent/extensions/
-```
-
-Pi loads every `.ts` file in `~/.pi/agent/extensions/` at start. Each file
-stands on its own, so you may also take only the ones you want. There is no
-build step and no `npm install`: the extensions import only packages Pi
-provides itself. A `lib` folder or link in `~/.pi/agent/extensions/` from an
-earlier setup is no longer used and can go.
-
-When a pull adds or renames an extension, repeat the link or copy step. A link
-whose file is gone must go too, or Pi fails to load it, and a renamed copy
-must be deleted by hand, or Pi loads it twice (`remote-control.ts` is now
-`claude-remote-control.ts`):
-
-```bash
-for f in ~/.pi/agent/extensions/*.ts; do [ -e "$f" ] || rm "$f"; done
+for f in ~/.pi/agent/git/github.com/dandjo/pi.dev-extensions/extensions/*.ts; do rm -f ~/.pi/agent/extensions/"${f##*/}"; done
+rm -f ~/.pi/agent/extensions/{claude-memory,remote-control}.ts
 ```
 
 Then add web search, pinned to the tested version, and configure it as
@@ -229,14 +213,15 @@ Start Pi in a project, or run `/reload` in a running session:
 ## Manage extensions
 
 `pi config` enables or disables each extension individually. To try one for a
-single run without installing it:
+single run without installing it, with the path of its file in a clone of this
+repository:
 
 ```bash
 pi -e ./extensions/web-tools.ts
 ```
 
-To remove an extension, delete its file or link from `~/.pi/agent/extensions/`
-and `/reload`. For `claude-marketplaces.ts`, also delete `~/.pi/agent/claude-marketplaces/`.
+To turn an extension off, disable it in `pi config` and `/reload`.
+`pi remove git:github.com/dandjo/pi.dev-extensions` removes them all.
 `pi remove npm:pi-web-access@0.44.0` removes web search.
 `pi mcp remove chrome-devtools` removes the browser connection.
 
@@ -800,9 +785,9 @@ out wrong.
 - At start, a notice names the memory in use. Subagents get no memory, as in
   Claude Code.
 - `memory.ts` replaces `claude-memory.ts`, which only read Claude Code's
-  memory: delete a link or copy of `claude-memory.ts` in
-  `~/.pi/agent/extensions/` (Pi reports a broken link as a load error) and
-  link or copy `memory.ts` instead.
+  memory: delete a link or copy of `claude-memory.ts` left in
+  `~/.pi/agent/extensions/` (Pi reports a broken link as a load error);
+  `memory.ts` comes with the package of step 3.
 
 ## session-title
 
