@@ -1,24 +1,36 @@
 /**
- * Claude login: has Claude Code renew its claude.ai login once it has run out, for the extensions that need a valid
- * token while no prompt runs. claude-usage.ts asks for it to fetch the plan limits, claude-remote-control.ts to renew
- * its connection. On its own this file does nothing: no request and no process until an extension asks.
+ * Claude login: renews a claude.ai login once it has run out, for the extensions that need a valid token while no
+ * prompt runs. claude-usage.ts asks for it to fetch the plan limits, claude-remote-control.ts to renew its connection.
+ * On its own this file does nothing: no request and no process until an extension asks.
  *
- * Claude Code renews its OAuth token only when it makes a request, and the claude-sdk provider ends its processes when
- * they idle, so after about eight hours without a prompt the token has run out. Pi never refreshes the token itself:
- * that would rotate Claude Code's refresh token behind its back. A short Claude Code process (Agent SDK, no prompt, no
- * settings, nothing persisted) is asked for its usage instead (get_usage): a request without a model call, which
- * Claude Code sends only after renewing the token under its own lock.
+ * Two logins can carry such a token, and each is renewed by its owner:
  *
- * One renewal runs at a time in a Pi process, whichever extension asks, and the next one waits RETRY_MS after it
- * started. After one that leaves no valid token the wait doubles, up to MAX_RETRY_MS, so a login that needs /login
- * does not start a Claude Code process every few minutes while Pi stays open.
+ * - Pi's own Anthropic login (/login, ~/.pi/agent/auth.json). Pi renews it only when a request goes through its
+ *   anthropic provider, which never happens while the sessions run on the claude-sdk provider: the login then runs out
+ *   after about eight hours although its refresh token still holds. Here Pi is asked for the provider's authentication
+ *   (ctx.modelRegistry.getProviderAuth), which renews a token about to run out under the lock of Pi's credential
+ *   store, so several Pi sessions renew once and none loses the rotated refresh token.
+ * - Claude Code's login (~/.claude/.credentials.json). Claude Code renews its OAuth token only when it makes a
+ *   request, and the claude-sdk provider ends its processes when they idle, so after about eight hours without a
+ *   prompt the token has run out. Pi never refreshes that token itself: that would rotate Claude Code's refresh token
+ *   behind its back. A short Claude Code process (Agent SDK, no prompt, no settings, nothing persisted) is asked for
+ *   its usage instead (get_usage): a request without a model call, which Claude Code sends only after renewing the
+ *   token under its own lock.
+ *
+ * Pi's login comes first, as its renewal is one request and no process; Claude Code is asked when Pi has no login of
+ * its own or its renewal left none valid. Neither helps a login whose refresh token is gone or refused: that needs
+ * /login again.
+ *
+ * One renewal of each kind runs at a time in a Pi process, whichever extension asks, and the next one waits RETRY_MS
+ * after it started. After one that leaves no valid token the wait doubles, up to MAX_RETRY_MS, so a login that needs
+ * /login does not start a Claude Code process, or ask the token endpoint, every few minutes while Pi stays open.
  *
  * Other extensions reach it through the event bus, whatever the load order: "claude-login:source" carries a
  * ClaudeLoginSource, at load and on every "claude-login:source-request". An extension that finds none goes without
  * the renewal.
  */
 
-import { type ExtensionAPI, getAgentDir } from "@earendil-works/pi-coding-agent";
+import { type ExtensionAPI, type ExtensionContext, getAgentDir } from "@earendil-works/pi-coding-agent";
 import { execFile, execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
@@ -37,9 +49,10 @@ const MARGIN_MS = 60_000;
 /** What "claude-login:source" carries. */
 export interface ClaudeLoginSource {
 	/**
-	 * Has Claude Code renew its run-out claude.ai login; true when its token is valid afterwards. Joins a renewal that is
-	 * running, and answers false at once while the wait after the last one lasts. Never rejects. To be called once the
-	 * caller found no valid token, not before.
+	 * Renews a run-out claude.ai login: Pi's own through Pi's credential store, else Claude Code's through Claude Code.
+	 * True when one of the two tokens is valid afterwards. Joins a renewal that is running, and answers false at once
+	 * while the wait after the last one lasts. Never rejects. To be called once the caller found no valid token, not
+	 * before.
 	 */
 	renew(): Promise<boolean>;
 }
@@ -145,6 +158,58 @@ const gate = ((globalThis as Record<symbol, unknown>)[Symbol.for("pi.claude-logi
 	retryMs: RETRY_MS,
 }) as Gate;
 
+/** The same for the renewal of Pi's own login. */
+const piGate = ((globalThis as Record<symbol, unknown>)[Symbol.for("pi.claude-login.pi-renewal.v1")] ??= {
+	running: null,
+	nextAt: 0,
+	retryMs: RETRY_MS,
+}) as Gate;
+
+/** Pi's own Anthropic login as auth.json holds it: whether it is an OAuth login that can be renewed, and whether it is valid. */
+async function piLogin(): Promise<{ renewable: boolean; valid: boolean }> {
+	try {
+		const a = JSON.parse(await readFile(path.join(getAgentDir(), "auth.json"), "utf8"))?.anthropic;
+		if (a?.type !== "oauth") return { renewable: false, valid: false };
+		return {
+			renewable: typeof a.refresh === "string" && a.refresh !== "",
+			valid: typeof a.access === "string" && a.access !== "" && typeof a.expires === "number" && a.expires > Date.now() + MARGIN_MS,
+		};
+	} catch {
+		return { renewable: false, valid: false };
+	}
+}
+
+/**
+ * Has Pi renew its own run-out Anthropic login; true when its token is valid afterwards, false as well when Pi has no
+ * such login. Pi resolves the provider's authentication and, for an OAuth token about to run out, refreshes it under
+ * the lock of its credential store. Joins a renewal that is running, and answers false at once while the wait after
+ * the last failed one lasts.
+ */
+async function renewPiLogin(ctx: ExtensionContext | null): Promise<boolean> {
+	const login = await piLogin();
+	if (login.valid) return true;
+	if (!ctx || !login.renewable) return false;
+	if (piGate.running) return piGate.running;
+	if (Date.now() < piGate.nextAt) return false;
+	piGate.nextAt = Date.now() + piGate.retryMs;
+	const running = ctx.modelRegistry
+		.getProviderAuth("anthropic")
+		.catch(() => {
+			// whether the token is valid now decides
+		})
+		.then(() => piLogin())
+		.then(({ valid }) => {
+			piGate.retryMs = valid ? RETRY_MS : Math.min(piGate.retryMs * 2, MAX_RETRY_MS);
+			if (valid) piGate.nextAt = 0; // a renewed login runs out again hours later, and is then renewed at once
+			return valid;
+		})
+		.finally(() => {
+			if (piGate.running === running) piGate.running = null;
+		});
+	piGate.running = running;
+	return running;
+}
+
 /** Whether Claude Code's access token is valid for at least another minute. */
 async function claudeCodeLoginValid(): Promise<boolean> {
 	try {
@@ -215,7 +280,18 @@ function renewClaudeLogin(): Promise<boolean> {
 }
 
 export default function (pi: ExtensionAPI) {
-	const source: ClaudeLoginSource = { renew: () => renewClaudeLogin() };
+	/** The session's context, for Pi's model registry; without a session only Claude Code's login is renewed. */
+	let ctx: ExtensionContext | null = null;
+	pi.on("session_start", (_event, context) => {
+		ctx = context;
+	});
+	pi.on("session_shutdown", () => {
+		ctx = null;
+	});
+
+	const source: ClaudeLoginSource = {
+		renew: async () => (await renewPiLogin(ctx).catch(() => false)) || renewClaudeLogin(),
+	};
 	pi.events.on("claude-login:source-request", () => pi.events.emit("claude-login:source", source));
 	pi.events.emit("claude-login:source", source);
 }

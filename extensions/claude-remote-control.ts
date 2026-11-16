@@ -51,8 +51,8 @@
  *   model ends the connection. Pi's own Anthropic login (~/.pi/agent/auth.json) is the fallback. Claude Code renews the
  *   token only when it makes a request, so after hours without a prompt it has run out and the four-hourly renewal of
  *   the worker credential fails; then claude-login.ts is asked ("claude-login:source" on the event bus) to have
- *   Claude Code renew it, under Claude Code's own lock. Without that extension a login that ran out stays run out
- *   until a prompt renews it. A renewal that keeps failing for five minutes goes into the session log with its
+ *   the owner renew a login: Pi its own under the lock of its credential store, else Claude Code its own under
+ *   Claude Code's lock. Without that extension a login that ran out stays run out until a prompt renews it. A renewal that keeps failing for five minutes goes into the session log with its
  *   reason, and so does the reconnect after it.
  * - What the app sees: the conversation so far, then every user prompt, assistant message (text, thinking, tool calls
  *   under Claude Code's tool names) and tool result, and a result after each run. Permission prompts do not exist in
@@ -1050,9 +1050,10 @@ interface SubagentView {
 /** What "claude-login:source" carries. */
 interface ClaudeLoginSource {
 	/**
-	 * Has Claude Code renew its run-out claude.ai login; true when its token is valid afterwards. Joins a renewal that is
-	 * running, and answers false at once while the wait after the last one lasts. Never rejects. To be called once the
-	 * caller found no valid token, not before.
+	 * Renews a run-out claude.ai login: Pi's own through Pi's credential store, else Claude Code's through Claude Code.
+	 * True when one of the two tokens is valid afterwards. Joins a renewal that is running, and answers false at once
+	 * while the wait after the last one lasts. Never rejects. To be called once the caller found no valid token, not
+	 * before.
 	 */
 	renew(): Promise<boolean>;
 }
@@ -2489,11 +2490,11 @@ export default function (pi: ExtensionAPI) {
 
 	const loginHint = () => (loginSource ? LOGIN_HINT : LOGIN_HINT + NO_RENEWAL_HINT);
 
-	/** The access token, after having Claude Code renew its login if it has run out; a renewal goes into the session log. */
+	/** The access token, after having a run-out login renewed by its owner (claude-login.ts); a renewal goes into the session log. */
 	async function accessToken(): Promise<Token | null> {
 		const token = await readAccessToken();
 		if (token || !(await loginSource?.renew())) return token;
-		note("Remote Control had Claude Code renew the claude.ai login, which had run out.");
+		note("Remote Control had the claude.ai login renewed, which had run out.");
 		return readAccessToken();
 	}
 

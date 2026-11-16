@@ -19,8 +19,9 @@
  * session takes the lock asks, at most every USAGE_TTL_MS, and the others read the file. The OAuth access token is
  * read from pi's auth.json (falling back to Claude Code's credentials), never written to the cache, and never
  * refreshed here: rotating it would invalidate the refresh token behind the owning app's back. When neither is valid,
- * claude-login.ts is asked to have Claude Code renew its own ("claude-login:source" on the event bus), as it runs out
- * after hours without a prompt; without that extension the rows wait for the next prompt to renew it.
+ * claude-login.ts is asked to have the owner renew it ("claude-login:source" on the event bus: Pi its own login,
+ * else Claude Code its own), as both run out after hours without a request of their owner; without that extension
+ * the rows wait until one is renewed.
  *
  * The rows reach statusline.ts through the event bus ("statusline:section"); without it this file does nothing.
  * Other extensions read the answer through the event bus as well: "claude-usage:source" carries a ClaudeUsageSource,
@@ -264,7 +265,7 @@ function parseUsage(json: any): UsageSnapshot {
 	return { fetchedAt: Date.now(), limits, credits, answer };
 }
 
-/** renew has Claude Code renew a run-out login (claude-login.ts) and answers whether its token is valid afterwards. */
+/** renew has a run-out login renewed by its owner (claude-login.ts) and answers whether a token is valid afterwards. */
 async function fetchUsage(renew: () => Promise<boolean>): Promise<{ snapshot: UsageSnapshot } | { error: string }> {
 	let token = await readAccessToken();
 	if (!token && (await renew())) token = await readAccessToken();
@@ -339,9 +340,10 @@ async function acquireLock(): Promise<LockResult> {
 /** What "claude-login:source" carries. */
 interface ClaudeLoginSource {
 	/**
-	 * Has Claude Code renew its run-out claude.ai login; true when its token is valid afterwards. Joins a renewal that is
-	 * running, and answers false at once while the wait after the last one lasts. Never rejects. To be called once the
-	 * caller found no valid token, not before.
+	 * Renews a run-out claude.ai login: Pi's own through Pi's credential store, else Claude Code's through Claude Code.
+	 * True when one of the two tokens is valid afterwards. Joins a renewal that is running, and answers false at once
+	 * while the wait after the last one lasts. Never rejects. To be called once the caller found no valid token, not
+	 * before.
 	 */
 	renew(): Promise<boolean>;
 }
