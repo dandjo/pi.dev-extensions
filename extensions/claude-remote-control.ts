@@ -46,15 +46,15 @@
  *   loadBridge() imports a repaired copy
  *   (~/.cache/pi-remote-control); a repair the bundle has no shape for is left out, and /rc warns about it.
  * - Login: a claude.ai OAuth token with the user:sessions:claude_code scope, from claude-login.ts ("claude-login:source"
- *   on the event bus): Pi's own Anthropic login (~/.pi/agent/auth.json) first, then Claude Code's
- *   (~/.claude/.credentials.json), and while CLAUDE_CODE_OAUTH_TOKEN is set only a login of that token's account, the
- *   one the claude-sdk provider's prompts run on (the setup token itself cannot open Remote Control sessions). It is
- *   read fresh for every request and never refreshed here. Remote Control is offered only while a Claude model is
- *   active: switching to another model ends the connection. Both logins are renewed only by a request of their owner,
- *   so after hours without a prompt the token has run out and the four-hourly renewal of the worker credential fails;
- *   claude-login.ts then has the owner renew a login: Pi its own under the lock of its credential store, else Claude
- *   Code its own under Claude Code's lock. Without that extension the token is read here in the same order, without
- *   renewal and account check, and a login that ran out stays run out until a prompt renews it. A renewal that keeps
+ *   on the event bus): Claude Code's login (~/.claude/.credentials.json, on macOS the keychain), the one the
+ *   claude-sdk provider runs on (Pi's own /login is not used), and while CLAUDE_CODE_OAUTH_TOKEN is set only a login of
+ *   that token's account, the one the claude-sdk provider's prompts run on (the setup token itself cannot open Remote
+ *   Control sessions). It is read fresh for every request and never refreshed here. Remote Control is offered only
+ *   while a Claude model is active: switching to another model ends the connection. The login is renewed only by a
+ *   request of Claude Code, so after hours without a prompt the token has run out and the four-hourly renewal of the
+ *   worker credential fails; claude-login.ts then has Claude Code renew it under its own lock. A login that reached its
+ *   time limit cannot be renewed and needs /login in Claude Code. Without that extension the token is read here,
+ *   without renewal and account check, and a login that ran out stays run out until a prompt renews it. A renewal that keeps
  *   failing for five minutes goes into the session log with its reason, and so does the reconnect after it.
  * - What the app sees: the conversation so far, then every user prompt, assistant message (text, thinking, tool calls
  *   under Claude Code's tool names) and tool result, and a result after each run. Permission prompts do not exist in
@@ -326,18 +326,11 @@ function claudeSdkDir(): string | undefined {
 }
 
 /**
- * The claude.ai access token while claude-login.ts is not loaded: Pi's own Anthropic login first, then Claude Code's,
- * as claude-login.ts hands them out, but without its account check. Never printed, never written anywhere.
+ * The claude.ai access token of Claude Code's login while claude-login.ts is not loaded, as claude-login.ts hands it
+ * out, but without its account check. Never printed, never written anywhere.
  */
 async function readAccessToken(): Promise<Token | null> {
 	const now = Date.now() + 60_000;
-	try {
-		const auth = JSON.parse(await readFile(path.join(getAgentDir(), "auth.json"), "utf8"));
-		const a = auth?.anthropic;
-		if (typeof a?.access === "string" && a.access && (!a.expires || a.expires > now)) return { value: a.access, source: "pi" };
-	} catch {
-		// no Pi login
-	}
 	try {
 		const o = (await claudeCodeCredentials())?.claudeAiOauth;
 		if (typeof o?.accessToken === "string" && o.accessToken && (!o.expiresAt || o.expiresAt > now)) {
@@ -349,9 +342,11 @@ async function readAccessToken(): Promise<Token | null> {
 	return null;
 }
 
-const LOGIN_HINT = "Remote Control needs a claude.ai login: run /login in Pi (Anthropic) or in Claude Code, and try /remote-control again.";
+const LOGIN_HINT = "Remote Control needs Claude Code's claude.ai login: run claude, then /login there, and try /remote-control again.";
+const ENDED_HINT =
+	"Claude Code's claude.ai login reached its time limit and cannot be renewed: run claude, then /login there, and try /remote-control again.";
 const OTHER_ACCOUNT_HINT =
-	"Remote Control needs a claude.ai login of the account CLAUDE_CODE_OAUTH_TOKEN belongs to: run /login in Pi (Anthropic) or in Claude Code with that account, and try /remote-control again.";
+	"Remote Control needs a claude.ai login of the account CLAUDE_CODE_OAUTH_TOKEN belongs to: run claude, then /login there with that account, and try /remote-control again.";
 /** Added to LOGIN_HINT while claude-login.ts is not loaded: the login may only have run out. */
 const NO_RENEWAL_HINT = " A login that ran out while Pi idled is renewed by claude-login.ts, which is not loaded.";
 
@@ -1054,32 +1049,34 @@ interface SubagentView {
 /** What "claude-login:source" carries. */
 interface ClaudeLoginSource {
 	/**
-	 * Renews a run-out claude.ai login: Pi's own through Pi's credential store, else Claude Code's through Claude Code.
-	 * True when one of the two tokens is valid afterwards. Joins a renewal that is running, and answers false at once
-	 * while the wait after the last one lasts. Never rejects. To be called once the caller found no valid token, not
-	 * before. token() does this itself.
+	 * Has Claude Code renew its run-out claude.ai login. True when its token is valid afterwards. Joins a renewal that is
+	 * running, and answers false at once while the wait after the last one lasts or the login has ended. Never rejects.
+	 * To be called once the caller found no valid token, not before. token() does this itself.
 	 */
 	renew(): Promise<boolean>;
 	/**
-	 * The claude.ai access token to use: Pi's own login first, then Claude Code's, valid for at least another minute.
-	 * With renew (the default) a run-out login is renewed by its owner first, as renew() does. While
-	 * CLAUDE_CODE_OAUTH_TOKEN is set, a login of another organization is passed over. Without a token, reason says
-	 * whether there was none or only ones of another account. Never rejects. Missing in older versions.
+	 * The claude.ai access token of Claude Code's login, valid for at least another minute. With renew (the default) a
+	 * run-out login is renewed by Claude Code first, as renew() does. While CLAUDE_CODE_OAUTH_TOKEN is set, a login of
+	 * another organization is passed over. Without a token, reason says whether there was none, the login ended (it
+	 * needs /login in Claude Code), or it is one of another account. Never rejects. Missing in older versions.
 	 */
 	token?(options?: { renew?: boolean }): Promise<ClaudeLoginToken | ClaudeLoginRefusal>;
 }
 
-/** What token() answers with a token: whose login it is, and whether it was renewed for this call. */
+/** What token() answers with a token: whose login it is ("pi" only from older versions), and whether it was renewed for this call. */
 interface ClaudeLoginToken {
 	value: string;
 	source: "pi" | "claude-code";
 	renewed: boolean;
 }
 
-/** What token() answers without one: no valid login, or only logins of another account than CLAUDE_CODE_OAUTH_TOKEN. */
+/**
+ * What token() answers without one: no valid login, a login that reached its time limit and needs /login in Claude
+ * Code, or a login of another account than CLAUDE_CODE_OAUTH_TOKEN.
+ */
 interface ClaudeLoginRefusal {
 	value?: undefined;
-	reason: "none" | "other-account";
+	reason: "none" | "ended" | "other-account";
 }
 
 /**
@@ -2514,15 +2511,21 @@ export default function (pi: ExtensionAPI) {
 
 	/** Why there is no token, for the user. */
 	const loginHint = (refusal: ClaudeLoginRefusal) =>
-		refusal.reason === "other-account" ? OTHER_ACCOUNT_HINT : loginSource ? LOGIN_HINT : LOGIN_HINT + NO_RENEWAL_HINT;
+		refusal.reason === "other-account"
+			? OTHER_ACCOUNT_HINT
+			: refusal.reason === "ended"
+				? ENDED_HINT
+				: loginSource
+					? LOGIN_HINT
+					: LOGIN_HINT + NO_RENEWAL_HINT;
 
 	/** What to do about a login the server rejected. */
-	const rejectedHint = (token: Token) =>
-		`Claude.ai login was rejected — run /login in ${token.source === "pi" ? "Pi (Anthropic)" : "Claude Code"}, then /remote-control.`;
+	const rejectedHint = () =>
+		`Claude.ai login was rejected — run claude, then /login there, and /remote-control again.`;
 
 	/**
-	 * The access token from claude-login.ts: Pi's login first, then Claude Code's, with renew a run-out one renewed by its
-	 * owner first, and while CLAUDE_CODE_OAUTH_TOKEN is set only one of that token's account. An older claude-login.ts
+	 * The access token from claude-login.ts: Claude Code's login, with renew a run-out one renewed by Claude Code first,
+	 * and while CLAUDE_CODE_OAUTH_TOKEN is set only one of that token's account. An older claude-login.ts
 	 * only renews, and without the extension the token is read here. A renewal goes into the session log.
 	 */
 	async function accessToken(renew = true): Promise<Token | ClaudeLoginRefusal> {
@@ -2544,7 +2547,7 @@ export default function (pi: ExtensionAPI) {
 		if ("reason" in token) return { error: loginHint(token), terminal: false };
 		const result = await module.fetchRemoteCredentials(sessionId, API_BASE_URL, token.value, HTTP_TIMEOUT_MS);
 		if (result && typeof result === "object" && typeof (result as Json).worker_jwt === "string") return result as RemoteCredentials;
-		if (module.isCredentialsRejection(result)) return { error: rejectedHint(token), terminal: true };
+		if (module.isCredentialsRejection(result)) return { error: rejectedHint(), terminal: true };
 		if (module.isCredentialsFailure(result)) {
 			const r = result as Json;
 			const reason = r.reason === "untrusted_device"
@@ -2832,7 +2835,7 @@ export default function (pi: ExtensionAPI) {
 
 			const created = await module.createCodeSession(API_BASE_URL, token.value, title, HTTP_TIMEOUT_MS, undefined, undefined, cwd, modelId);
 			if (typeof created !== "string") {
-				if (module.isCredentialsRejection(created)) throw new Error(rejectedHint(token));
+				if (module.isCredentialsRejection(created)) throw new Error(rejectedHint());
 				if (module.isCreateSessionFailure(created)) {
 					const r = created as Json;
 					const detail = typeof r.detail === "string" && r.detail ? `: ${r.detail}` : "";

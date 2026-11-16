@@ -4,8 +4,7 @@
  *
  * Rows: the 5h session, the 7d week, and model-scoped weekly windows such as Fable, each with its local reset time,
  * and the usage credits while they are enabled or anything was spent. Without a usable answer, a single "Limits" row
- * says why (loading, rate limited, no token, …). Without any Claude login (Pi's own or Claude Code's) there are no
- * rows and no requests at all, so a user of another provider sees nothing of this. While the session's model is not a
+ * says why (loading, rate limited, no token, …). Without a Claude Code login there are no rows and no requests at all, so a user of another provider sees nothing of this. While the session's model is not a
  * Claude model (or it has none), the rows are hidden as well; the limits are still fetched, so they stand there as soon
  * as a Claude model is chosen again. With PI_OFFLINE set, the rows show what another session fetched last, and this
  * one fetches nothing.
@@ -17,12 +16,13 @@
  * fetched in the background so a render never waits on the network, and only while the status line shows the rows.
  * The endpoint is rate-limited per account, so all pi sessions share one answer through CACHE_FILE: whichever
  * session takes the lock asks, at most every USAGE_TTL_MS, and the others read the file. The OAuth access token comes
- * from claude-login.ts ("claude-login:source" on the event bus): Pi's auth.json first, then Claude Code's credentials,
- * a run-out login renewed by its owner (both run out after hours without a request of their owner), and while
- * CLAUDE_CODE_OAUTH_TOKEN is set only a login of that token's account, the one the claude-sdk provider's prompts run
- * on. Without that extension the token is read here in the same order, without renewal and account check, and the
- * rows wait until a login is renewed. It is never written to the cache and never refreshed here: rotating it would
- * invalidate the refresh token behind the owning app's back.
+ * from claude-login.ts ("claude-login:source" on the event bus): Claude Code's login, the one the claude-sdk provider
+ * runs on (Pi's own /login is not used), renewed by Claude Code once it ran out after hours without a request, and
+ * while CLAUDE_CODE_OAUTH_TOKEN is set only a login of that token's account, the one the claude-sdk provider's prompts
+ * run on. A login that reached its time limit gets a Limits row that asks for /login in Claude Code. Without that
+ * extension the token is read here, without renewal and account check, and the rows wait until a prompt renews it.
+ * It is never written to the cache and never refreshed here: rotating it would invalidate the refresh token behind
+ * Claude Code's back.
  *
  * The rows reach statusline.ts through the event bus ("statusline:section"); without it this file does nothing.
  * Other extensions read the answer through the event bus as well: "claude-usage:source" carries a ClaudeUsageSource,
@@ -30,7 +30,7 @@
  * claude-remote-control.ts hands the limits to the Claude app that way.
  */
 
-import { type ExtensionAPI, getAgentDir, type Theme } from "@earendil-works/pi-coding-agent";
+import { type ExtensionAPI, type Theme } from "@earendil-works/pi-coding-agent";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdir, open, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
@@ -190,15 +190,9 @@ async function claudeCodeCredentials(): Promise<any> {
 	}
 }
 
-/** Valid (non-expired) OAuth access token: pi's own login first, then Claude Code's. */
+/** Claude Code's OAuth access token while it is valid (not expired). */
 async function readAccessToken(): Promise<string | null> {
 	const now = Date.now();
-	try {
-		const pi = JSON.parse(await readFile(path.join(getAgentDir(), "auth.json"), "utf8"));
-		const a = pi?.anthropic;
-		if (a?.type === "oauth" && a.access && (!a.expires || a.expires > now)) return a.access;
-		if (a?.access && (!a.expires || a.expires > now)) return a.access;
-	} catch {}
 	try {
 		const o = (await claudeCodeCredentials())?.claudeAiOauth;
 		if (o?.accessToken && (!o.expiresAt || o.expiresAt > now)) return o.accessToken;
@@ -219,15 +213,10 @@ function isClaudeModel(model: { provider: string; id: string } | undefined): boo
 let loginCheck: { at: number; present: boolean } | undefined;
 const LOGIN_CHECK_MS = 60_000;
 
-/** Whether there is a Claude login at all, valid or not: Pi's own OAuth login or Claude Code's. */
+/** Whether there is a Claude Code login at all, valid or not. */
 async function hasClaudeLogin(): Promise<boolean> {
 	if (loginCheck && Date.now() - loginCheck.at < LOGIN_CHECK_MS) return loginCheck.present;
-	let present = false;
-	try {
-		const pi = JSON.parse(await readFile(path.join(getAgentDir(), "auth.json"), "utf8"));
-		present = pi?.anthropic?.type === "oauth";
-	} catch {}
-	if (!present) present = Boolean((await claudeCodeCredentials())?.claudeAiOauth);
+	const present = Boolean((await claudeCodeCredentials())?.claudeAiOauth);
 	loginCheck = { at: Date.now(), present };
 	return present;
 }
@@ -274,6 +263,7 @@ async function usageToken(login: ClaudeLoginSource | null): Promise<{ value: str
 	if (typeof login?.token === "function") {
 		const token = await login.token();
 		if (!("reason" in token)) return { value: token.value };
+		if (token.reason === "ended") return { error: "login ended: run claude, then /login" };
 		return { error: token.reason === "other-account" ? "login: other account than CLAUDE_CODE_OAUTH_TOKEN" : "no valid OAuth token" };
 	}
 	let token = await readAccessToken();
@@ -355,32 +345,34 @@ async function acquireLock(): Promise<LockResult> {
 /** What "claude-login:source" carries. */
 interface ClaudeLoginSource {
 	/**
-	 * Renews a run-out claude.ai login: Pi's own through Pi's credential store, else Claude Code's through Claude Code.
-	 * True when one of the two tokens is valid afterwards. Joins a renewal that is running, and answers false at once
-	 * while the wait after the last one lasts. Never rejects. To be called once the caller found no valid token, not
-	 * before. token() does this itself.
+	 * Has Claude Code renew its run-out claude.ai login. True when its token is valid afterwards. Joins a renewal that is
+	 * running, and answers false at once while the wait after the last one lasts or the login has ended. Never rejects.
+	 * To be called once the caller found no valid token, not before. token() does this itself.
 	 */
 	renew(): Promise<boolean>;
 	/**
-	 * The claude.ai access token to use: Pi's own login first, then Claude Code's, valid for at least another minute.
-	 * With renew (the default) a run-out login is renewed by its owner first, as renew() does. While
-	 * CLAUDE_CODE_OAUTH_TOKEN is set, a login of another organization is passed over. Without a token, reason says
-	 * whether there was none or only ones of another account. Never rejects. Missing in older versions.
+	 * The claude.ai access token of Claude Code's login, valid for at least another minute. With renew (the default) a
+	 * run-out login is renewed by Claude Code first, as renew() does. While CLAUDE_CODE_OAUTH_TOKEN is set, a login of
+	 * another organization is passed over. Without a token, reason says whether there was none, the login ended (it
+	 * needs /login in Claude Code), or it is one of another account. Never rejects. Missing in older versions.
 	 */
 	token?(options?: { renew?: boolean }): Promise<ClaudeLoginToken | ClaudeLoginRefusal>;
 }
 
-/** What token() answers with a token: whose login it is, and whether it was renewed for this call. */
+/** What token() answers with a token: whose login it is ("pi" only from older versions), and whether it was renewed for this call. */
 interface ClaudeLoginToken {
 	value: string;
 	source: "pi" | "claude-code";
 	renewed: boolean;
 }
 
-/** What token() answers without one: no valid login, or only logins of another account than CLAUDE_CODE_OAUTH_TOKEN. */
+/**
+ * What token() answers without one: no valid login, a login that reached its time limit and needs /login in Claude
+ * Code, or a login of another account than CLAUDE_CODE_OAUTH_TOKEN.
+ */
 interface ClaudeLoginRefusal {
 	value?: undefined;
-	reason: "none" | "other-account";
+	reason: "none" | "ended" | "other-account";
 }
 
 /**
