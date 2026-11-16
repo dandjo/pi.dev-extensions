@@ -53,6 +53,50 @@ reads the login itself, without renewal and account check, when that file is
 missing. `web_search` comes from the npm package `pi-web-access`; see
 [Web search](#web-search).
 
+## Why Pi instead of Claude Code
+
+With this setup, Pi is not a different Claude. The prompts run through Claude
+Code itself, on the same subscription, models, limits, and login, and the
+skills, hooks, agents, and memory of Claude Code work in Pi as well. Switching
+back and forth costs nothing: both use the same plugins and the same memory.
+What differs is the tool around the model.
+
+- **You can change everything.** An extension is one TypeScript file that Pi
+  loads at start. It can add tools and commands, draw its own status line,
+  panels, and dialogs, see and change what goes to the model, and react to
+  every step of a session. Claude Code offers hooks, skills, MCP servers, and
+  a status line script; its interface and agent loop stay closed. All
+  twenty-five extensions here are such files: the GitLab and OpenProject
+  tools, the plan limits in the status line, the diff panel, scheduled
+  prompts, messages between sessions. Each can be read in one go, and a fix
+  is a commit here, not a wait for the next Claude Code release.
+- **Other models when they fit better.** Pi talks to Anthropic's API, OpenAI,
+  Google, and others, and to local models on your own machine, with the same
+  tools, extensions, and skills. The model can change within a session, for a
+  second opinion or for cheaper routine work, and a local model is an option
+  where data must not leave the machine.
+- **Sessions as a tree.** Pi keeps every session as a tree. `/tree` goes back
+  to any earlier point and continues from there without losing the other
+  branch, and can carry a summary of the branch you leave. `/fork` and
+  `/clone` copy a state into a new session.
+- **One way to automate.** The same Pi, with the same extensions, runs as a
+  one-off command (`pi -p`), as a JSON event stream, under the control of
+  another process over RPC, or inside a program through Pi's TypeScript SDK.
+
+Where Claude Code stays the better choice:
+
+- **No permission prompts.** Pi runs tools and commands with your rights and
+  without asking first; it has no sandbox. Claude Code asks before edits and
+  commands unless you allow them, which matters in an unfamiliar repository or
+  on a production machine.
+- **Support and new features.** Claude Code is Anthropic's product. New
+  features arrive there first and reach Pi only once someone builds them;
+  managed settings of a Team or Enterprise plan apply to Claude Code only.
+- **More moving parts.** Claude in Pi depends on the third-party package
+  `pi-claude-subscription` and on the extensions here. A change on
+  Anthropic's side can break a part of it until it is fixed here, as happened
+  with the login and with Remote Control's repairs of the Claude Agent SDK.
+
 ## Set up Pi
 
 Follow the steps in order — together they are the complete setup: Pi itself,
