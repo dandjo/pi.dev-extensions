@@ -16,7 +16,7 @@ one file per extension.
 
 | Extension                  | What it does                                                                              | Needs                                                            |
 | :------------------------- | :---------------------------------------------------------------------------------------- | :--------------------------------------------------------------- |
-| `claude-marketplaces.ts`   | Loads the plugins of Claude Code marketplaces into Pi and keeps them current              | Git access to each marketplace                                   |
+| `claude-marketplaces.ts`   | Loads the plugins of Claude Code marketplace packages into Pi and keeps them current      | Each marketplace installed with `pi install`                     |
 | `statusline.ts`            | Replaces Pi's footer with a Claude Code style status line, for any provider               | —                                                                |
 | `claude-usage.ts`          | Adds the Claude subscription limits and usage credits to the status line                  | `statusline.ts`, a Claude subscription login (Pi or Claude Code) |
 | `claude-login.ts`          | Picks the claude.ai login (Pi's, then Claude Code's) and renews it when it ran out        | A Claude subscription login (Pi or Claude Code)                  |
@@ -274,58 +274,71 @@ To turn an extension off, disable it in `pi config` and `/reload`.
 Brings the plugins of Claude Code marketplaces — their skills, hooks, and
 agents — into Pi and keeps them current.
 
-- The marketplaces come from `~/.pi/agent/claude-marketplaces.json`: under
-  `marketplaces`, a map from each marketplace's git URL to its settings, like
-  `mcpServers` in Pi's `mcp.json` (there are no settings yet, so `{}`).
-  Without the file the extension does nothing.
+- A marketplace is a Pi package whose folder holds
+  `.claude-plugin/marketplace.json`, installed for you (not with `--local`)
+  from git or from a local folder. Without one the extension does nothing; it
+  clones nothing itself.
 
-  ```json
-  {
-    "marketplaces": {
-      "git@github.com:acme/claude-marketplace.git": {},
-      "https://example.com/team/plugins.git": {}
-    }
-  }
+  ```bash
+  pi install git:git@github.com:acme/claude-marketplace
+  pi install https://example.com/team/plugins.git
   ```
 
-- Each marketplace gets its own clone in
-  `~/.pi/agent/claude-marketplaces/<name>/repo`, `<name>` taken from the URL,
-  pulled in the background at every Pi start (not with `PI_OFFLINE` set). Git
-  never asks for a password there: SSH runs in batch mode.
-- When a pull changed a plugin (its files, or the plugin list in
-  `.claude-plugin/marketplace.json`), Pi reloads by itself, so the new skills,
-  hooks, and agents apply without a restart. Commits that change only other
-  files update the clone without a reload. On the very first start the clone
-  is created the same way, followed by the reload.
+  When the repository's root holds a `skills/` folder as well (a marketplace
+  that is a single plugin), Pi loads those skills a second time, without the
+  plugin prefix; `pi config` turns them off.
+- At every Pi start (not with `PI_OFFLINE` set), each marketplace from git is
+  brought up to date in the background with `pi update <package>`, as by hand,
+  but in a separate process, so its output stays out of the terminal, and git
+  never asks for a password: SSH runs in batch mode. One Pi process updates at
+  a time; one started meanwhile waits for it and uses its result. A local
+  folder is not updated.
+- When an update changed a plugin (its files, or the plugin list in
+  `.claude-plugin/marketplace.json`) or what the package itself loads into Pi
+  (`package.json` and the extensions, skills, prompts, and themes it names),
+  Pi reloads by itself, so the new extensions, skills, hooks, and agents apply
+  without a restart. Commits that change only other files update the package
+  without a reload.
 - The reload waits until Pi is at rest in the terminal: no response or
   compaction running, nothing queued, no prompt just submitted, and the empty
   prompt editor in focus. An open selector such as `/resume` or `/model`, a
   dialog, or a half-typed prompt is never interrupted. Until then
-  `<marketplace> plugins updated <old> -> <new>; Pi reloads once it is idle.`
-  tells that the previous version is still loaded. Outside the terminal (RPC
-  mode) the notice asks for `/reload` instead.
-- `/marketplace-update` pulls every marketplace and reloads at once.
+  `<marketplace> updated <old> -> <new>; Pi reloads once it is idle.` tells
+  that the previous version is still loaded. Outside the terminal (RPC mode)
+  the notice asks for `/reload` instead.
+- `/marketplace-update` updates every marketplace and reloads at once.
 - Builds a copy of every plugin listed in `.claude-plugin/marketplace.json`
   whose source is a folder of the marketplace, in
-  `~/.pi/agent/claude-marketplaces/<name>/plugins`, and adapts it to Pi:
+  `~/.pi/agent/claude-marketplaces/<name>/plugins`, `<name>` taken from the
+  package folder, and adapts it to Pi:
   - Skill names carry the plugin, since Pi has no plugin namespaces:
     `/my-plugin:guidelines` becomes `/skill:my-plugin-guidelines`. References
     between the skills of a marketplace are rewritten the same way.
   - `${CLAUDE_SKILL_DIR}` and `${CLAUDE_PLUGIN_ROOT}` are replaced with the
     absolute paths of the copy, because Pi does not substitute them.
+
+  The copy of a package from git is rebuilt when its commit changes, the copy
+  of a local folder at every start, so that changes not yet committed show.
 - The plugins' `hooks/` and `scripts/` are mirrored as they are, and every
   mirrored plugin is linked into `~/.pi/agent/claude-plugins/<plugin>`, where
   [claude-hooks](#claude-hooks) and [claude-agents](#claude-agents) look for
   Claude Code plugins, so their hooks and agents work in Pi as in Claude
   Code. The links are made at every start and
-  after every update. A plugin name two marketplaces share goes to the first.
-  Links into a copy (this extension's, or an earlier one's) follow the copies;
-  any other entry there is left alone.
-- Subagent processes ([subagents](#subagents)) skip the pull.
+  after every update, and removed when a marketplace is. A plugin name two
+  marketplaces share goes to the first. Links into a copy (this extension's,
+  or an earlier one's) follow the copies; any other entry there is left alone.
+- Subagent processes ([subagents](#subagents)) skip the update.
+- Earlier versions read the marketplaces from
+  `~/.pi/agent/claude-marketplaces.json` and kept a clone of each in
+  `~/.pi/agent/claude-marketplaces/<name>/repo`. Such a clone is deleted by
+  itself, unless a package lives in it. While the file exists, every start
+  names what is left: `pi install` for a marketplace in it not installed yet,
+  else deleting the file.
 - Pi warns at start about skill descriptions longer than 1,024 characters (the
   skill loads anyway).
-- Never edit files under `~/.pi/agent/claude-marketplaces/` — the clones are
-  reset to the remote and the copies are rebuilt.
+- Never edit the package's clone in `~/.pi/agent/git/` or the copies in
+  `~/.pi/agent/claude-marketplaces/`: every update resets the clone and
+  rebuilds the copies.
 
 ## statusline
 

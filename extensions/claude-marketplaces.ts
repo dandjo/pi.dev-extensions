@@ -1,29 +1,45 @@
 /**
- * Claude Code marketplaces for Pi: the skills, hooks, and agents of the plugins of Claude Code marketplaces in git.
+ * Claude Code marketplaces for Pi: the skills, hooks, and agents of the plugins of Claude Code marketplaces that are
+ * installed as Pi packages, kept current.
  *
- * - The marketplaces come from ~/.pi/agent/claude-marketplaces.json, a map from each marketplace's git URL to its
- *   settings, like mcpServers in Pi's mcp.json: {"marketplaces": {"git@example.com:team/marketplace.git": {}}}.
- *   Without that file the extension does nothing.
- * - Each marketplace is cloned into ~/.pi/agent/claude-marketplaces/<name>/repo (<name> from the URL) and pulled in
- *   the background on every Pi start. From the clone, a mirror of every plugin listed in
- *   .claude-plugin/marketplace.json is built in ~/.pi/agent/claude-marketplaces/<name>/plugins, adapted to Pi:
+ * - A marketplace is a package in the user's Pi settings (pi install, not --local) whose folder holds
+ *   .claude-plugin/marketplace.json, from git as well as from a local folder. Without one the extension does nothing.
+ *   It clones nothing itself: the files are Pi's package install.
+ * - On every Pi start, `pi update <source>` brings each git or npm marketplace package up to date in the background,
+ *   as by hand, but in a child process whose output stays out of the terminal, and git never prompts
+ *   (GIT_TERMINAL_PROMPT=0, SSH in batch mode). One Pi process updates at a time; one starting meanwhile waits and uses
+ *   the result. Local folders are not updated, and subagent processes and Pi with PI_OFFLINE set update nothing.
+ * - From the package, a mirror of every plugin listed in .claude-plugin/marketplace.json is built in
+ *   ~/.pi/agent/claude-marketplaces/<name>/plugins (<name> from the package folder), adapted to Pi:
  *   - skill names get the plugin as prefix (my-plugin:guidelines -> my-plugin-guidelines), since Pi has no plugin
  *     namespaces and plain names collide between plugins;
  *   - references to the skills of the marketplace are rewritten the same way (/my-plugin:review ->
  *     /skill:my-plugin-review);
  *   - ${CLAUDE_SKILL_DIR} and ${CLAUDE_PLUGIN_ROOT} are replaced with the absolute mirror paths, which Pi does not
  *     substitute itself.
+ *   A git package's mirror is rebuilt when its commit changes, a local folder's at every load.
  * - Plugin hooks and scripts are mirrored as they are. Every mirrored plugin is linked into ~/.pi/agent/claude-plugins,
  *   where claude-hooks.ts runs its hooks and claude-agents.ts finds its agents; a plugin name two marketplaces share
  *   goes to the first. Links into a mirror (a directory with a .source stamp, this one's or an earlier one's) are
  *   replaced or removed as the mirrors change; other entries there are left alone.
- * - When an update changed a plugin, Pi reloads by itself as soon as it is at rest in the terminal: no run or
+ * - When an update changed a plugin or what the package itself loads into Pi (package.json and the extensions,
+ *   skills, prompts, and themes it names), Pi reloads by itself as soon as it is at rest in the terminal: no run or
  *   compaction, nothing queued, no prompt just submitted, and the empty prompt editor in focus, so no selector or
- *   dialog is open and no typing is lost. Until then the plugins loaded before stay active. /marketplace-update pulls
- *   and reloads right away. Subagent processes do not pull, and neither does Pi with PI_OFFLINE set.
+ *   dialog is open and no typing is lost. Until then what was loaded before stays active. /marketplace-update updates
+ *   and reloads right away.
+ * - Earlier versions cloned the marketplaces of ~/.pi/agent/claude-marketplaces.json into
+ *   ~/.pi/agent/claude-marketplaces/<name>/repo. Such a clone is deleted unless a package lives in it; while the file
+ *   is there, every start names what is left to do: the pi install of a marketplace not installed yet, or deleting it.
  */
 
-import { CustomEditor, type ExtensionAPI, type ExtensionContext, getAgentDir } from "@earendil-works/pi-coding-agent";
+import {
+	CustomEditor,
+	DefaultPackageManager,
+	type ExtensionAPI,
+	type ExtensionContext,
+	getAgentDir,
+	SettingsManager,
+} from "@earendil-works/pi-coding-agent";
 import type { TUI } from "@earendil-works/pi-tui";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -37,13 +53,15 @@ import {
 	readlinkSync,
 	renameSync,
 	rmSync,
+	statSync,
 	symlinkSync,
 	writeFileSync,
 } from "node:fs";
 import * as path from "node:path";
 import { promisify } from "node:util";
 
-const CONFIG_FILE = path.join(getAgentDir(), "claude-marketplaces.json");
+/** The marketplace list of earlier versions, no longer read. */
+const LEGACY_CONFIG = path.join(getAgentDir(), "claude-marketplaces.json");
 const ROOT = path.join(getAgentDir(), "claude-marketplaces");
 /** Where claude-hooks.ts and claude-agents.ts look for Claude Code plugins. */
 const PLUGIN_LINKS = path.join(getAgentDir(), "claude-plugins");
@@ -51,6 +69,18 @@ const PLUGIN_LINKS = path.join(getAgentDir(), "claude-plugins");
 const STAMP_NAME = ".source";
 const GENERATOR_VERSION = 2;
 const GIT_TIMEOUT_MS = 60_000;
+/** A `pi update` running longer is stopped; it may install npm dependencies. */
+const UPDATE_TIMEOUT_MS = 180_000;
+/** Held by the Pi process that updates, with its pid inside; another one waits for it. */
+const LOCK = path.join(ROOT, ".update.lock");
+/** A lock this old is given up even if its process still seems to run (a pid reused). */
+const LOCK_STALE_MS = 15 * 60_000;
+const LOCK_POLL_MS = 500;
+/** Git must never ask: no terminal prompt, SSH in batch mode. */
+const GIT_ENV = {
+	GIT_TERMINAL_PROMPT: "0",
+	GIT_SSH_COMMAND: process.env.GIT_SSH_COMMAND ?? "ssh -o BatchMode=yes -o ConnectTimeout=10",
+};
 const COMMAND = "marketplace-update";
 /** Marks the internal /marketplace-update call that lends the automatic reload a command context. */
 const RELOAD_MARK = "\u0000reload";
@@ -63,9 +93,13 @@ const INPUT_GRACE_MS = 5_000;
 const run = promisify(execFile);
 
 interface Marketplace {
-	url: string;
-	/** The directory name below ROOT, from the URL. */
+	/** The package source in Pi's settings, as `pi update` takes it. */
+	source: string;
+	/** Whether `pi update` moves it: a git or npm package, not a local folder. */
+	updatable: boolean;
+	/** The directory name below ROOT, from the package folder. */
 	slug: string;
+	/** The package folder. */
 	repo: string;
 	out: string;
 	stamp: string;
@@ -76,74 +110,181 @@ interface Plugin {
 	dir: string;
 }
 
-/** The configured marketplaces in the order of the file; undefined without it. */
-function loadMarketplaces(): Marketplace[] | Error | undefined {
-	let text: string;
-	try {
-		text = readFileSync(CONFIG_FILE, "utf8");
-	} catch {
-		return undefined;
+interface ConfiguredPackage {
+	source: string;
+	scope: "user" | "project";
+	installedPath?: string;
+}
+
+/** The packages of Pi's settings, the user's and the project's of the current directory. */
+function configuredPackages(): ConfiguredPackage[] {
+	const agentDir = getAgentDir();
+	const cwd = process.cwd();
+	const settingsManager = SettingsManager.create(cwd, agentDir);
+	return new DefaultPackageManager({ cwd, agentDir, settingsManager }).listConfiguredPackages();
+}
+
+/** Pi's test for a local package source: everything without a known remote prefix. */
+function isLocalSource(source: string): boolean {
+	return !/^(npm|git|github|http|https|ssh|builtin):/.test(source.trim());
+}
+
+/** The marketplaces among the user's packages, in the order of the settings. */
+function findMarketplaces(packages: ConfiguredPackage[]): Marketplace[] {
+	const found: { source: string; repo: string }[] = [];
+	for (const pkg of packages) {
+		if (pkg.scope !== "user" || !pkg.installedPath) continue;
+		const repo = path.resolve(pkg.installedPath);
+		if (found.some((m) => m.repo === repo)) continue;
+		if (existsSync(path.join(repo, ".claude-plugin", "marketplace.json"))) found.push({ source: pkg.source, repo });
 	}
-	try {
-		const config = JSON.parse(text) as { marketplaces?: unknown };
-		const map = config?.marketplaces;
-		if (typeof map !== "object" || map === null || Array.isArray(map)) {
-			throw new Error('expected {"marketplaces": {"<git url>": {}, …}}');
-		}
-		const urls = Object.keys(map).filter((url) => url.trim());
-		const base = (url: string) =>
-			url
-				.trim()
-				.replace(/[/\\]+$/, "")
-				.replace(/\.git$/, "")
-				.replace(/[/\\]+$/, "")
-				.split(/[/:\\]/)
-				.pop()
-				?.replace(/[^A-Za-z0-9._-]+/g, "-") || "marketplace";
-		const counts = new Map<string, number>();
-		for (const url of urls) counts.set(base(url), (counts.get(base(url)) ?? 0) + 1);
-		return urls.map((url) => {
-			const name = base(url);
-			const slug = (counts.get(name) ?? 0) > 1 ? `${name}-${createHash("sha256").update(url).digest("hex").slice(0, 6)}` : name;
-			const out = path.join(ROOT, slug, "plugins");
-			return { url: url.trim(), slug, repo: path.join(ROOT, slug, "repo"), out, stamp: path.join(out, STAMP_NAME) };
-		});
-	} catch (error) {
-		return new Error(`${CONFIG_FILE}: ${error instanceof Error ? error.message : String(error)}`);
-	}
+	const base = (repo: string) => path.basename(repo).replace(/[^A-Za-z0-9._-]+/g, "-") || "marketplace";
+	const counts = new Map<string, number>();
+	for (const { repo } of found) counts.set(base(repo), (counts.get(base(repo)) ?? 0) + 1);
+	return found.map(({ source, repo }) => {
+		const name = base(repo);
+		const slug = (counts.get(name) ?? 0) > 1 ? `${name}-${createHash("sha256").update(repo).digest("hex").slice(0, 6)}` : name;
+		const out = path.join(ROOT, slug, "plugins");
+		return { source, updatable: !isLocalSource(source), slug, repo, out, stamp: path.join(out, STAMP_NAME) };
+	});
 }
 
 async function git(args: string[], cwd?: string): Promise<string> {
-	const { stdout } = await run("git", args, {
-		cwd,
-		timeout: GIT_TIMEOUT_MS,
-		env: {
-			...process.env,
-			GIT_TERMINAL_PROMPT: "0",
-			GIT_SSH_COMMAND: process.env.GIT_SSH_COMMAND ?? "ssh -o BatchMode=yes -o ConnectTimeout=10",
-		},
-	});
+	const { stdout } = await run("git", args, { cwd, timeout: GIT_TIMEOUT_MS, env: { ...process.env, ...GIT_ENV } });
 	return stdout.trim();
 }
 
-async function headCommit(m: Marketplace): Promise<string | null> {
-	if (!existsSync(path.join(m.repo, ".git"))) return null;
-	return git(["rev-parse", "--short", "HEAD"], m.repo).catch(() => null);
+/** The package's commit, or for an npm package its version; null when neither is known. */
+async function revision(m: Marketplace): Promise<string | null> {
+	const commit = await git(["rev-parse", "--short", "HEAD"], m.repo).catch(() => null);
+	if (commit) return commit;
+	try {
+		const version = JSON.parse(readFileSync(path.join(m.repo, "package.json"), "utf8"))?.version;
+		return typeof version === "string" && version ? version : null;
+	} catch {
+		return null;
+	}
 }
 
-/** Clones or resets the clone to the remote default branch; returns the commits before and after. */
-async function pull(m: Marketplace): Promise<{ from: string | null; to: string }> {
-	const from = await headCommit(m);
-	if (from === null) {
-		rmSync(m.repo, { recursive: true, force: true });
-		mkdirSync(path.dirname(m.repo), { recursive: true });
-		await git(["clone", "--quiet", m.url, m.repo]);
-	} else {
-		await git(["fetch", "--quiet", "--prune", "origin"], m.repo);
-		await git(["reset", "--quiet", "--hard", "origin/HEAD"], m.repo);
-		await git(["clean", "--quiet", "-fdx"], m.repo);
+/** Runs `pi update <source>` with the Pi that runs this extension, its output kept out of the terminal. */
+async function piUpdate(source: string): Promise<void> {
+	const script = process.argv[1];
+	const [command, args] = script && existsSync(script) ? [process.execPath, [script]] : ["pi", []];
+	try {
+		await run(command, [...args, "update", source], {
+			cwd: getAgentDir(),
+			timeout: UPDATE_TIMEOUT_MS,
+			maxBuffer: 8 * 1024 * 1024,
+			env: { ...process.env, ...GIT_ENV },
+		});
+	} catch (error) {
+		const failure = error as { killed?: boolean; stdout?: string; stderr?: string; message?: string };
+		if (failure.killed) throw new Error(`pi update ran longer than ${UPDATE_TIMEOUT_MS / 1000} s`);
+		const lines = `${failure.stderr ?? ""}\n${failure.stdout ?? ""}`
+			.split("\n")
+			.map((line) => line.trim())
+			.filter(Boolean);
+		throw new Error(lines.find((line) => /error|fatal|denied|failed/i.test(line)) ?? lines.at(-1) ?? failure.message ?? "pi update failed");
 	}
-	return { from, to: (await headCommit(m)) ?? "unknown" };
+}
+
+function lockOwnerAlive(): boolean {
+	try {
+		const pid = Number(readFileSync(path.join(LOCK, "pid"), "utf8"));
+		if (!Number.isInteger(pid) || pid <= 0) return false;
+		process.kill(pid, 0);
+		return true;
+	} catch (error) {
+		// EPERM: the process exists but belongs to someone else.
+		return (error as NodeJS.ErrnoException).code === "EPERM";
+	}
+}
+
+/**
+ * Takes the update lock and returns its release, or null when another Pi process held it and has finished: that
+ * process updated the packages, so this one does not again.
+ */
+async function takeLock(): Promise<(() => void) | null> {
+	mkdirSync(ROOT, { recursive: true });
+	for (;;) {
+		try {
+			mkdirSync(LOCK);
+			writeFileSync(path.join(LOCK, "pid"), String(process.pid));
+			const release = () => rmSync(LOCK, { recursive: true, force: true });
+			process.once("exit", release);
+			return () => {
+				process.off("exit", release);
+				release();
+			};
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+		}
+		let age: number;
+		try {
+			age = Date.now() - statSync(LOCK).mtimeMs;
+		} catch {
+			return null; // released just now
+		}
+		// Give the owner a moment to write its pid before judging it dead.
+		if (age > LOCK_STALE_MS || (age > 2_000 && !lockOwnerAlive())) {
+			rmSync(LOCK, { recursive: true, force: true });
+			continue;
+		}
+		await new Promise((resolve) => setTimeout(resolve, LOCK_POLL_MS));
+		if (!existsSync(LOCK)) return null;
+	}
+}
+
+/** A git URL or package source reduced to host/path, to tell whether two name the same repository. */
+function repoIdentity(source: string): string {
+	return source
+		.trim()
+		.replace(/^git:(?!\/\/)/, "")
+		.replace(/^[a-z+]+:\/\//i, "")
+		.replace(/^[^@/:]+@/, "")
+		.replace(/^([^/:]+):(?!\d)/, "$1/")
+		.replace(/^([^/]+):\d+\//, "$1/")
+		.replace(/@[^/]*$/, "")
+		.replace(/\/+$/, "")
+		.replace(/\.git$/, "")
+		.toLowerCase();
+}
+
+/** What is left to do about the marketplace list of earlier versions; null without the file. */
+function legacyNotice(packages: ConfiguredPackage[]): string | null {
+	let text: string;
+	try {
+		text = readFileSync(LEGACY_CONFIG, "utf8");
+	} catch {
+		return null;
+	}
+	let urls: string[] = [];
+	try {
+		const map = JSON.parse(text)?.marketplaces;
+		if (map && typeof map === "object" && !Array.isArray(map)) urls = Object.keys(map).map((url) => url.trim()).filter(Boolean);
+	} catch {
+		// Unreadable: nothing in it to carry over.
+	}
+	const installed = new Set(packages.filter((pkg) => pkg.scope === "user").map((pkg) => repoIdentity(pkg.source)));
+	const missing = urls.filter((url) => !installed.has(repoIdentity(url)));
+	if (missing.length === 0) return `${LEGACY_CONFIG} is no longer read; delete it.`;
+	const install = (url: string) => (/^[a-z+]+:\/\//i.test(url) ? url : `git:${url.replace(/\.git$/, "")}`);
+	return `${LEGACY_CONFIG} is no longer read: Claude Code marketplaces are Pi packages now. Run ${missing
+		.map((url) => `!!pi install ${install(url)}`)
+		.join(", ")}, then delete the file.`;
+}
+
+/** Deletes the clones earlier versions kept in ROOT/<name>/repo, unless a configured package lives in one. */
+function removeLegacyClones(packages: ConfiguredPackage[]): void {
+	if (!existsSync(ROOT)) return;
+	const used = packages.flatMap((pkg) => (pkg.installedPath ? [path.resolve(pkg.installedPath)] : []));
+	for (const entry of readdirSync(ROOT, { withFileTypes: true })) {
+		if (!entry.isDirectory()) continue;
+		const clone = path.join(ROOT, entry.name, "repo");
+		if (!existsSync(path.join(clone, ".git"))) continue;
+		if (used.some((dir) => dir === clone || dir.startsWith(clone + path.sep))) continue;
+		rmSync(clone, { recursive: true, force: true });
+	}
 }
 
 /** The marketplace's name in its manifest, else the directory name. */
@@ -302,19 +443,48 @@ function isCurrent(m: Marketplace, commit: string): boolean {
 	return existsSync(m.stamp) && readFileSync(m.stamp, "utf8").trim() === `${commit} ${GENERATOR_VERSION}`;
 }
 
-/** The commit a mirror was built from, or null without a mirror. */
-function mirrorCommit(m: Marketplace): string | null {
-	if (!existsSync(m.stamp)) return null;
-	return readFileSync(m.stamp, "utf8").trim().split(" ")[0] || null;
+/**
+ * What of a package needs a reload when it changes: the plugin list, the plugins, and what the package itself loads
+ * into Pi — package.json and the folders of its extensions, skills, prompts, and themes (Pi's default folders without
+ * a pi entry in package.json).
+ */
+function reloadPaths(m: Marketplace): string[] {
+	const paths = [".claude-plugin/marketplace.json", "package.json"];
+	try {
+		paths.push(...marketplacePlugins(m).map((plugin) => path.relative(m.repo, plugin.dir)));
+	} catch {
+		// No readable manifest: the manifest path itself covers it.
+	}
+	let manifest: Record<string, unknown> | undefined;
+	try {
+		const pi = JSON.parse(readFileSync(path.join(m.repo, "package.json"), "utf8"))?.pi;
+		if (pi && typeof pi === "object" && !Array.isArray(pi)) manifest = pi;
+	} catch {
+		manifest = undefined;
+	}
+	for (const kind of ["extensions", "skills", "prompts", "themes"]) {
+		if (!manifest) {
+			paths.push(kind);
+			continue;
+		}
+		const entries = manifest[kind];
+		for (const entry of Array.isArray(entries) ? entries : []) {
+			if (typeof entry !== "string" || entry.startsWith("!")) continue;
+			// A glob counts from the folder its first wildcard is in.
+			const wildcard = entry.search(/[*?[{]/);
+			const fixed = (wildcard < 0 ? entry : entry.slice(0, entry.lastIndexOf("/", wildcard) + 1)).replace(/^\.\//, "").replace(/\/+$/, "");
+			paths.push(fixed || ".");
+		}
+	}
+	return paths;
 }
 
-/** Whether a plugin or the plugin list differs between two commits; when in doubt, yes. */
-async function pluginsChanged(m: Marketplace, from: string | null, to: string | null): Promise<boolean> {
+/** Whether what needs a reload differs between two revisions of a package; when in doubt, yes. */
+async function reloadNeeded(m: Marketplace, from: string | null, to: string | null): Promise<boolean> {
 	if (from === to) return false;
 	if (!from || !to) return true;
 	try {
-		const sources = marketplacePlugins(m).map((plugin) => path.relative(m.repo, plugin.dir));
-		await git(["diff", "--quiet", from, to, "--", ".claude-plugin/marketplace.json", ...sources], m.repo);
+		await git(["diff", "--quiet", from, to, "--", ...reloadPaths(m)], m.repo);
 		return false;
 	} catch {
 		return true;
@@ -327,30 +497,44 @@ function skillPaths(marketplaces: Marketplace[]): string[] {
 		.filter((dir) => existsSync(dir));
 }
 
-type UpdateResult = { m: Marketplace; from: string | null; to: string } | { m: Marketplace; error: string };
+type UpdateResult = { m: Marketplace; from: string | null; to: string | null } | { m: Marketplace; error: string };
 
 /**
  * The update in flight, shared by the session runtimes of this process: /reload loads this file afresh, and a session
- * started with /new or /resume while the startup pull still runs must see it too.
+ * started with /new or /resume while the startup update still runs must see it too. null: another Pi process did it.
  */
-const shared = globalThis as typeof globalThis & Record<symbol, Promise<UpdateResult[]> | undefined>;
+const shared = globalThis as typeof globalThis & Record<symbol, Promise<UpdateResult[] | null> | undefined>;
 const UPDATE = Symbol.for("pi.claude-marketplaces.update");
 
-/** Pulls and regenerates every marketplace, one failing not holding up the others; concurrent callers share a run. */
-function update(marketplaces: Marketplace[]): Promise<UpdateResult[]> {
+/**
+ * Updates every git and npm marketplace package with `pi update` and rebuilds the mirrors that changed, one failing not
+ * holding up the others; concurrent callers in this process share a run, and another Pi process updating meanwhile
+ * makes this one wait and skip it (null).
+ */
+function update(marketplaces: Marketplace[]): Promise<UpdateResult[] | null> {
 	shared[UPDATE] ??= (async () => {
-		const results: UpdateResult[] = [];
-		for (const m of marketplaces) {
-			try {
-				const result = await pull(m);
-				if (!isCurrent(m, result.to)) generate(m, result.to);
-				results.push({ m, ...result });
-			} catch (error) {
-				results.push({ m, error: error instanceof Error ? error.message.split("\n")[0] : String(error) });
+		const updatable = marketplaces.filter((m) => m.updatable);
+		if (updatable.length === 0) return [];
+		const release = await takeLock();
+		if (!release) return null;
+		try {
+			const results: UpdateResult[] = [];
+			for (const m of updatable) {
+				try {
+					const from = await revision(m);
+					await piUpdate(m.source);
+					const to = await revision(m);
+					if (to && !isCurrent(m, to)) generate(m, to);
+					results.push({ m, from, to });
+				} catch (error) {
+					results.push({ m, error: error instanceof Error ? error.message.split("\n")[0] : String(error) });
+				}
 			}
+			linkPlugins(marketplaces);
+			return results;
+		} finally {
+			release();
 		}
-		linkPlugins(marketplaces);
-		return results;
 	})().finally(() => {
 		shared[UPDATE] = undefined;
 	});
@@ -358,15 +542,37 @@ function update(marketplaces: Marketplace[]): Promise<UpdateResult[]> {
 }
 
 export default function (pi: ExtensionAPI) {
-	const loadedConfig = loadMarketplaces();
-	if (loadedConfig instanceof Error) {
-		pi.on("session_start", (_event, ctx) => {
-			if (ctx.hasUI) ctx.ui.notify(`claude-marketplaces: ${loadedConfig.message}`, "error");
+	let packages: ConfiguredPackage[];
+	try {
+		packages = configuredPackages();
+	} catch {
+		return; // Pi reports unreadable settings itself.
+	}
+	const marketplaces = findMarketplaces(packages);
+	const legacy = legacyNotice(packages);
+	if (!process.env.PI_SUBAGENT_DEPTH) {
+		try {
+			removeLegacyClones(packages);
+		} catch {
+			// The next start retries.
+		}
+	}
+	if (legacy && !process.env.PI_SUBAGENT_DEPTH) {
+		pi.on("session_start", (event, ctx) => {
+			if (event.reason === "startup" && ctx.hasUI) ctx.ui.notify(legacy, "warning");
 		});
+	}
+	if (marketplaces.length === 0) {
+		// A marketplace removed since: its links go, so claude-hooks.ts no longer runs the hooks of its copy.
+		if (!process.env.PI_SUBAGENT_DEPTH && existsSync(PLUGIN_LINKS)) {
+			try {
+				linkPlugins([]);
+			} catch {
+				// The next start retries.
+			}
+		}
 		return;
 	}
-	if (!loadedConfig || loadedConfig.length === 0) return;
-	const marketplaces = loadedConfig;
 
 	// Before any session_start, when claude-hooks.ts reads the plugins: the links of the mirrors as they are.
 	if (!process.env.PI_SUBAGENT_DEPTH) {
@@ -382,7 +588,7 @@ export default function (pi: ExtensionAPI) {
 	// Pi's TUI answers which component has the focus, though its TUI interface does not declare the method; without it
 	// the focus counts as the editor's.
 	let tui: (TUI & { getFocusedComponent?: () => unknown }) | null = null;
-	/** The mirror commit per marketplace whose plugins this runtime loaded. */
+	/** The revision per marketplace package (by folder) whose plugins and resources this runtime loaded. */
 	const loaded = new Map<string, string | null>();
 	// Pi emits resources_discover after session_start, at the start and at /reload alike.
 	let markDiscovered = () => {};
@@ -440,14 +646,15 @@ export default function (pi: ExtensionAPI) {
 		poll.unref?.();
 	}
 
-	/** Schedules a reload when a mirror holds plugins that differ from those this runtime loaded. */
-	async function checkMirrors(): Promise<void> {
+	/** Schedules a reload when a package now holds plugins or resources that differ from those this runtime loaded. */
+	async function checkPackages(): Promise<void> {
 		const changes: string[] = [];
 		for (const m of marketplaces) {
-			const before = loaded.get(m.slug) ?? null;
-			const current = mirrorCommit(m);
-			if (!(await pluginsChanged(m, before, current))) continue;
-			changes.push(before ? `${label(m)} plugins updated ${before} -> ${current}` : `${label(m)} plugins installed (${current})`);
+			if (!m.updatable || !loaded.has(m.repo)) continue;
+			const before = loaded.get(m.repo) ?? null;
+			const current = await revision(m);
+			if (!(await reloadNeeded(m, before, current))) continue;
+			changes.push(before ? `${label(m)} updated ${before} -> ${current}` : `${label(m)} installed (${current})`);
 		}
 		if (changes.length === 0 || !ctx || due !== null) return;
 		const what = changes.join("; ");
@@ -458,16 +665,19 @@ export default function (pi: ExtensionAPI) {
 	pi.on("resources_discover", async () => {
 		let generated = false;
 		for (const m of marketplaces) {
-			const commit = await headCommit(m);
-			if (commit && !isCurrent(m, commit)) {
+			const current = await revision(m);
+			// A local folder may have changed without a commit, so its mirror is rebuilt at every load, though not by
+			// subagent processes, which use the mirror of the Pi that started them.
+			const stamp = m.updatable ? current : process.env.PI_SUBAGENT_DEPTH ? null : `${current ?? "local"}+${Date.now().toString(36)}`;
+			if (stamp && !isCurrent(m, stamp)) {
 				try {
-					generate(m, commit);
+					generate(m, stamp);
 					generated = true;
 				} catch {
 					// Keep the previous mirror; the next update retries.
 				}
 			}
-			loaded.set(m.slug, mirrorCommit(m));
+			loaded.set(m.repo, current);
 		}
 		if (generated) {
 			try {
@@ -483,7 +693,7 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_start", (event, context) => {
 		ctx = context;
 		if (process.env.PI_SUBAGENT_DEPTH || process.env.PI_OFFLINE) return;
-		// Only the start pulls; a later session waits for a pull still running, or finds one finished since its
+		// Only the start updates; a later session waits for an update still running, or finds one finished since its
 		// resources were loaded. The check waits for the resources and then for the next macrotask, so it never runs
 		// inside the start or reload that is still under way.
 		const updating = event.reason === "startup" ? update(marketplaces) : shared[UPDATE];
@@ -495,7 +705,7 @@ export default function (pi: ExtensionAPI) {
 				}
 			})
 			.then(() => new Promise((resolve) => setTimeout(resolve, 0)))
-			.then(checkMirrors)
+			.then(checkPackages)
 			.catch((error) => {
 				if (ctx?.hasUI) ctx.ui.notify(`Marketplace update failed: ${error instanceof Error ? error.message : error}`, "warning");
 			});
@@ -516,13 +726,19 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand(COMMAND, {
-		description: "Pull the Claude Code marketplaces of claude-marketplaces.json and reload their plugins",
+		description: "Update the Claude Code marketplace packages and reload their plugins",
 		handler: async (args, command) => {
 			if (args === RELOAD_MARK) {
 				await command.reload();
 				return;
 			}
 			const results = await update(marketplaces);
+			if (results === null || results.length === 0) {
+				command.ui.notify(results === null ? "Another Pi process has just updated the marketplace packages." : "No marketplace package to update: local folders load as they are.", "info");
+				stopWaiting();
+				await command.reload();
+				return;
+			}
 			const lines = results.map((r) =>
 				"error" in r
 					? `${label(r.m)}: update failed (${r.error})`
