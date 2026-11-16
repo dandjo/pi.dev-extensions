@@ -27,6 +27,8 @@
  *   runs), `npm update` installs in place as before, and a request that starts Claude Code just then fails and can be
  *   repeated.
  * - Works with npm, Pi's default. With an `npmCommand` setting for pnpm or Bun, the extension does nothing.
+ * - After an update, "claude-sdk-update:installed" on the event bus carries the new SDK's folder and versions
+ *   ({ dir, version, claudeCode }), so claude-remote-control.ts can check its repairs against the new bundle at once.
  */
 
 import { type ExtensionAPI, type ExtensionContext, getAgentDir } from "@earendil-works/pi-coding-agent";
@@ -343,6 +345,16 @@ export default function (pi: ExtensionAPI) {
 			ctx?.ui.notify(`Updating the Claude Agent SDK ${from.version} -> ${to} …`, "info");
 		})
 			.catch((error): Result => ({ kind: "failed", message: describe(error) }))
+			.then((result) => {
+				if (result.kind === "updated") {
+					pi.events.emit("claude-sdk-update:installed", {
+						dir: path.join(ROOT, result.to.location),
+						version: result.to.version,
+						claudeCode: result.to.claudeCode,
+					});
+				}
+				return result;
+			})
 			.finally(() => {
 				shared[CHECK] = undefined;
 			});

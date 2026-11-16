@@ -44,7 +44,10 @@
  *   takes for an old Claude Code and refuses newer models for, and attachBridgeSession does not pass the effort
  *   handler, the context usage handler, the shared control answers (get_usage) or the initialize state on.
  *   loadBridge() imports a repaired copy
- *   (~/.cache/pi-remote-control); a repair the bundle has no shape for is left out, and /rc warns about it.
+ *   (~/.cache/pi-remote-control); a repair the bundle has no shape for is left out, and /rc warns about it. The bundle
+ *   is also checked without loading it (bridgeCheck): at Pi's start while a Claude model is active, and when
+ *   claude-sdk-update.ts reports a new SDK ("claude-sdk-update:installed"); a bundle a repair no longer fits gets a
+ *   warning once per process.
  * - Login: a claude.ai OAuth token with the user:sessions:claude_code scope, from claude-login.ts
  *   ("claude-login:source" on the event bus): Claude Code's login (~/.claude/.credentials.json, on macOS the keychain),
  *   the one the claude-sdk provider runs on (Pi's own /login is not used), and while CLAUDE_CODE_OAUTH_TOKEN is set
@@ -419,6 +422,46 @@ function writePatchedBridge(source: string): string {
 	const file = path.join(BRIDGE_CACHE_DIR, name);
 	writeFileSync(file, source, { mode: 0o600 });
 	return file;
+}
+
+/** The repairs that did not take effect, as what the app may then fail at. */
+function missingRepairs(patches: BridgePatches): string[] {
+	return [
+		...(patches.userAgent ? [] : ["models that need a newer Claude Code"]),
+		...(patches.effort ? [] : ["changing the effort, the context card and the usage card"]),
+	];
+}
+
+function bridgeWarning(missing: string[], version: string): string {
+	return `Remote Control: ${missing.join(" and ")} may fail from the app with this Claude Agent SDK (Claude Code ${version}); its bridge no longer has the shape this extension repairs.`;
+}
+
+/**
+ * Checks the bridge of the Claude Agent SDK in a folder against the repairs without loading or writing anything: the
+ * warning for a bundle a repair no longer fits, once per bundle in this process, else undefined. A text check only:
+ * a shape can still be there while the bundle behaves differently, so connect() warns as well.
+ */
+function bridgeCheck(sdkDir: string | undefined): string | undefined {
+	if (!sdkDir) return undefined;
+	let source: string;
+	try {
+		source = readFileSync(path.join(sdkDir, "bridge.mjs"), "utf8");
+	} catch {
+		return undefined;
+	}
+	let version = "unknown";
+	try {
+		version = String(JSON.parse(readFileSync(path.join(sdkDir, "manifest.json"), "utf8")).version ?? version);
+	} catch {
+		// the manifest is optional
+	}
+	const missing = missingRepairs(patchBridge(source, version).patches);
+	if (missing.length === 0) return undefined;
+	const warned = ((globalThis as Record<symbol, unknown>)[Symbol.for("pi.claude-remote-control.bridge-warned.v1")] ??= new Set<string>()) as Set<string>;
+	const key = createHash("sha256").update(source).digest("hex");
+	if (warned.has(key)) return undefined;
+	warned.add(key);
+	return bridgeWarning(missing, version);
 }
 
 function loadBridge(): Promise<LoadedBridge> {
@@ -2885,12 +2928,9 @@ export default function (pi: ExtensionAPI) {
 			activate(c);
 			note(`Remote Control active: ${c.url}`);
 			notify(`Remote Control active — ${c.url}`);
-			const missing = [
-				...(patches.userAgent ? [] : ["models that need a newer Claude Code"]),
-				...(patches.effort ? [] : ["changing the effort, the context card and the usage card"]),
-			];
+			const missing = missingRepairs(patches);
 			if (missing.length) {
-				const warning = `Remote Control: ${missing.join(" and ")} may fail from the app with this Claude Agent SDK (Claude Code ${version}); its bridge no longer has the shape this extension repairs.`;
+				const warning = bridgeWarning(missing, version);
 				note(warning);
 				notify(warning, "warning");
 			}
@@ -2996,6 +3036,13 @@ export default function (pi: ExtensionAPI) {
 			const source = data as ClaudeLoginSource | undefined;
 			if (typeof source?.renew === "function") loginSource = source;
 		}),
+		// A new SDK from claude-sdk-update.ts: its bridge is checked against the repairs at once, not only at the next /rc.
+		pi.events.on("claude-sdk-update:installed", (data) => {
+			const dir = (data as { dir?: unknown } | undefined)?.dir;
+			if (typeof dir !== "string" || !ctx?.hasUI) return;
+			const warning = bridgeCheck(dir);
+			if (warning) ctx.ui.notify(warning, "warning");
+		}),
 		pi.events.on("subagents:state", (data) => {
 			if (!Array.isArray(data)) return;
 			subagents = data as SubagentView[];
@@ -3020,6 +3067,8 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 		if (event.reason !== "startup" || !isClaudeModel(context.model)) return;
+		const warning = bridgeCheck(claudeSdkDir());
+		if (warning) context.ui.notify(warning, "warning");
 		const wanted = pi.getFlag("remote-control") === true || (startupSetting() && readState().enabled === true);
 		if (wanted) setTimeout(() => void connect(), 500).unref?.();
 	});

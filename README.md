@@ -442,6 +442,13 @@ asks, and the next one waits five minutes. After one that leaves no valid
 token the wait doubles, up to an hour, so a login that needs `/login` does not
 start a Claude Code process, or ask the token endpoint, every few minutes.
 
+A prompt or a compaction (`/compact` or automatic) that fails because Claude
+Code cannot use its login gets a notice below the error:
+`Claude Code's login cannot be used: run !!claude auth login`. The error is
+Claude Code's own text, passed on by `claude-sdk` ("Failed to authenticate",
+"reached its time limit"), and stays as it is, also in the saved session. The
+summary of a branch in `/tree` fails another way and gets no notice.
+
 Other extensions reach it through Pi's event bus, whatever the load order:
 `claude-login:source` carries a source with `token()` and `renew()`, at load
 and again on every `claude-login:source-request`. `token({ renew })` answers
@@ -1378,7 +1385,13 @@ and you can work on from there while Pi keeps running on your machine.
 - The SDK's bridge needs two repairs, which the extension makes in a copy it
   loads from `~/.cache/pi-remote-control/`, written fresh at the first `/rc`
   of every Pi process. A repair that no longer fits a new SDK release is left
-  out, and `/rc` warns about it:
+  out, and `/rc` warns about it. The bundle is also checked without loading
+  it, so the warning comes before you need Remote Control: at Pi's start while
+  a Claude model is active, and right after
+  [claude-sdk-update](#claude-sdk-update) installed a new SDK. Each bundle is
+  warned about once per Pi process. The check only finds the places the
+  repairs change, not whether the bundle still behaves as before, so `/rc`
+  keeps its own warning. The repairs:
   - Its User-Agent names the SDK package version (`claude-code/0.3.308`), and
     the server takes that for Claude Code 0.3.308: the app refused newer
     models such as Fable 5.1 with "Claude Code 0.3.308 does not support this
@@ -1460,6 +1473,9 @@ since npm keeps a dependency at the version of `package-lock.json`.
   new `pi-claude-subscription` first (`pi update npm:pi-claude-subscription`).
 - `/claude-sdk-update` checks and installs at once and reports the state,
   also when nothing is due.
+- After an update, `claude-sdk-update:installed` on Pi's event bus carries the
+  new SDK's folder and versions, and [Remote Control](#claude-remote-control)
+  checks its repairs against the new bundle at once.
 - Pi processes starting together update one at a time, through a lock file
   in `~/.pi/agent/npm`.
 - Claude Code stays startable during the update. npm writes a package into

@@ -31,6 +31,11 @@
  * after it started. After one that leaves no valid token the wait doubles, up to MAX_RETRY_MS, so a login that needs
  * /login does not start a Claude Code process, or ask the token endpoint, every few minutes while Pi stays open.
  *
+ * A prompt or a compaction that fails because Claude Code's login cannot be used (Claude Code's own text, passed on by
+ * the claude-sdk provider: "Failed to authenticate", "reached its time limit", "claude auth login") gets a notice below
+ * the error that names `!!claude auth login`. The error itself stays as it is, also in the saved session. A branch
+ * summary of /tree fails another way and gets no notice.
+ *
  * Other extensions reach it through the event bus, whatever the load order: "claude-login:source" carries a
  * ClaudeLoginSource, at load and on every "claude-login:source-request". An extension that finds none reads Claude
  * Code's login itself, without the renewal and the account check.
@@ -58,6 +63,9 @@ const ORGANIZATION_TIMEOUT_MS = 5_000;
 const ORGANIZATION_RETRY_MS = 60_000;
 /** Organizations kept; a renewal brings a new token, so older ones are dropped. */
 const ORGANIZATION_CACHE_SIZE = 16;
+/** Claude Code's answer to a login it cannot use, as the claude-sdk provider passes it on. */
+const LOGIN_FAILURE = /Failed to authenticate|reached its time limit|claude auth login|OAuth token has expired/i;
+const LOGIN_NOTICE = "Claude Code's login cannot be used: run !!claude auth login";
 
 /** What "claude-login:source" carries. */
 export interface ClaudeLoginSource {
@@ -370,4 +378,16 @@ export default function (pi: ExtensionAPI) {
 	};
 	pi.events.on("claude-login:source-request", () => pi.events.emit("claude-login:source", source));
 	pi.events.emit("claude-login:source", source);
+
+	pi.on("message_end", (event, ctx) => {
+		const message = event.message as { role?: string; stopReason?: string; provider?: string; errorMessage?: string };
+		if (message.role !== "assistant" || message.stopReason !== "error" || message.provider !== "claude-sdk") return;
+		if (!ctx.hasUI || !LOGIN_FAILURE.test(message.errorMessage ?? "")) return;
+		ctx.ui.notify(`${LOGIN_NOTICE}, then send the prompt again.`, "warning");
+	});
+
+	pi.on("session_compact_failed", (event, ctx) => {
+		if (!ctx.hasUI || ctx.model?.provider !== "claude-sdk" || !LOGIN_FAILURE.test(event.errorMessage ?? "")) return;
+		ctx.ui.notify(`${LOGIN_NOTICE}${event.reason === "manual" ? ", then /compact again" : ""}.`, "warning");
+	});
 }
