@@ -45,17 +45,18 @@
  *   handler, the context usage handler, the shared control answers (get_usage) or the initialize state on.
  *   loadBridge() imports a repaired copy
  *   (~/.cache/pi-remote-control); a repair the bundle has no shape for is left out, and /rc warns about it.
- * - Login: a claude.ai OAuth token with the user:sessions:claude_code scope, from claude-login.ts ("claude-login:source"
- *   on the event bus): Claude Code's login (~/.claude/.credentials.json, on macOS the keychain), the one the
- *   claude-sdk provider runs on (Pi's own /login is not used), and while CLAUDE_CODE_OAUTH_TOKEN is set only a login of
- *   that token's account, the one the claude-sdk provider's prompts run on (the setup token itself cannot open Remote
- *   Control sessions). It is read fresh for every request and never refreshed here. Remote Control is offered only
- *   while a Claude model is active: switching to another model ends the connection. The login is renewed only by a
- *   request of Claude Code, so after hours without a prompt the token has run out and the four-hourly renewal of the
- *   worker credential fails; claude-login.ts then has Claude Code renew it under its own lock. A login that reached its
- *   time limit cannot be renewed and needs /login in Claude Code. Without that extension the token is read here,
- *   without renewal and account check, and a login that ran out stays run out until a prompt renews it. A renewal that keeps
- *   failing for five minutes goes into the session log with its reason, and so does the reconnect after it.
+ * - Login: a claude.ai OAuth token with the user:sessions:claude_code scope, from claude-login.ts
+ *   ("claude-login:source" on the event bus): Claude Code's login (~/.claude/.credentials.json, on macOS the keychain),
+ *   the one the claude-sdk provider runs on (Pi's own /login is not used), and while CLAUDE_CODE_OAUTH_TOKEN is set
+ *   only a login of that token's account, the one the claude-sdk provider's prompts run on (the setup token itself
+ *   cannot open Remote Control sessions). It is read fresh for every request and never refreshed here. Remote Control
+ *   is offered only while a Claude model is active: switching to another model ends the connection. The login is
+ *   renewed only by a request of Claude Code, so after hours without a prompt the token has run out and the four-hourly
+ *   renewal of the worker credential fails; claude-login.ts then has Claude Code renew it under its own lock. A login
+ *   that reached its time limit cannot be renewed and needs `!!claude auth login` in Pi (or `claude auth login` in a
+ *   shell). Without that extension the token is read here, without renewal and account check, and a login that ran out
+ *   stays run out until a prompt renews it. A renewal that keeps failing for five minutes goes into the session log
+ *   with its reason, and so does the reconnect after it.
  * - What the app sees: the conversation so far, then every user prompt, assistant message (text, thinking, tool calls
  *   under Claude Code's tool names) and tool result, and a result after each run. Permission prompts do not exist in
  *   Pi, so the app never has to approve anything.
@@ -342,11 +343,11 @@ async function readAccessToken(): Promise<Token | null> {
 	return null;
 }
 
-const LOGIN_HINT = "Remote Control needs Claude Code's claude.ai login: run claude, then /login there, and try /remote-control again.";
+const LOGIN_HINT = "Remote Control needs Claude Code's claude.ai login: run !!claude auth login, then /remote-control again.";
 const ENDED_HINT =
-	"Claude Code's claude.ai login reached its time limit and cannot be renewed: run claude, then /login there, and try /remote-control again.";
+	"Claude Code's claude.ai login reached its time limit and cannot be renewed: run !!claude auth login, then /remote-control again.";
 const OTHER_ACCOUNT_HINT =
-	"Remote Control needs a claude.ai login of the account CLAUDE_CODE_OAUTH_TOKEN belongs to: run claude, then /login there with that account, and try /remote-control again.";
+	"Remote Control needs a claude.ai login of the account CLAUDE_CODE_OAUTH_TOKEN belongs to: run !!claude auth login with that account, then /remote-control again.";
 /** Added to LOGIN_HINT while claude-login.ts is not loaded: the login may only have run out. */
 const NO_RENEWAL_HINT = " A login that ran out while Pi idled is renewed by claude-login.ts, which is not loaded.";
 
@@ -2521,7 +2522,7 @@ export default function (pi: ExtensionAPI) {
 
 	/** What to do about a login the server rejected. */
 	const rejectedHint = () =>
-		`Claude.ai login was rejected — run claude, then /login there, and /remote-control again.`;
+		`Claude.ai login was rejected — run !!claude auth login, then /remote-control again.`;
 
 	/**
 	 * The access token from claude-login.ts: Claude Code's login, with renew a run-out one renewed by Claude Code first,

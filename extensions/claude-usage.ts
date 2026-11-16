@@ -19,8 +19,9 @@
  * from claude-login.ts ("claude-login:source" on the event bus): Claude Code's login, the one the claude-sdk provider
  * runs on (Pi's own /login is not used), renewed by Claude Code once it ran out after hours without a request, and
  * while CLAUDE_CODE_OAUTH_TOKEN is set only a login of that token's account, the one the claude-sdk provider's prompts
- * run on. A login that reached its time limit gets a Limits row that asks for /login in Claude Code. Without that
- * extension the token is read here, without renewal and account check, and the rows wait until a prompt renews it.
+ * run on. Without a valid login the Limits row names `!!claude auth login`, the Pi command that signs Claude Code in
+ * again (a login that reached its time limit always needs it). Without that extension the token is read here,
+ * without renewal and account check, and the rows wait until a prompt renews it.
  * It is never written to the cache and never refreshed here: rotating it would invalidate the refresh token behind
  * Claude Code's back.
  *
@@ -263,12 +264,12 @@ async function usageToken(login: ClaudeLoginSource | null): Promise<{ value: str
 	if (typeof login?.token === "function") {
 		const token = await login.token();
 		if (!("reason" in token)) return { value: token.value };
-		if (token.reason === "ended") return { error: "login ended: run claude, then /login" };
-		return { error: token.reason === "other-account" ? "login: other account than CLAUDE_CODE_OAUTH_TOKEN" : "no valid OAuth token" };
+		if (token.reason === "ended") return { error: "login ended: !!claude auth login" };
+		return { error: token.reason === "other-account" ? "login: other account than CLAUDE_CODE_OAUTH_TOKEN" : "no valid login: !!claude auth login" };
 	}
 	let token = await readAccessToken();
 	if (!token && login && (await login.renew())) token = await readAccessToken();
-	return token ? { value: token } : { error: "no valid OAuth token" };
+	return token ? { value: token } : { error: "no valid login: !!claude auth login" };
 }
 
 async function fetchUsage(login: ClaudeLoginSource | null): Promise<{ snapshot: UsageSnapshot } | { error: string }> {

@@ -14,8 +14,9 @@
  * which Claude Code sends only after renewing the token under its own lock.
  *
  * A login that reached its time limit cannot be renewed: Claude Code then keeps it without a refresh token (and marks
- * it loginEnded). token() answers reason "ended" for it at once, without starting a process; it needs `claude` and
- * /login there.
+ * it loginEnded). token() answers reason "ended" for it at once, without starting a process; it needs a new login:
+ * `claude auth login` (in Pi `!!claude auth login`), which opens the browser and needs no input when the browser can
+ * reach this machine's localhost.
  *
  * The account: while CLAUDE_CODE_OAUTH_TOKEN is set (a token of `claude setup-token`), Claude Code runs the claude-sdk
  * provider's prompts on it, as it outranks the stored login. A login of another account would then show the limits
