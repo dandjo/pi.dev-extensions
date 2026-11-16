@@ -28,7 +28,7 @@
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { getAgentDir, VERSION } from "@earendil-works/pi-coding-agent";
-import { Box, Text } from "@earendil-works/pi-tui";
+import { Box, MouseRegion, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
@@ -1337,22 +1337,37 @@ export default function (pi: ExtensionAPI) {
 		});
 	}
 
+	// A click opens or closes one message, as it does on Pi's own summaries and skill blocks; ctrl+o rebuilds every
+	// message with its new state, which overrides the click. Other rebuilds (theme, resize) keep the clicked state.
+	const messageOpen = new WeakMap<object, { expanded: boolean; open: boolean }>();
 	pi.registerMessageRenderer<MessageDetails>(MESSAGE_TYPE, (message, { expanded, outputPad }, theme) => {
 		const details = message.details;
 		const label = details?.label ?? "peer";
 		const body = details?.body ?? (typeof message.content === "string" ? message.content : "");
 		const lines = body.split("\n");
-		let text: string;
-		if (expanded) {
-			text = `${theme.fg("customMessageLabel", `› Message from @${quoteName(label)}`)}${details?.from ? theme.fg("dim", `  ${details.from}`) : ""}\n${body}`;
-		} else {
+		let state = messageOpen.get(message);
+		if (!state || state.expanded !== expanded) {
+			state = { expanded, open: expanded };
+			messageOpen.set(message, state);
+		}
+		const draw = (open: boolean): string => {
+			if (open) {
+				return `${theme.fg("customMessageLabel", `› Message from @${quoteName(label)}`)}${details?.from ? theme.fg("dim", `  ${details.from}`) : ""}\n${body}`;
+			}
 			const first = lines[0].length > 160 ? `${lines[0].slice(0, 159)}…` : lines[0];
 			const more = lines.length > 1 || lines[0].length > 160;
-			text = theme.fg("dim", `› Message from @${quoteName(label)}: ${first}${more ? " (ctrl+o to expand)" : ""}`);
-		}
+			return theme.fg("dim", `› Message from @${quoteName(label)}: ${first}${more ? " (ctrl+o to expand)" : ""}`);
+		};
+		const text = new Text(draw(state.open), 0, 0);
 		const box = new Box(outputPad, 0, (t) => theme.bg("customMessageBg", t));
-		box.addChild(new Text(text, 0, 0));
-		return box;
+		box.addChild(text);
+		const clicked = state;
+		return new MouseRegion(box, (event) => {
+			if (event.type !== "click" || event.button !== "left") return undefined;
+			clicked.open = !clicked.open;
+			text.setText(draw(clicked.open));
+			return { handled: true };
+		});
 	});
 
 	pi.registerMessageRenderer<NoticeDetails>(NOTICE_TYPE, (message, { outputPad }, theme) => {
