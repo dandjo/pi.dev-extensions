@@ -16,12 +16,13 @@
  * Limits come from https://api.anthropic.com/api/oauth/usage (the endpoint Claude Code's /usage dialog uses),
  * fetched in the background so a render never waits on the network, and only while the status line shows the rows.
  * The endpoint is rate-limited per account, so all pi sessions share one answer through CACHE_FILE: whichever
- * session takes the lock asks, at most every USAGE_TTL_MS, and the others read the file. The OAuth access token is
- * read from pi's auth.json (falling back to Claude Code's credentials), never written to the cache, and never
- * refreshed here: rotating it would invalidate the refresh token behind the owning app's back. When neither is valid,
- * claude-login.ts is asked to have the owner renew it ("claude-login:source" on the event bus: Pi its own login,
- * else Claude Code its own), as both run out after hours without a request of their owner; without that extension
- * the rows wait until one is renewed.
+ * session takes the lock asks, at most every USAGE_TTL_MS, and the others read the file. The OAuth access token comes
+ * from claude-login.ts ("claude-login:source" on the event bus): Pi's auth.json first, then Claude Code's credentials,
+ * a run-out login renewed by its owner (both run out after hours without a request of their owner), and while
+ * CLAUDE_CODE_OAUTH_TOKEN is set only a login of that token's account, the one the claude-sdk provider's prompts run
+ * on. Without that extension the token is read here in the same order, without renewal and account check, and the
+ * rows wait until a login is renewed. It is never written to the cache and never refreshed here: rotating it would
+ * invalidate the refresh token behind the owning app's back.
  *
  * The rows reach statusline.ts through the event bus ("statusline:section"); without it this file does nothing.
  * Other extensions read the answer through the event bus as well: "claude-usage:source" carries a ClaudeUsageSource,
@@ -265,11 +266,25 @@ function parseUsage(json: any): UsageSnapshot {
 	return { fetchedAt: Date.now(), limits, credits, answer };
 }
 
-/** renew has a run-out login renewed by its owner (claude-login.ts) and answers whether a token is valid afterwards. */
-async function fetchUsage(renew: () => Promise<boolean>): Promise<{ snapshot: UsageSnapshot } | { error: string }> {
+/**
+ * The token for the usage endpoint from claude-login.ts, or an error for the Limits row; an older claude-login.ts
+ * without token() only renews, and without the extension the token is read here.
+ */
+async function usageToken(login: ClaudeLoginSource | null): Promise<{ value: string } | { error: string }> {
+	if (typeof login?.token === "function") {
+		const token = await login.token();
+		if (!("reason" in token)) return { value: token.value };
+		return { error: token.reason === "other-account" ? "login: other account than CLAUDE_CODE_OAUTH_TOKEN" : "no valid OAuth token" };
+	}
 	let token = await readAccessToken();
-	if (!token && (await renew())) token = await readAccessToken();
-	if (!token) return { error: "no valid OAuth token" };
+	if (!token && login && (await login.renew())) token = await readAccessToken();
+	return token ? { value: token } : { error: "no valid OAuth token" };
+}
+
+async function fetchUsage(login: ClaudeLoginSource | null): Promise<{ snapshot: UsageSnapshot } | { error: string }> {
+	const got = await usageToken(login);
+	if ("error" in got) return got;
+	const token = got.value;
 	let res: Response;
 	try {
 		res = await fetch(USAGE_URL, {
@@ -343,9 +358,29 @@ interface ClaudeLoginSource {
 	 * Renews a run-out claude.ai login: Pi's own through Pi's credential store, else Claude Code's through Claude Code.
 	 * True when one of the two tokens is valid afterwards. Joins a renewal that is running, and answers false at once
 	 * while the wait after the last one lasts. Never rejects. To be called once the caller found no valid token, not
-	 * before.
+	 * before. token() does this itself.
 	 */
 	renew(): Promise<boolean>;
+	/**
+	 * The claude.ai access token to use: Pi's own login first, then Claude Code's, valid for at least another minute.
+	 * With renew (the default) a run-out login is renewed by its owner first, as renew() does. While
+	 * CLAUDE_CODE_OAUTH_TOKEN is set, a login of another organization is passed over. Without a token, reason says
+	 * whether there was none or only ones of another account. Never rejects. Missing in older versions.
+	 */
+	token?(options?: { renew?: boolean }): Promise<ClaudeLoginToken | ClaudeLoginRefusal>;
+}
+
+/** What token() answers with a token: whose login it is, and whether it was renewed for this call. */
+interface ClaudeLoginToken {
+	value: string;
+	source: "pi" | "claude-code";
+	renewed: boolean;
+}
+
+/** What token() answers without one: no valid login, or only logins of another account than CLAUDE_CODE_OAUTH_TOKEN. */
+interface ClaudeLoginRefusal {
+	value?: undefined;
+	reason: "none" | "other-account";
 }
 
 /**
@@ -435,7 +470,7 @@ export default function (pi: ExtensionAPI) {
 			const attemptAt = Date.now();
 			const previous = state?.snapshot ?? null;
 			await save({ attemptAt, snapshot: previous, error: null });
-			const result = await fetchUsage(() => loginSource?.renew() ?? Promise.resolve(false));
+			const result = await fetchUsage(loginSource);
 			await save(
 				"snapshot" in result
 					? { attemptAt, snapshot: result.snapshot, error: null }

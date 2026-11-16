@@ -19,7 +19,7 @@ belongs at `~/.pi/agent/extensions/<name>.ts`.
 | `claude-marketplaces.ts`   | Loads the plugins of Claude Code marketplaces into Pi and keeps them current              | Git access to each marketplace                                   |
 | `statusline.ts`            | Replaces Pi's footer with a Claude Code style status line, for any provider               | —                                                                |
 | `claude-usage.ts`          | Adds the Claude subscription limits and usage credits to the status line                  | `statusline.ts`, a Claude subscription login (Pi or Claude Code) |
-| `claude-login.ts`          | Has Claude Code renew a run-out login, for the status line limits and Remote Control      | `pi-claude-subscription`, a Claude Code login                    |
+| `claude-login.ts`          | Picks the claude.ai login (Pi's, then Claude Code's) and renews it when it ran out        | A Claude subscription login (Pi or Claude Code)                  |
 | `compact-tools.ts`         | Cuts each collapsed tool row to four lines; Ctrl+O shows all of it                        | —                                                                |
 | `web-tools.ts`             | Adds `web_fetch`: reads a page locally and lets a small model answer from it              | —                                                                |
 | `openproject.ts`           | Adds `openproject`: reads and changes OpenProject through its API v3, as you              | An OpenProject API token for each instance                       |
@@ -47,9 +47,10 @@ them need — the [small model](#small-model) choice, the overlay frame,
 Claude Code's tool names, the instances and tokens of `gitlab.json` and
 `openproject.json` — is copied into each of them, with a note that names the
 other copies. What one extension does for others while Pi runs goes through
-Pi's event bus instead: [claude-login](#claude-login) renews the login for
-`claude-usage.ts` and `claude-remote-control.ts`, and each of the two goes
-without the renewal when that file is missing. `web_search` comes from the npm package `pi-web-access`; see
+Pi's event bus instead: [claude-login](#claude-login) hands out and renews the
+login for `claude-usage.ts` and `claude-remote-control.ts`, and each of the two
+reads the login itself, without renewal and account check, when that file is
+missing. `web_search` comes from the npm package `pi-web-access`; see
 [Web search](#web-search).
 
 ## Set up Pi
@@ -343,11 +344,13 @@ status line shows them or [Remote Control](#claude-remote-control) needs
 them. The endpoint is rate-limited per account, so all Pi
 sessions share one answer through `~/.cache/pi-statusline/usage.json`: one
 session at a time asks, at most every two minutes, and the others read the
-file, so a new session shows the limits right away. The access token is read
-from Pi's own Anthropic login in `~/.pi/agent/auth.json`, otherwise from Claude
-Code's `~/.claude/.credentials.json` (on macOS from the login keychain item
-`Claude Code-credentials`, where Claude Code keeps it). It is never refreshed
-here and never written to the cache.
+file, so a new session shows the limits right away. The access token comes
+from [claude-login](#claude-login): Pi's own Anthropic login in
+`~/.pi/agent/auth.json` first, otherwise Claude Code's
+`~/.claude/.credentials.json` (on macOS the login keychain item
+`Claude Code-credentials`, where Claude Code keeps it), and while
+`CLAUDE_CODE_OAUTH_TOKEN` is set only a login of that token's account. It is
+never refreshed here and never written to the cache.
 
 Without any Claude login, neither Pi's OAuth login nor Claude Code's, there
 are no rows and no requests: someone on another provider sees nothing of
@@ -366,7 +369,9 @@ Both logins are renewed only by a request of their owner, so after hours
 without one neither token is valid. The extension then asks
 [claude-login](#claude-login) to have the owner renew it — Pi its own login,
 else Claude Code its own — and the limits come back with the next fetch.
-Without `claude-login.ts` the limits stay away until one of them is renewed.
+Without `claude-login.ts` the token is read here in the same order, without
+the account check, and the limits stay away until one of the logins is
+renewed.
 
 Other extensions get the answer through Pi's event bus: `claude-usage:source`
 carries a source with the latest answer and a refresh under the same
@@ -382,15 +387,17 @@ time of the next attempt.
 | `loading…`                  | The first answer is on its way             |
 | `⚠ rate limited (HTTP 429)` | The endpoint turned the request away       |
 | `⚠ no valid OAuth token`    | No unexpired token in either file, and neither Pi nor Claude Code could renew its login: run `/login` in Pi, or `claude`, then `/login`. Or `claude-login.ts` is not loaded, and the login ran out while Pi idled |
+| `⚠ login: other account than CLAUDE_CODE_OAUTH_TOKEN` | Every valid login belongs to another account than `CLAUDE_CODE_OAUTH_TOKEN`, the one the `claude-sdk` prompts run on: run `/login` in Pi or Claude Code with that account |
 | `⚠ HTTP 401`                | The endpoint rejected the token            |
 | `⚠ endpoint unreachable`    | Offline, or no answer within 10 seconds    |
 
 ## claude-login
 
-Renews a claude.ai login once it has run out, for the extensions that need a
-valid token while no prompt runs: [claude-usage](#claude-usage) for the plan
-limits and [Remote Control](#claude-remote-control) for its connection. On its
-own it does nothing — no request and no process until one of them asks.
+Hands out the claude.ai token, and renews a login once it has run out, for the
+extensions that need a valid token while no prompt runs:
+[claude-usage](#claude-usage) for the plan limits and
+[Remote Control](#claude-remote-control) for its connection. On its own it
+does nothing — no request and no process until one of them asks.
 
 Two logins can carry such a token, and each is renewed by its owner:
 
@@ -413,9 +420,25 @@ Two logins can carry such a token, and each is renewed by its owner:
   `pi-claude-subscription` brings.
 
 Pi's login comes first, as its renewal is one request and no process. Claude
-Code is asked when Pi has no login of its own or its renewal left none valid.
-Neither helps a login whose refresh token is gone or refused: that needs
-`/login` again.
+Code's is used when Pi has no login of its own, its renewal left none valid, or
+it belongs to another account. Neither renewal helps a login whose refresh
+token is gone or refused: that needs `/login` again.
+
+The account: while `CLAUDE_CODE_OAUTH_TOKEN` is set (a token of
+`claude setup-token`), Claude Code runs the `claude-sdk` prompts on it, as it
+outranks the stored login. A login of another account would then show the
+limits of an account the prompts do not run on, and connect Remote Control to
+it, so a login whose organization differs from that token's is passed over.
+The organization comes from the `anthropic-organization-id` header that
+`GET /v1/models` answers with — a request every token may make (the setup token
+cannot ask for its profile), without a model call. It is asked once per token
+and kept by the token's hash. An organization that cannot be told now (no
+network, a refused token) counts as matching and is asked again at a later
+call. Without the variable nothing is checked. An organization is one account
+on a Pro or Max plan; on Team and Enterprise its members share it, so the check
+cannot tell them apart. The Claude Code process of a renewal runs without
+`CLAUDE_CODE_OAUTH_TOKEN`, as Claude Code would otherwise use that token and
+leave its stored login unrenewed.
 
 One renewal of each kind runs at a time in a Pi process, whichever extension
 asks, and the next one waits five minutes. After one that leaves no valid
@@ -423,11 +446,15 @@ token the wait doubles, up to an hour, so a login that needs `/login` does not
 start a Claude Code process, or ask the token endpoint, every few minutes.
 
 Other extensions reach it through Pi's event bus, whatever the load order:
-`claude-login:source` carries a source with `renew()`, at load and again on
-every `claude-login:source-request`. `renew()` answers whether one of the two
-tokens is valid afterwards; it joins a renewal that is running, answers `false`
-at once while the wait lasts, and never rejects. Call it once no valid token
-was found, not before.
+`claude-login:source` carries a source with `token()` and `renew()`, at load
+and again on every `claude-login:source-request`. `token({ renew })` answers
+with the token to use (`value`, `source` `pi` or `claude-code`, and whether it
+was `renewed` for this call), Pi's login first, a run-out one renewed first
+unless `renew` is `false`, and only one of `CLAUDE_CODE_OAUTH_TOKEN`'s
+account; without one it answers a `reason`, `none` or `other-account`.
+`renew()` only renews and answers whether one of the two tokens is valid
+afterwards; it joins a renewal that is running, answers `false` at once while
+the wait lasts, and never rejects. Neither rejects.
 
 ## compact-tools
 
@@ -1357,23 +1384,26 @@ and you can work on from there while Pi keeps running on your machine.
     part that answers the app, so every effort change, context usage and usage
     request failed with "not supported in this context". The copy passes all
     four on.
-- Login: the claude.ai OAuth token of Claude Code (`~/.claude/.credentials.json`,
-  on macOS the login keychain; it carries the `user:sessions:claude_code` scope), read fresh for every
-  request and never refreshed here — Claude Code refreshes it while the
-  `claude-sdk` provider runs it. That is why Remote Control needs a Claude
-  model: without one, `/rc` declines, and switching to another model
-  disconnects. Pi's own Anthropic login is the fallback. Remote Control needs a
-  Pro, Max, Team, or Enterprise plan; on Team and Enterprise an owner must
-  allow it in the Claude Code admin settings.
-- Overnight: Claude Code renews its token only when it makes a request, and the
+- Login: a claude.ai OAuth token with the `user:sessions:claude_code` scope
+  from [claude-login](#claude-login): Pi's own Anthropic login
+  (`~/.pi/agent/auth.json`) first, then Claude Code's
+  (`~/.claude/.credentials.json`, on macOS the login keychain), and while
+  `CLAUDE_CODE_OAUTH_TOKEN` is set only a login of that token's account (the
+  setup token itself cannot open Remote Control sessions). It is read fresh for
+  every request and never refreshed here. Remote Control needs a Claude model:
+  without one, `/rc` declines, and switching to another model disconnects.
+  Remote Control needs a Pro, Max, Team, or Enterprise plan; on Team and
+  Enterprise an owner must allow it in the Claude Code admin settings.
+- Overnight: both logins are renewed only by a request of their owner, and the
   provider ends idle Claude Code processes, so after about eight hours without
   a prompt the token has run out and the four-hourly renewal of the connection
   fails. The extension then asks [claude-login](#claude-login) to have the
   login renewed, and the connection is renewed with it — at most every
   five minutes, and after a renewal that fails the wait doubles, up to an
   hour. The status line ([claude-usage](#claude-usage)) shares the renewal.
-  Without `claude-login.ts` the token stays run out until a prompt renews it,
-  and the connection is lost overnight. The session log notes such a
+  Without `claude-login.ts` the token is read in the same order, without the
+  account check, stays run out until a prompt renews it, and the connection is
+  lost overnight. The session log notes such a
   renewal (`Remote Control had the claude.ai login renewed …`), a
   renewal that keeps failing for five minutes with its reason, and the
   reconnect after it.

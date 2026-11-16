@@ -1,7 +1,7 @@
 /**
- * Claude login: renews a claude.ai login once it has run out, for the extensions that need a valid token while no
- * prompt runs. claude-usage.ts asks for it to fetch the plan limits, claude-remote-control.ts to renew its connection.
- * On its own this file does nothing: no request and no process until an extension asks.
+ * Claude login: hands out the claude.ai token, and renews a login once it has run out, for the extensions that need a
+ * valid token while no prompt runs. claude-usage.ts asks for it to fetch the plan limits, claude-remote-control.ts for
+ * its connection. On its own this file does nothing: no request and no process until an extension asks.
  *
  * Two logins can carry such a token, and each is renewed by its owner:
  *
@@ -17,17 +17,26 @@
  *   its usage instead (get_usage): a request without a model call, which Claude Code sends only after renewing the
  *   token under its own lock.
  *
- * Pi's login comes first, as its renewal is one request and no process; Claude Code is asked when Pi has no login of
- * its own or its renewal left none valid. Neither helps a login whose refresh token is gone or refused: that needs
- * /login again.
+ * Pi's login comes first, as its renewal is one request and no process; Claude Code's is used when Pi has no login of
+ * its own, its renewal left none valid, or it belongs to another account. Neither renewal helps a login whose refresh
+ * token is gone or refused: that needs /login again.
+ *
+ * The account: while CLAUDE_CODE_OAUTH_TOKEN is set (a token of `claude setup-token`), Claude Code runs the claude-sdk
+ * provider's prompts on it, as it outranks the stored login. A login of another account would then show the limits
+ * of an account the prompts do not run on, and connect Remote Control to it, so token() passes over a login whose
+ * organization differs from that token's. The organization comes from the anthropic-organization-id header that
+ * GET /v1/models answers with: a request every token may make (the setup token cannot ask for its profile), without
+ * a model call. It is asked once per token and kept by the token's hash. An organization that cannot be told now (no
+ * network, a refused token) counts as matching, and is asked again at a later call. An organization is one account
+ * on a Pro or Max plan; on Team and Enterprise its members share it, so the check cannot tell them apart.
  *
  * One renewal of each kind runs at a time in a Pi process, whichever extension asks, and the next one waits RETRY_MS
  * after it started. After one that leaves no valid token the wait doubles, up to MAX_RETRY_MS, so a login that needs
  * /login does not start a Claude Code process, or ask the token endpoint, every few minutes while Pi stays open.
  *
  * Other extensions reach it through the event bus, whatever the load order: "claude-login:source" carries a
- * ClaudeLoginSource, at load and on every "claude-login:source-request". An extension that finds none goes without
- * the renewal.
+ * ClaudeLoginSource, at load and on every "claude-login:source-request". An extension that finds none reads the
+ * logins itself, without the renewal and the account check.
  */
 
 import { type ExtensionAPI, type ExtensionContext, getAgentDir } from "@earendil-works/pi-coding-agent";
@@ -45,6 +54,13 @@ const MAX_RETRY_MS = 60 * 60_000;
 const TIMEOUT_MS = 30_000;
 /** A token that runs out within this margin counts as run out. */
 const MARGIN_MS = 60_000;
+const MODELS_URL = "https://api.anthropic.com/v1/models?limit=1";
+const ORGANIZATION_HEADER = "anthropic-organization-id";
+const ORGANIZATION_TIMEOUT_MS = 5_000;
+/** A token whose organization could not be told is asked again after this wait. */
+const ORGANIZATION_RETRY_MS = 60_000;
+/** Organizations kept; a renewal brings a new token, so older ones are dropped. */
+const ORGANIZATION_CACHE_SIZE = 16;
 
 /** What "claude-login:source" carries. */
 export interface ClaudeLoginSource {
@@ -52,9 +68,29 @@ export interface ClaudeLoginSource {
 	 * Renews a run-out claude.ai login: Pi's own through Pi's credential store, else Claude Code's through Claude Code.
 	 * True when one of the two tokens is valid afterwards. Joins a renewal that is running, and answers false at once
 	 * while the wait after the last one lasts. Never rejects. To be called once the caller found no valid token, not
-	 * before.
+	 * before. token() does this itself.
 	 */
 	renew(): Promise<boolean>;
+	/**
+	 * The claude.ai access token to use: Pi's own login first, then Claude Code's, valid for at least another minute.
+	 * With renew (the default) a run-out login is renewed by its owner first, as renew() does. While
+	 * CLAUDE_CODE_OAUTH_TOKEN is set, a login of another organization is passed over. Without a token, reason says
+	 * whether there was none or only ones of another account. Never rejects.
+	 */
+	token(options?: { renew?: boolean }): Promise<ClaudeLoginToken | ClaudeLoginRefusal>;
+}
+
+/** What token() answers with a token: whose login it is, and whether it was renewed for this call. */
+export interface ClaudeLoginToken {
+	value: string;
+	source: "pi" | "claude-code";
+	renewed: boolean;
+}
+
+/** What token() answers without one: no valid login, or only logins of another account than CLAUDE_CODE_OAUTH_TOKEN. */
+export interface ClaudeLoginRefusal {
+	value?: undefined;
+	reason: "none" | "other-account";
 }
 
 function claudeDir(): string {
@@ -165,15 +201,16 @@ const piGate = ((globalThis as Record<symbol, unknown>)[Symbol.for("pi.claude-lo
 	retryMs: RETRY_MS,
 }) as Gate;
 
-/** Pi's own Anthropic login as auth.json holds it: whether it is an OAuth login that can be renewed, and whether it is valid. */
-async function piLogin(): Promise<{ renewable: boolean; valid: boolean }> {
+/**
+ * Pi's own Anthropic login as auth.json holds it: whether it is an OAuth login that can be renewed, whether it is
+ * valid, and its access token while it is.
+ */
+async function piLogin(): Promise<{ renewable: boolean; valid: boolean; access?: string }> {
 	try {
 		const a = JSON.parse(await readFile(path.join(getAgentDir(), "auth.json"), "utf8"))?.anthropic;
 		if (a?.type !== "oauth") return { renewable: false, valid: false };
-		return {
-			renewable: typeof a.refresh === "string" && a.refresh !== "",
-			valid: typeof a.access === "string" && a.access !== "" && typeof a.expires === "number" && a.expires > Date.now() + MARGIN_MS,
-		};
+		const valid = typeof a.access === "string" && a.access !== "" && typeof a.expires === "number" && a.expires > Date.now() + MARGIN_MS;
+		return { renewable: typeof a.refresh === "string" && a.refresh !== "", valid, ...(valid ? { access: a.access } : {}) };
 	} catch {
 		return { renewable: false, valid: false };
 	}
@@ -210,14 +247,20 @@ async function renewPiLogin(ctx: ExtensionContext | null): Promise<boolean> {
 	return running;
 }
 
-/** Whether Claude Code's access token is valid for at least another minute. */
-async function claudeCodeLoginValid(): Promise<boolean> {
+/** Claude Code's access token while it is valid for at least another minute, else undefined. */
+async function claudeCodeAccess(): Promise<string | undefined> {
 	try {
 		const o = (await claudeCodeCredentials())?.claudeAiOauth;
-		return typeof o?.accessToken === "string" && o.accessToken !== "" && (!o.expiresAt || o.expiresAt > Date.now() + MARGIN_MS);
+		const valid = typeof o?.accessToken === "string" && o.accessToken !== "" && (!o.expiresAt || o.expiresAt > Date.now() + MARGIN_MS);
+		return valid ? o.accessToken : undefined;
 	} catch {
-		return false;
+		return undefined;
 	}
+}
+
+/** Whether Claude Code's access token is valid for at least another minute. */
+async function claudeCodeLoginValid(): Promise<boolean> {
+	return (await claudeCodeAccess()) !== undefined;
 }
 
 async function askClaudeCodeForUsage(): Promise<void> {
@@ -230,6 +273,8 @@ async function askClaudeCodeForUsage(): Promise<void> {
 		// The subscription login, as the claude-sdk provider runs Claude Code; and usage counts as nonessential traffic.
 		ANTHROPIC_API_KEY: undefined,
 		ANTHROPIC_AUTH_TOKEN: undefined,
+		// It outranks the stored login, which would then be neither used nor renewed.
+		CLAUDE_CODE_OAUTH_TOKEN: undefined,
 		CLAUDE_CODE_USE_BEDROCK: undefined,
 		CLAUDE_CODE_USE_VERTEX: undefined,
 		CLAUDE_CODE_USE_FOUNDRY: undefined,
@@ -279,6 +324,104 @@ function renewClaudeLogin(): Promise<boolean> {
 	return running;
 }
 
+/** Process-wide, so the runtimes /reload replaces share what they learnt. */
+interface Organizations {
+	/** Token hash -> organization id, oldest first. */
+	known: Map<string, string>;
+	/** Token hash -> when its organization could last not be told. */
+	failedAt: Map<string, number>;
+	/** Token hash -> the request that is running. */
+	asking: Map<string, Promise<string | undefined>>;
+}
+
+const organizations = ((globalThis as Record<symbol, unknown>)[Symbol.for("pi.claude-login.organizations.v1")] ??= {
+	known: new Map(),
+	failedAt: new Map(),
+	asking: new Map(),
+}) as Organizations;
+
+function tokenHash(token: string): string {
+	return createHash("sha256").update(token).digest("hex");
+}
+
+/**
+ * The organization a claude.ai token belongs to, from the header GET /v1/models answers with, or undefined when it
+ * cannot be told now; asked again ORGANIZATION_RETRY_MS after that. Joins a request that is running.
+ */
+async function organizationOf(token: string): Promise<string | undefined> {
+	const key = tokenHash(token);
+	const known = organizations.known.get(key);
+	if (known) return known;
+	const running = organizations.asking.get(key);
+	if (running) return running;
+	if (Date.now() - (organizations.failedAt.get(key) ?? 0) < ORGANIZATION_RETRY_MS) return undefined;
+	const asking = (async () => {
+		try {
+			const response = await fetch(MODELS_URL, {
+				headers: { Authorization: `Bearer ${token}`, "anthropic-version": "2023-06-01", "anthropic-beta": "oauth-2025-04-20" },
+				signal: AbortSignal.timeout(ORGANIZATION_TIMEOUT_MS),
+			});
+			const organization = response.ok ? response.headers.get(ORGANIZATION_HEADER) : null;
+			await response.body?.cancel().catch(() => {});
+			if (organization) {
+				organizations.known.set(key, organization);
+				organizations.failedAt.delete(key);
+				for (const old of organizations.known.keys()) {
+					if (organizations.known.size <= ORGANIZATION_CACHE_SIZE) break;
+					organizations.known.delete(old);
+				}
+				return organization;
+			}
+		} catch {
+			// no network, or no answer in time
+		}
+		organizations.failedAt.set(key, Date.now());
+		return undefined;
+	})().finally(() => organizations.asking.delete(key));
+	organizations.asking.set(key, asking);
+	return asking;
+}
+
+/**
+ * Whether a login's token belongs to the account of CLAUDE_CODE_OAUTH_TOKEN: true without that variable, and while
+ * either organization cannot be told.
+ */
+async function sameAccount(token: string): Promise<boolean> {
+	const reference = process.env.CLAUDE_CODE_OAUTH_TOKEN?.trim();
+	if (!reference || reference === token) return true;
+	const [wanted, found] = await Promise.all([organizationOf(reference), organizationOf(token)]);
+	return !wanted || !found || wanted === found;
+}
+
+/** ClaudeLoginSource.token: Pi's login, then Claude Code's, each renewed first when it ran out and renew is set. */
+async function loginToken(ctx: ExtensionContext | null, renew: boolean): Promise<ClaudeLoginToken | ClaudeLoginRefusal> {
+	let otherAccount = false;
+
+	let access = (await piLogin()).access;
+	let renewed = false;
+	if (!access && renew && (await renewPiLogin(ctx).catch(() => false))) {
+		access = (await piLogin()).access;
+		renewed = access !== undefined;
+	}
+	if (access) {
+		if (await sameAccount(access)) return { value: access, source: "pi", renewed };
+		otherAccount = true;
+	}
+
+	access = await claudeCodeAccess();
+	renewed = false;
+	if (!access && renew && (await renewClaudeLogin())) {
+		access = await claudeCodeAccess();
+		renewed = access !== undefined;
+	}
+	if (access) {
+		if (await sameAccount(access)) return { value: access, source: "claude-code", renewed };
+		otherAccount = true;
+	}
+
+	return { reason: otherAccount ? "other-account" : "none" };
+}
+
 export default function (pi: ExtensionAPI) {
 	/** The session's context, for Pi's model registry; without a session only Claude Code's login is renewed. */
 	let ctx: ExtensionContext | null = null;
@@ -291,6 +434,7 @@ export default function (pi: ExtensionAPI) {
 
 	const source: ClaudeLoginSource = {
 		renew: async () => (await renewPiLogin(ctx).catch(() => false)) || renewClaudeLogin(),
+		token: (options) => loginToken(ctx, options?.renew ?? true).catch((): ClaudeLoginRefusal => ({ reason: "none" })),
 	};
 	pi.events.on("claude-login:source-request", () => pi.events.emit("claude-login:source", source));
 	pi.events.emit("claude-login:source", source);

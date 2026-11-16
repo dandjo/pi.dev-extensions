@@ -45,15 +45,17 @@
  *   handler, the context usage handler, the shared control answers (get_usage) or the initialize state on.
  *   loadBridge() imports a repaired copy
  *   (~/.cache/pi-remote-control); a repair the bundle has no shape for is left out, and /rc warns about it.
- * - Login: the claude.ai OAuth token of Claude Code (~/.claude/.credentials.json; it has the user:sessions:claude_code
- *   scope), read fresh for every request and never refreshed here. Claude Code refreshes it while the claude-sdk
- *   provider runs it, which is why Remote Control is offered only while a Claude model is active: switching to another
- *   model ends the connection. Pi's own Anthropic login (~/.pi/agent/auth.json) is the fallback. Claude Code renews the
- *   token only when it makes a request, so after hours without a prompt it has run out and the four-hourly renewal of
- *   the worker credential fails; then claude-login.ts is asked ("claude-login:source" on the event bus) to have
- *   the owner renew a login: Pi its own under the lock of its credential store, else Claude Code its own under
- *   Claude Code's lock. Without that extension a login that ran out stays run out until a prompt renews it. A renewal that keeps failing for five minutes goes into the session log with its
- *   reason, and so does the reconnect after it.
+ * - Login: a claude.ai OAuth token with the user:sessions:claude_code scope, from claude-login.ts ("claude-login:source"
+ *   on the event bus): Pi's own Anthropic login (~/.pi/agent/auth.json) first, then Claude Code's
+ *   (~/.claude/.credentials.json), and while CLAUDE_CODE_OAUTH_TOKEN is set only a login of that token's account, the
+ *   one the claude-sdk provider's prompts run on (the setup token itself cannot open Remote Control sessions). It is
+ *   read fresh for every request and never refreshed here. Remote Control is offered only while a Claude model is
+ *   active: switching to another model ends the connection. Both logins are renewed only by a request of their owner,
+ *   so after hours without a prompt the token has run out and the four-hourly renewal of the worker credential fails;
+ *   claude-login.ts then has the owner renew a login: Pi its own under the lock of its credential store, else Claude
+ *   Code its own under Claude Code's lock. Without that extension the token is read here in the same order, without
+ *   renewal and account check, and a login that ran out stays run out until a prompt renews it. A renewal that keeps
+ *   failing for five minutes goes into the session log with its reason, and so does the reconnect after it.
  * - What the app sees: the conversation so far, then every user prompt, assistant message (text, thinking, tool calls
  *   under Claude Code's tool names) and tool result, and a result after each run. Permission prompts do not exist in
  *   Pi, so the app never has to approve anything.
@@ -324,11 +326,18 @@ function claudeSdkDir(): string | undefined {
 }
 
 /**
- * The claude.ai access token: Claude Code's first (it carries the sessions scope), then Pi's own Anthropic login. Claude
- * Code renews its token only when it makes a request (see claude-login.ts). Never printed, never written anywhere.
+ * The claude.ai access token while claude-login.ts is not loaded: Pi's own Anthropic login first, then Claude Code's,
+ * as claude-login.ts hands them out, but without its account check. Never printed, never written anywhere.
  */
 async function readAccessToken(): Promise<Token | null> {
 	const now = Date.now() + 60_000;
+	try {
+		const auth = JSON.parse(await readFile(path.join(getAgentDir(), "auth.json"), "utf8"));
+		const a = auth?.anthropic;
+		if (typeof a?.access === "string" && a.access && (!a.expires || a.expires > now)) return { value: a.access, source: "pi" };
+	} catch {
+		// no Pi login
+	}
 	try {
 		const o = (await claudeCodeCredentials())?.claudeAiOauth;
 		if (typeof o?.accessToken === "string" && o.accessToken && (!o.expiresAt || o.expiresAt > now)) {
@@ -337,17 +346,12 @@ async function readAccessToken(): Promise<Token | null> {
 	} catch {
 		// no Claude Code login
 	}
-	try {
-		const auth = JSON.parse(await readFile(path.join(getAgentDir(), "auth.json"), "utf8"));
-		const a = auth?.anthropic;
-		if (typeof a?.access === "string" && a.access && (!a.expires || a.expires > now)) return { value: a.access, source: "pi" };
-	} catch {
-		// no Pi login
-	}
 	return null;
 }
 
-const LOGIN_HINT = "Remote Control needs a claude.ai login: run `claude`, then /login, and try /remote-control again.";
+const LOGIN_HINT = "Remote Control needs a claude.ai login: run /login in Pi (Anthropic) or in Claude Code, and try /remote-control again.";
+const OTHER_ACCOUNT_HINT =
+	"Remote Control needs a claude.ai login of the account CLAUDE_CODE_OAUTH_TOKEN belongs to: run /login in Pi (Anthropic) or in Claude Code with that account, and try /remote-control again.";
 /** Added to LOGIN_HINT while claude-login.ts is not loaded: the login may only have run out. */
 const NO_RENEWAL_HINT = " A login that ran out while Pi idled is renewed by claude-login.ts, which is not loaded.";
 
@@ -1053,9 +1057,29 @@ interface ClaudeLoginSource {
 	 * Renews a run-out claude.ai login: Pi's own through Pi's credential store, else Claude Code's through Claude Code.
 	 * True when one of the two tokens is valid afterwards. Joins a renewal that is running, and answers false at once
 	 * while the wait after the last one lasts. Never rejects. To be called once the caller found no valid token, not
-	 * before.
+	 * before. token() does this itself.
 	 */
 	renew(): Promise<boolean>;
+	/**
+	 * The claude.ai access token to use: Pi's own login first, then Claude Code's, valid for at least another minute.
+	 * With renew (the default) a run-out login is renewed by its owner first, as renew() does. While
+	 * CLAUDE_CODE_OAUTH_TOKEN is set, a login of another organization is passed over. Without a token, reason says
+	 * whether there was none or only ones of another account. Never rejects. Missing in older versions.
+	 */
+	token?(options?: { renew?: boolean }): Promise<ClaudeLoginToken | ClaudeLoginRefusal>;
+}
+
+/** What token() answers with a token: whose login it is, and whether it was renewed for this call. */
+interface ClaudeLoginToken {
+	value: string;
+	source: "pi" | "claude-code";
+	renewed: boolean;
+}
+
+/** What token() answers without one: no valid login, or only logins of another account than CLAUDE_CODE_OAUTH_TOKEN. */
+interface ClaudeLoginRefusal {
+	value?: undefined;
+	reason: "none" | "other-account";
 }
 
 /**
@@ -1653,8 +1677,8 @@ export default function (pi: ExtensionAPI) {
 	// --- HTTP calls the SDK module does not export -------------------------------------------------------------------
 
 	async function sessionRequest(method: "PUT" | "POST", sessionId: string, suffix: string, body: Json, timeoutMs: number): Promise<number | null> {
-		const token = await readAccessToken();
-		if (!token) return null;
+		const token = await accessToken(false);
+		if ("reason" in token) return null;
 		try {
 			const response = await fetch(`${API_BASE_URL}/v1/code/sessions/${sessionId}${suffix}`, {
 				method,
@@ -1789,8 +1813,8 @@ export default function (pi: ExtensionAPI) {
 		const uuid = typeof attachment.file_uuid === "string" ? attachment.file_uuid : "";
 		if (!/^[A-Za-z0-9_-]+$/.test(uuid)) return null;
 		const name = typeof attachment.file_name === "string" ? attachment.file_name : "attachment";
-		const token = await readAccessToken();
-		if (!token) return null;
+		const token = await accessToken(false);
+		if ("reason" in token) return null;
 		try {
 			const response = await fetch(`${API_BASE_URL}/api/oauth/files/${encodeURIComponent(uuid)}/content`, {
 				headers: { Authorization: `Bearer ${token.value}`, "User-Agent": `claude-code/${version}` },
@@ -2488,22 +2512,39 @@ export default function (pi: ExtensionAPI) {
 
 	// --- Credentials and recovery --------------------------------------------------------------------------------------
 
-	const loginHint = () => (loginSource ? LOGIN_HINT : LOGIN_HINT + NO_RENEWAL_HINT);
+	/** Why there is no token, for the user. */
+	const loginHint = (refusal: ClaudeLoginRefusal) =>
+		refusal.reason === "other-account" ? OTHER_ACCOUNT_HINT : loginSource ? LOGIN_HINT : LOGIN_HINT + NO_RENEWAL_HINT;
 
-	/** The access token, after having a run-out login renewed by its owner (claude-login.ts); a renewal goes into the session log. */
-	async function accessToken(): Promise<Token | null> {
+	/** What to do about a login the server rejected. */
+	const rejectedHint = (token: Token) =>
+		`Claude.ai login was rejected — run /login in ${token.source === "pi" ? "Pi (Anthropic)" : "Claude Code"}, then /remote-control.`;
+
+	/**
+	 * The access token from claude-login.ts: Pi's login first, then Claude Code's, with renew a run-out one renewed by its
+	 * owner first, and while CLAUDE_CODE_OAUTH_TOKEN is set only one of that token's account. An older claude-login.ts
+	 * only renews, and without the extension the token is read here. A renewal goes into the session log.
+	 */
+	async function accessToken(renew = true): Promise<Token | ClaudeLoginRefusal> {
+		if (typeof loginSource?.token === "function") {
+			const token = await loginSource.token({ renew });
+			if ("reason" in token) return token;
+			if (token.renewed) note("Remote Control had the claude.ai login renewed, which had run out.");
+			return { value: token.value, source: token.source };
+		}
 		const token = await readAccessToken();
-		if (token || !(await loginSource?.renew())) return token;
+		if (token) return token;
+		if (!renew || !(await loginSource?.renew())) return { reason: "none" };
 		note("Remote Control had the claude.ai login renewed, which had run out.");
-		return readAccessToken();
+		return (await readAccessToken()) ?? { reason: "none" };
 	}
 
 	async function fetchCredentials(module: BridgeModule, sessionId: string): Promise<RemoteCredentials | { error: string; terminal: boolean }> {
 		const token = await accessToken();
-		if (!token) return { error: loginHint(), terminal: false };
+		if ("reason" in token) return { error: loginHint(token), terminal: false };
 		const result = await module.fetchRemoteCredentials(sessionId, API_BASE_URL, token.value, HTTP_TIMEOUT_MS);
 		if (result && typeof result === "object" && typeof (result as Json).worker_jwt === "string") return result as RemoteCredentials;
-		if (module.isCredentialsRejection(result)) return { error: "Claude.ai login was rejected — run /login in Claude Code, then /remote-control.", terminal: true };
+		if (module.isCredentialsRejection(result)) return { error: rejectedHint(token), terminal: true };
 		if (module.isCredentialsFailure(result)) {
 			const r = result as Json;
 			const reason = r.reason === "untrusted_device"
@@ -2782,7 +2823,7 @@ export default function (pi: ExtensionAPI) {
 		setStatus("⇄ /rc connecting…");
 		try {
 			const token = await accessToken();
-			if (!token) throw new Error(loginHint());
+			if ("reason" in token) throw new Error(loginHint(token));
 			const loaded = await loadBridge();
 			version = loaded.version;
 			const patches = loaded.patches;
@@ -2791,7 +2832,7 @@ export default function (pi: ExtensionAPI) {
 
 			const created = await module.createCodeSession(API_BASE_URL, token.value, title, HTTP_TIMEOUT_MS, undefined, undefined, cwd, modelId);
 			if (typeof created !== "string") {
-				if (module.isCredentialsRejection(created)) throw new Error("Claude.ai login was rejected — run /login in Claude Code, then /remote-control.");
+				if (module.isCredentialsRejection(created)) throw new Error(rejectedHint(token));
 				if (module.isCreateSessionFailure(created)) {
 					const r = created as Json;
 					const detail = typeof r.detail === "string" && r.detail ? `: ${r.detail}` : "";
