@@ -1,0 +1,445 @@
+/**
+ * Wait: a tool that waits for something to happen without spending model requests on it — a CI pipeline, a deploy, a
+ * service coming up, a file appearing. Each poll the model makes itself is a request that reads the whole context
+ * again; this tool polls on its own.
+ *
+ * - wait runs a shell command, or calls another of Pi's tools (gitlab, openproject, web_fetch, …), every interval
+ *   seconds (default 30) until a condition holds: the output matches a regular expression ("match", the default with
+ *   match), no longer matches it ("nomatch"), the check succeeds ("success", the default without match), fails
+ *   ("failure"), or its output changes ("change"). It gives up after timeout minutes (default 30). The first check
+ *   runs at once.
+ * - In the foreground the call returns when the condition holds, with the last output. It stops early when the user
+ *   sends a message, so a long wait never shuts them out; Esc stops it. The tool row shows the checks so far.
+ * - background: true (shell commands only) returns at once. When the condition holds or the wait gives up, a message
+ *   brings the result into the conversation and starts a turn when Pi is idle. /waits lists the background waits;
+ *   cancel: "<id>" or /waits cancel <id> stops one. Background waits end with the session (also on /reload).
+ * - A bash call that sleeps 15 seconds or more right after another bash call that did is refused with a pointer to
+ *   wait. {"nudge": false} in ~/.pi/agent/wait.json turns that off.
+ */
+
+import { spawn } from "node:child_process";
+import { readFileSync } from "node:fs";
+import path from "node:path";
+import { StringEnum } from "@earendil-works/pi-ai";
+import { type ExtensionAPI, type ExtensionContext, getAgentDir } from "@earendil-works/pi-coding-agent";
+import { Text } from "@earendil-works/pi-tui";
+import { Type } from "typebox";
+
+const CONFIG_FILE = path.join(getAgentDir(), "wait.json");
+const MESSAGE_TYPE = "wait";
+const MAX_OUTPUT = 256 * 1024;
+const RESULT_CHARS = 2000;
+const RESULT_LINES = 40;
+const NUDGE_SLEEP_S = 15;
+const NUDGE_WINDOW_MS = 10 * 60_000;
+
+type Until = "match" | "nomatch" | "success" | "failure" | "change";
+type Status = "met" | "timeout" | "interrupted" | "cancelled" | "aborted";
+
+interface Check {
+	ok: boolean;
+	output: string;
+	code?: number | null;
+	note?: string;
+}
+
+interface Spec {
+	label: string;
+	command?: string;
+	tool?: string;
+	args?: unknown;
+	until: Until;
+	regex?: RegExp;
+	intervalMs: number;
+	timeoutMs: number;
+}
+
+interface WaitDetails {
+	id?: string;
+	label: string;
+	condition: string;
+	status: Status | "running" | "background";
+	checks: number;
+	elapsedMs: number;
+}
+
+interface Background {
+	id: string;
+	spec: Spec;
+	started: number;
+	checks: number;
+	abort: AbortController;
+}
+
+function loadNudge(): boolean {
+	try {
+		return JSON.parse(readFileSync(CONFIG_FILE, "utf8"))?.nudge !== false;
+	} catch {
+		return true;
+	}
+}
+
+function formatDuration(ms: number): string {
+	const s = Math.round(ms / 1000);
+	if (s < 60) return `${s}s`;
+	const m = Math.floor(s / 60);
+	return m < 60 ? `${m}m ${s % 60}s` : `${Math.floor(m / 60)}h ${m % 60}m`;
+}
+
+function oneLine(text: string, max: number): string {
+	const flat = text.replace(/\s+/g, " ").trim();
+	return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
+}
+
+/** The end of an output, within RESULT_CHARS and RESULT_LINES. */
+function tail(output: string): string {
+	const trimmed = output.replace(/\s+$/, "");
+	let lines = trimmed.split("\n");
+	let cut = false;
+	if (lines.length > RESULT_LINES) {
+		lines = lines.slice(-RESULT_LINES);
+		cut = true;
+	}
+	let text = lines.join("\n");
+	if (text.length > RESULT_CHARS) {
+		text = text.slice(-RESULT_CHARS);
+		cut = true;
+	}
+	return cut ? `…\n${text}` : text || "(no output)";
+}
+
+function describeCondition(spec: Spec): string {
+	switch (spec.until) {
+		case "match":
+			return `output matches /${spec.regex?.source}/`;
+		case "nomatch":
+			return `output no longer matches /${spec.regex?.source}/`;
+		case "success":
+			return spec.command ? "command exits 0" : "the tool call succeeds";
+		case "failure":
+			return spec.command ? "command fails" : "the tool call fails";
+		case "change":
+			return "output changes";
+	}
+}
+
+/** Runs the command in bash, its output (stdout and stderr) kept to the last MAX_OUTPUT characters. */
+function runCommand(command: string, cwd: string, timeoutMs: number, signal: AbortSignal): Promise<Check> {
+	return new Promise((resolve) => {
+		let output = "";
+		let note: string | undefined;
+		const child = spawn("bash", ["-c", command], { cwd, detached: true, stdio: ["ignore", "pipe", "pipe"] });
+		const add = (chunk: Buffer) => {
+			output += chunk.toString("utf8");
+			if (output.length > MAX_OUTPUT) output = output.slice(-MAX_OUTPUT);
+		};
+		child.stdout?.on("data", add);
+		child.stderr?.on("data", add);
+		const kill = () => {
+			try {
+				if (child.pid) process.kill(-child.pid, "SIGKILL");
+			} catch {
+				// Already gone.
+			}
+		};
+		const timer = setTimeout(() => {
+			note = `check timed out after ${formatDuration(timeoutMs)}`;
+			kill();
+		}, timeoutMs);
+		const onAbort = () => kill();
+		signal.addEventListener("abort", onAbort, { once: true });
+		const finish = (code: number | null, error?: Error) => {
+			clearTimeout(timer);
+			signal.removeEventListener("abort", onAbort);
+			if (error) note = error.message;
+			resolve({ ok: code === 0 && !note, output, code, note });
+		};
+		child.on("error", (error) => finish(null, error));
+		child.on("close", (code) => finish(code));
+	});
+}
+
+async function runTool(ctx: any, name: string, args: unknown, signal: AbortSignal): Promise<Check> {
+	const outcome = await ctx.executeTool(name, args ?? {}, { signal });
+	const content: any[] = outcome?.result?.content ?? [];
+	const output = content
+		.filter((c) => c.type === "text")
+		.map((c) => c.text as string)
+		.join("\n");
+	return { ok: !outcome?.isError, output };
+}
+
+/** Sleeps, waking once a second for the abort signal and, in the foreground, for a message from the user. */
+async function pause(ms: number, signal: AbortSignal, interrupted?: () => boolean): Promise<void> {
+	const end = Date.now() + ms;
+	while (Date.now() < end) {
+		if (signal.aborted || interrupted?.()) return;
+		await new Promise((r) => setTimeout(r, Math.min(1000, end - Date.now())));
+	}
+}
+
+function resultText(spec: Spec, status: Status, checks: number, elapsedMs: number, last: Check | undefined, id?: string): string {
+	const who = id ? `Background wait ${id} (${spec.label})` : "Waited";
+	const span = `${formatDuration(elapsedMs)}, ${checks} check${checks === 1 ? "" : "s"}`;
+	const head = {
+		met: `${id ? `${who}: condition` : "Condition"} met after ${span}: ${describeCondition(spec)}.`,
+		timeout: `${id ? `${who} gave up` : "Gave up"} after ${span}; condition not met: ${describeCondition(spec)}.`,
+		interrupted: `Stopped waiting after ${span} because the user sent a message; not yet: ${describeCondition(spec)}.`,
+		cancelled: `${id ? `${who} was cancelled` : "Cancelled"} after ${span}.`,
+		aborted: `Aborted after ${span}.`,
+	}[status];
+	if (!last) return head;
+	const exit = spec.command ? ` (${last.note ?? `exit ${last.code}`})` : last.ok ? "" : " (error)";
+	return `${head}\nLast output${exit}:\n${tail(last.output)}`;
+}
+
+export default function (pi: ExtensionAPI) {
+	const background = new Map<string, Background>();
+	let counter = 0;
+	let lastSleepPoll: number | undefined;
+
+	/** Runs checks until the condition holds, the time is up, or the wait is stopped. */
+	async function loop(
+		spec: Spec,
+		check: (signal: AbortSignal) => Promise<Check>,
+		signal: AbortSignal,
+		progress: (checks: number, elapsedMs: number, last: Check) => void,
+		interrupted?: () => boolean,
+	): Promise<{ status: Status; checks: number; elapsedMs: number; last?: Check }> {
+		const started = Date.now();
+		let checks = 0;
+		let last: Check | undefined;
+		let baseline: string | undefined;
+		for (;;) {
+			if (signal.aborted) return { status: "aborted", checks, elapsedMs: Date.now() - started, last };
+			last = await check(signal);
+			checks++;
+			if (signal.aborted) return { status: "aborted", checks, elapsedMs: Date.now() - started, last };
+			const met =
+				spec.until === "match"
+					? !!spec.regex?.test(last.output)
+					: spec.until === "nomatch"
+						? !spec.regex?.test(last.output)
+						: spec.until === "success"
+							? last.ok
+							: spec.until === "failure"
+								? !last.ok
+								: baseline !== undefined && last.output !== baseline;
+			if (spec.until === "change" && baseline === undefined) baseline = last.output;
+			const elapsedMs = Date.now() - started;
+			if (met) return { status: "met", checks, elapsedMs, last };
+			if (elapsedMs >= spec.timeoutMs) return { status: "timeout", checks, elapsedMs, last };
+			if (interrupted?.()) return { status: "interrupted", checks, elapsedMs, last };
+			progress(checks, elapsedMs, last);
+			await pause(Math.min(spec.intervalMs, spec.timeoutMs - elapsedMs), signal, interrupted);
+			if (interrupted?.()) return { status: "interrupted", checks, elapsedMs: Date.now() - started, last };
+		}
+	}
+
+	function startBackground(spec: Spec, ctx: ExtensionContext): Background {
+		const id = `w${++counter}`;
+		const entry: Background = { id, spec, started: Date.now(), checks: 0, abort: new AbortController() };
+		background.set(id, entry);
+		const cwd = ctx.cwd;
+		const check = (signal: AbortSignal) => runCommand(spec.command as string, cwd, checkTimeout(spec), signal);
+		void loop(spec, check, entry.abort.signal, (checks) => {
+			entry.checks = checks;
+		}).then((r) => {
+			background.delete(id);
+			if (r.status === "aborted") return;
+			const details: WaitDetails = { id, label: spec.label, condition: describeCondition(spec), status: r.status, checks: r.checks, elapsedMs: r.elapsedMs };
+			pi.sendMessage(
+				{ customType: MESSAGE_TYPE, content: resultText(spec, r.status, r.checks, r.elapsedMs, r.last, id), display: true, details },
+				{ triggerTurn: true, deliverAs: "followUp" },
+			);
+		});
+		return entry;
+	}
+
+	const checkTimeout = (spec: Spec) => Math.min(Math.max(spec.intervalMs, 60_000), 300_000);
+
+	function cancel(id: string): string {
+		const entry = background.get(id);
+		if (!entry) return `No background wait ${id}${background.size ? `; running: ${[...background.keys()].join(", ")}` : ""}.`;
+		entry.abort.abort();
+		background.delete(id);
+		return `Cancelled background wait ${id} (${entry.spec.label}) after ${formatDuration(Date.now() - entry.started)}.`;
+	}
+
+	pi.on("session_shutdown", () => {
+		for (const entry of background.values()) entry.abort.abort();
+		background.clear();
+	});
+
+	// Polling by sleeping in bash costs a model request per poll; point to wait from the second poll in a row.
+	pi.on("tool_call", (event) => {
+		if (event.toolName !== "bash" || (event as { parentToolCallId?: string }).parentToolCallId) return undefined;
+		const command = String((event.input as { command?: unknown }).command ?? "");
+		const sleeps = [...command.matchAll(/\bsleep\s+(\d+(?:\.\d+)?)/g)].map((m) => Number(m[1]));
+		const longest = sleeps.length ? Math.max(...sleeps) : 0;
+		const now = Date.now();
+		if (longest < NUDGE_SLEEP_S) {
+			lastSleepPoll = undefined;
+			return undefined;
+		}
+		const previous = lastSleepPoll;
+		lastSleepPoll = now;
+		if (previous === undefined || now - previous > NUDGE_WINDOW_MS || !loadNudge()) return undefined;
+		lastSleepPoll = undefined;
+		return {
+			block: true,
+			reason:
+				"Not run: this is the second bash call in a row that sleeps to poll, and every poll is a model request that reads the whole context again. " +
+				'Use the wait tool instead, e.g. wait {command: "<check>", match: "<regex>"} or until: "success"; it checks every interval without model requests and returns when the condition holds. ' +
+				"For a single pause that is not a poll, run the command again.",
+		};
+	});
+
+	pi.registerTool({
+		name: "wait",
+		label: "Wait",
+		description:
+			"Wait until something happens, checking it without model requests: run a shell command, or call another tool (gitlab, openproject, web_fetch, …), " +
+			"every interval seconds (default 30) until the condition holds, at most timeout minutes (default 30). " +
+			'until: "match" (output matches the regex match; the default when match is given), "nomatch" (no longer matches), ' +
+			'"success" (exit 0, or the tool call succeeds; the default otherwise), "failure", or "change" (output differs from the first check). ' +
+			"Returns the last output. In the foreground it stops early when the user sends a message. " +
+			"background: true (shell commands only) returns at once and a message brings the result later; cancel: id stops a background wait. " +
+			'Examples: {command: "docker service ps web --format {{.CurrentState}}", match: "^Running"}; ' +
+			'{tool: "gitlab", args: {path: "/projects/42/pipelines/1234"}, match: "\\"status\\": \\"(success|failed|canceled)\\""}; ' +
+			'{command: "curl -fsS https://example.com/health", until: "success", interval: 10}.',
+		promptSnippet: "Wait for a pipeline, deploy, or service without polling (checks run without model requests)",
+		promptGuidelines: [
+			"wait: use it instead of sleep in bash whenever you wait for something to change (CI pipeline, deploy, container or service start, a file or URL appearing); one wait call replaces a poll per model request.",
+			"wait: for GitLab pipelines and jobs, poll the gitlab tool with wait (tool and args) instead of a shell command; never curl with a token.",
+		],
+		parameters: Type.Object({
+			command: Type.Optional(Type.String({ description: "Shell command to run for each check (bash, in the working directory)" })),
+			tool: Type.Optional(Type.String({ description: "Name of another tool to call for each check instead of a command" })),
+			args: Type.Optional(Type.Any({ description: "Arguments for tool" })),
+			match: Type.Optional(Type.String({ description: "JavaScript regular expression (multiline) tested against the output" })),
+			until: Type.Optional(
+				StringEnum(["match", "nomatch", "success", "failure", "change"] as const, {
+					description: "Condition that ends the wait (default: match when match is given, else success)",
+				}),
+			),
+			interval: Type.Optional(Type.Number({ description: "Seconds between checks (default 30, at least 2)" })),
+			timeout: Type.Optional(Type.Number({ description: "Minutes before giving up (default 30, at most 1440)" })),
+			label: Type.Optional(Type.String({ description: "Short description of what is awaited, shown to the user" })),
+			background: Type.Optional(Type.Boolean({ description: "Return at once and report by message later (command only)" })),
+			cancel: Type.Optional(Type.String({ description: "Id of a background wait to cancel (no other parameters)" })),
+		}),
+		annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+
+		async execute(_id, params, signal, onUpdate, ctx) {
+			if (params.cancel) return { content: [{ type: "text", text: cancel(params.cancel) }], details: undefined };
+			if (!params.command === !params.tool) throw new Error("give either command or tool");
+			if (params.tool === "wait") throw new Error("wait cannot wait for itself");
+			let regex: RegExp | undefined;
+			if (params.match !== undefined) {
+				try {
+					regex = new RegExp(params.match, "m");
+				} catch (error) {
+					throw new Error(`match is not a valid regular expression: ${(error as Error).message}`);
+				}
+			}
+			const until = (params.until ?? (regex ? "match" : "success")) as Until;
+			if ((until === "match" || until === "nomatch") && !regex) throw new Error(`until "${until}" needs match`);
+			const spec: Spec = {
+				label: params.label?.trim() || oneLine(params.command ?? `${params.tool} ${JSON.stringify(params.args ?? {})}`, 80),
+				command: params.command,
+				tool: params.tool,
+				args: params.args,
+				until,
+				regex,
+				intervalMs: Math.max(2, params.interval ?? 30) * 1000,
+				timeoutMs: Math.min(Math.max(0.1, params.timeout ?? 30), 1440) * 60_000,
+			};
+
+			if (params.background) {
+				if (!spec.command) throw new Error("background works with command only; wait for a tool in the foreground");
+				const entry = startBackground(spec, ctx);
+				const details: WaitDetails = { id: entry.id, label: spec.label, condition: describeCondition(spec), status: "background", checks: 0, elapsedMs: 0 };
+				return {
+					content: [
+						{
+							type: "text",
+							text:
+								`Waiting in the background as ${entry.id}: ${describeCondition(spec)}, checking every ${formatDuration(spec.intervalMs)} ` +
+								`for up to ${formatDuration(spec.timeoutMs)}. A message brings the result; until then carry on or end your turn.`,
+						},
+					],
+					details,
+				};
+			}
+
+			const abort = new AbortController();
+			const onAbort = () => abort.abort();
+			signal?.addEventListener("abort", onAbort, { once: true });
+			if (signal?.aborted) abort.abort();
+			const check = spec.command
+				? (s: AbortSignal) => runCommand(spec.command as string, ctx.cwd, checkTimeout(spec), s)
+				: (s: AbortSignal) => runTool(ctx, spec.tool as string, spec.args, s);
+			const condition = describeCondition(spec);
+			try {
+				const r = await loop(
+					spec,
+					check,
+					abort.signal,
+					(checks, elapsedMs, last) => {
+						const details: WaitDetails = { label: spec.label, condition, status: "running", checks, elapsedMs };
+						const line = oneLine(last.output.trim().split("\n").at(-1) ?? "", 100);
+						onUpdate?.({ content: [{ type: "text", text: `${checks} checks, ${formatDuration(elapsedMs)}${line ? `: ${line}` : ""}` }], details });
+					},
+					() => ctx.hasPendingMessages(),
+				);
+				if (r.status === "aborted") throw new Error("wait aborted");
+				const details: WaitDetails = { label: spec.label, condition, status: r.status, checks: r.checks, elapsedMs: r.elapsedMs };
+				return { content: [{ type: "text", text: resultText(spec, r.status, r.checks, r.elapsedMs, r.last) }], details };
+			} finally {
+				signal?.removeEventListener("abort", onAbort);
+			}
+		},
+
+		renderCall(args, theme) {
+			let text = theme.fg("toolTitle", theme.bold("wait "));
+			if (args.cancel) return new Text(text + theme.fg("muted", `cancel ${args.cancel}`), 0, 0);
+			const what = args.label || (args.command ? oneLine(String(args.command), 80) : `${args.tool ?? "?"}`);
+			text += theme.fg("accent", what);
+			const until = args.until ?? (args.match ? "match" : "success");
+			text += theme.fg("muted", ` until ${until}${args.match ? ` /${oneLine(String(args.match), 40)}/` : ""}`);
+			if (args.background) text += theme.fg("dim", " (background)");
+			return new Text(text, 0, 0);
+		},
+
+		renderResult(result, { expanded, isPartial }, theme) {
+			const d = result.details as WaitDetails | undefined;
+			const first = result.content[0];
+			const body = first?.type === "text" ? first.text : "";
+			if (!d || expanded) return new Text(theme.fg("toolOutput", body), 0, 0);
+			if (isPartial || d.status === "running") return new Text(theme.fg("warning", `⧗ ${body}`), 0, 0);
+			const icon =
+				d.status === "met" ? theme.fg("success", "✓") : d.status === "background" ? theme.fg("accent", "◆") : theme.fg("warning", "■");
+			return new Text(`${icon} ${theme.fg("muted", body.split("\n")[0])}`, 0, 0);
+		},
+	});
+
+	pi.registerCommand("waits", {
+		description: "List the background waits (/waits cancel <id> stops one)",
+		handler: async (args, ctx) => {
+			const [verb, id] = args.trim().split(/\s+/);
+			if (verb === "cancel" && id) {
+				ctx.ui.notify(cancel(id), "info");
+				return;
+			}
+			if (background.size === 0) {
+				ctx.ui.notify("No background waits.", "info");
+				return;
+			}
+			const rows = [...background.values()].map(
+				(b) => `${b.id}  ${b.spec.label}: ${describeCondition(b.spec)}, ${b.checks} checks, ${formatDuration(Date.now() - b.started)}`,
+			);
+			ctx.ui.notify(rows.join("\n"), "info");
+		},
+	});
+}

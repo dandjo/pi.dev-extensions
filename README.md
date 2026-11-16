@@ -8,8 +8,9 @@ sessions message each other, runs Claude Code's hooks, brings over Claude
 Code's subagents, questions, side questions, goals, loops, scheduled prompts,
 diff view, agent panel, and Remote Control for the Claude app, reads and
 changes OpenProject and GitLab, reads and writes the clipboard, controls your
-Chrome, keeps requests alive through network trouble, and keeps the Claude
-Agent SDK current.
+Chrome, keeps requests alive through network trouble, keeps long
+conversations small, waits for pipelines and deploys without spending
+requests, and keeps the Claude Agent SDK current.
 
 Install it as a Pi package (step 3 of the setup below); `extensions/` holds
 one file per extension.
@@ -41,6 +42,8 @@ one file per extension.
 | `claude-stream-only.ts`    | Keeps Claude Code on streamed responses, so a stalled one cannot leave Pi waiting         | `pi-claude-subscription`                                         |
 | `claude-sdk-update.ts`     | Installs a newer Claude Agent SDK, and with it Claude Code, as soon as there is one       | `pi-claude-subscription`, npm                                    |
 | `network-resilience.ts`    | Claude Code's handling of dropped connections: stall notice, restart, network wait        | —                                                                |
+| `context-gc.ts`            | Cuts thinking and long tool outputs of older turns from the context, in batches           | —                                                                |
+| `wait.ts`                  | Adds `wait`: checks a command or tool until a condition holds, without model requests     | —                                                                |
 
 Every extension is a single file that works on its own. Code that several of
 them need — the [small model](#small-model) choice, the overlay frame,
@@ -66,7 +69,7 @@ What differs is the tool around the model.
   panels, and dialogs, see and change what goes to the model, and react to
   every step of a session. Claude Code offers hooks, skills, MCP servers, and
   a status line script; its interface and agent loop stay closed. All
-  twenty-five extensions here are such files: the GitLab and OpenProject
+  twenty-seven extensions here are such files: the GitLab and OpenProject
   tools, the plan limits in the status line, the diff panel, scheduled
   prompts, messages between sessions. Each can be read in one go, and a fix
   is a commit here, not a wait for the next Claude Code release.
@@ -100,7 +103,7 @@ Where Claude Code stays the better choice:
 ## Set up Pi
 
 Follow the steps in order — together they are the complete setup: Pi itself,
-the Claude subscription, all twenty-five extensions, and the browser connection.
+the Claude subscription, all twenty-seven extensions, and the browser connection.
 Every step except the Chrome switch in step 4 is a
 shell command, so an agent can carry them out as well.
 
@@ -167,7 +170,7 @@ Install this repository as a Pi package:
 pi install git:github.com/dandjo/pi.dev-extensions
 ```
 
-Pi clones it into `~/.pi/agent/git/` and loads all twenty-five extensions from
+Pi clones it into `~/.pi/agent/git/` and loads all twenty-seven extensions from
 there; `pi list` shows the package, and `pi update --extensions` brings new
 versions, new and renamed extensions included. There is no build step and no
 `npm install`: the extensions import only packages Pi provides itself. Each
@@ -1591,6 +1594,78 @@ time out.
   reflect your network, behind a proxy Pi does not know of, for example.
   Checking then stops until Pi restarts, and restarts after a disruption
   follow the 10 seconds alone. Set `probeHost` to a host that answers.
+
+## context-gc
+
+Keeps long conversations small. Every request carries the whole context, and
+in a long session most of it is what older turns left behind: the hidden
+thinking of each response, which stays in the context, long tool outputs, and
+long tool inputs.
+
+- In every turn before the last ten responses, it removes the thinking of the
+  response, cuts tool inputs longer than 2,000 characters (a written file, a
+  long script) to their start and end, and replaces tool outputs longer than
+  4,000 characters with a stub that names the command or file and keeps the
+  first and last lines. Images in tool results go as well. The outputs of
+  `Agent` and `AskUserQuestion` stay.
+- The cuts are Pi's own context edits. The session file keeps everything: the
+  transcript, `/tree`, exports, and the session totals stay complete, and
+  going back with `/tree` to a point before a cut brings the full text back.
+- Every cut makes the provider write its prompt cache anew from the first
+  changed message, so it cuts in batches: at the end of a turn, once at least
+  100k tokens can go. When the cache has expired anyway, after an hour without
+  a request (the lifetime of Claude Code's cache), it cuts whatever it can
+  before the first request, so the cache is rebuilt from the smaller context
+  only. That request carries the cuts itself; they are stored at the end of
+  its turn.
+- The system prompt gains a `context_gc` section that tells the model about
+  the stubs: it should run the command or read the file again rather than
+  guess. The section names the pass, so it changes with every cut. That makes
+  `pi-claude-subscription` synthesize the conversation once, since resuming
+  its own transcript at the last unchanged message would leave out every
+  later response; the requests after it run on the live process again.
+- `/gc` cuts at the next request, regardless of the thresholds. `/gc status`
+  shows the passes so far, the context, and what could go now. A notice names
+  every cut.
+- Replayed over a month of sessions, the batch and cold cuts took about a
+  third off the tokens read from the cache, without more cache writes. Pi's
+  compaction still runs when the context fills up; it is needed far less
+  often.
+- Settings, all optional, in `~/.pi/agent/context-gc.json`: `enabled` (true),
+  `keepRecent` (10 responses), `minResultChars` (4000), `minArgChars` (2000),
+  `batchTokens` (100000), `coldMinutes` (60), `coldMinTokens` (5000),
+  `thinking`, `toolResults`, and `toolArgs` (true each), and `keepTools`
+  (`["Agent", "AskUserQuestion"]`).
+
+## wait
+
+Adds the `wait` tool: it waits for something to happen — a CI pipeline, a
+deploy, a container coming up, a file appearing — without model requests. A
+model that polls on its own sleeps in bash and checks again, and every check
+is a request that reads the whole context.
+
+- `wait` runs a shell command (`command`), or calls another tool (`tool` and
+  `args`: `gitlab`, `openproject`, `web_fetch`, …), every `interval` seconds
+  (30) until the condition holds, for at most `timeout` minutes (30). The
+  first check runs at once.
+- `until` is `match` (the output matches the regular expression `match`, the
+  default when it is given), `nomatch` (no longer matches), `success` (exit 0,
+  or the tool call succeeds; the default otherwise), `failure`, or `change`
+  (the output differs from the first check).
+- In the foreground the call returns when the condition holds, with the last
+  output; the tool row counts the checks meanwhile. It stops early when you
+  send a message, and Esc stops it.
+- `background: true`, for shell commands, returns at once. When the condition
+  holds or the wait gives up, a message brings the result into the
+  conversation and starts a turn when Pi is idle. `/waits` lists the
+  background waits, and `/waits cancel <id>` or the tool's `cancel` stops one.
+  They end with the session, `/reload` included.
+- A GitLab pipeline goes through the `gitlab` tool, so the token stays with
+  it: `{tool: "gitlab", args: {path: "/projects/<id>/pipelines/<pipeline>"},
+  match: "\"status\": \"(success|failed|canceled)\""}`.
+- A bash call that sleeps 15 seconds or more right after another bash call
+  that did is refused, with a pointer to `wait`; running it again goes
+  through. `{"nudge": false}` in `~/.pi/agent/wait.json` turns that off.
 
 ## Small model
 
