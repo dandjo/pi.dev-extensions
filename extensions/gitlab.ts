@@ -273,6 +273,47 @@ class TunnelAgent extends HttpsAgent {
  * One HTTP request through node:http(s), as a Response, through the proxy proxyFor names. Not fetch: it adds
  * Sec-Fetch-Mode: cors to every request, and GitLab answers that with 406 on downloads such as repository archives.
  */
+/** Node's codes for a certificate chain that does not end in a CA it trusts. */
+const UNKNOWN_CA_CODES = new Set([
+	"UNABLE_TO_GET_ISSUER_CERT",
+	"UNABLE_TO_GET_ISSUER_CERT_LOCALLY",
+	"UNABLE_TO_VERIFY_LEAF_SIGNATURE",
+	"SELF_SIGNED_CERT_IN_CHAIN",
+	"DEPTH_ZERO_SELF_SIGNED_CERT",
+	"CERT_UNTRUSTED",
+]);
+
+/** Node's codes for a certificate it refuses for other reasons: run out, not yet valid, or for another host. */
+const BAD_CERTIFICATE_CODES = new Set([
+	"CERT_HAS_EXPIRED",
+	"CERT_NOT_YET_VALID",
+	"CERT_REVOKED",
+	"CERT_SIGNATURE_FAILURE",
+	"ERR_TLS_CERT_ALTNAME_INVALID",
+]);
+
+/**
+ * Why a request failed when the server's certificate could not be verified, else undefined: the error or one of its
+ * causes carries Node's code. A chain that ends in a CA Node does not know (a company proxy's) gets the remedy, as
+ * Node reads NODE_EXTRA_CA_CERTS only at start.
+ * gitlab.ts and openproject.ts carry a copy of this block: change them alike.
+ */
+function certificateProblem(error: unknown): string | undefined {
+	let current: unknown = error;
+	for (let depth = 0; current instanceof Error && depth < 4; depth++, current = current.cause) {
+		const code = (current as { code?: unknown }).code;
+		if (typeof code !== "string") continue;
+		if (UNKNOWN_CA_CODES.has(code)) {
+			return (
+				`its certificate cannot be verified (${current.message}); if a CA Node does not know signed it (a company ` +
+				"proxy's), set NODE_EXTRA_CA_CERTS to a PEM file that holds it and restart Pi"
+			);
+		}
+		if (BAD_CERTIFICATE_CODES.has(code)) return `its certificate is not valid (${current.message})`;
+	}
+	return undefined;
+}
+
 function request(
 	url: URL,
 	method: string,
@@ -342,7 +383,10 @@ async function send(
 			response = await request(current, method, headers, payload?.data, abort);
 		} catch (error) {
 			if (abort.aborted) throw error;
-			throw new Error(`${current.origin} is unreachable: ${error instanceof Error ? error.message : String(error)}`);
+			// Several addresses that all failed (IPv4 and IPv6) come as an AggregateError without a message of its own
+			const plain = error instanceof Error ? error.message || String((error as { code?: unknown }).code ?? error.name) : String(error);
+			const reason = certificateProblem(error) ?? plain;
+			throw new Error(`${current.origin} is unreachable: ${reason}`);
 		}
 		const location = response.headers.get("location");
 		if (method === "GET" && location && response.status >= 300 && response.status < 400 && hop < MAX_REDIRECTS) {

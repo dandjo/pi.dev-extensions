@@ -594,6 +594,8 @@ of the API v3.
   description tells the model.
 - The response headers must arrive within 30 seconds; an upload and the body of
   a download get 5 minutes.
+- A certificate Node cannot verify is reported as [gitlab](#gitlab) does it,
+  with `NODE_EXTRA_CA_CERTS` as the remedy for a CA Node does not know.
 - Writes need no confirmation. The tool's guidelines tell the model to write
   only what you asked for, to upload only files you named for that, to send a
   PATCH with the `lockVersion` of a fresh GET, and to validate an unclear
@@ -700,6 +702,12 @@ written with your permissions.
   Pi's `httpProxy` setting, applied as `HTTPS_PROXY` and `HTTP_PROXY`, or
   those variables themselves, with `NO_PROXY`. HTTPS goes through a `CONNECT`
   tunnel, and a user in the proxy URL is sent as `Proxy-Authorization`.
+- A certificate Node cannot verify ends the call with
+  `… is unreachable: its certificate cannot be verified (…)`. When its chain
+  ends in a CA Node does not know, such as a company proxy's that inspects
+  TLS, the message names the remedy: `NODE_EXTRA_CA_CERTS` pointing to a PEM
+  file with that CA, and a restart of Pi, as Node reads it only at start. A
+  run-out certificate or one for another host is reported as not valid.
 - Writes need no confirmation. The tool's guidelines tell the model to write
   only what you asked for and to read a single issue or merge request before
   changing its description.
