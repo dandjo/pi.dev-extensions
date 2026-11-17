@@ -1297,11 +1297,13 @@ conversation, and Ctrl+B moves a foreground agent to the background. Beyond
 Claude Code, the prompt writes to the agent shown, and Esc interrupts it.
 
 - The panel appears under the editor as soon as a subagent runs: a
-  `main` row, then one row per agent with its type, description, elapsed time,
-  and tokens. At most five rows are visible; the window follows the selection,
-  with `↑ N more` and `↓ N more` for the rest. Finished agents stay 30
-  seconds — completed ones with a green mark, failed or stopped ones with a red
-  one — then disappear. The footer reads `↓ to manage` while the panel exists.
+  `main` row, then one row per agent, `type › description`, with its state,
+  elapsed time, and tokens at the end. At most five rows are visible; the
+  window follows the selection, with `↑ N more` and `↓ N more` for the rest.
+  The state carries the colour: an agent that asks you or waits for your
+  instruction in the warning colour, a completed one in green and dimmed, a
+  failed or stopped one in red. Finished agents stay 30 seconds, then
+  disappear. The footer reads `↓ to manage` while the panel exists.
   The selected row has an arrow (`→`), the accent colour, and the selection
   background, as in Pi's own lists and the `AskUserQuestion` dialog.
 - ↓ on the last line of the prompt (not while browsing history or with the
@@ -1318,9 +1320,9 @@ Claude Code, the prompt writes to the agent shown, and Esc interrupts it.
   written: the task, the assistant's text, each tool call as one line, and
   the first lines of each result. It follows the end while the agent works
   and scrolls like the conversation (wheel, PgUp PgDn), beside the
-  [diff](#diff) panel too. The viewed agent is marked `●` in the panel and
-  `main` becomes `◯`; ↓ Enter (`main`) shows the conversation again, at the
-  scroll position it had.
+  [diff](#diff) panel too. The panel shows the name of the agent or of
+  `main` in bold, whichever conversation is shown; ↓ Enter (`main`) shows the
+  conversation again, at the scroll position it had.
 - While an agent is shown, the prompt writes to it. A working agent reads
   the message after its current step; until then it stands under the
   transcript as not read yet. A finished agent starts again with it and

@@ -15,8 +15,8 @@
  *   panel, or else every foreground agent. Its Agent call returns at once, the conversation goes on, and the report
  *   arrives as a message when the agent finishes. Without a foreground agent, Ctrl+B stays the editor's cursor left.
  * - Opening an agent shows its transcript as it is written — the task, the assistant's text, its tool calls and
- *   results — in place of the conversation above the prompt, as Claude Code does; the panel marks the agent shown
- *   with ●. The view follows the end while the agent works and scrolls like the conversation (wheel, PgUp PgDn).
+ *   results — in place of the conversation above the prompt, as Claude Code does; the panel shows the name of the
+ *   agent shown in bold. The view follows the end while the agent works and scrolls like the conversation (wheel, PgUp PgDn).
  * - While an agent is shown, the prompt writes to it (subagents:message): a working agent reads the message after
  *   its current step, a finished one starts again with it, and the message stands under the transcript until the
  *   agent has read it. Esc interrupts a working agent (subagents:interrupt), which then waits for an instruction;
@@ -483,7 +483,10 @@ export default function (pi: ExtensionAPI) {
 			return isSelected ? theme.bg("selectedBg", cut + " ".repeat(Math.max(0, width - visibleWidth(cut)))) : cut;
 		};
 
-		let main = `${pointer(marked === 0)}${viewing ? "◯" : "●"} ${marked === 0 ? theme.fg("accent", "main") : focused ? "main" : theme.fg("dim", "main")}`;
+		// No status marks of their own: the selection has Pi's arrow, the conversation shown has a bold name, and the
+		// state is the word at the end of a row.
+		const mainName = viewing ? "main" : theme.bold("main");
+		let main = `${pointer(marked === 0)}${marked === 0 ? theme.fg("accent", mainName) : focused || !viewing ? mainName : theme.fg("dim", mainName)}`;
 		if (scroll > 0) {
 			const more = theme.fg("dim", `↑ ${scroll} more`);
 			main = `${truncateToWidth(main, Math.max(0, width - visibleWidth(more) - 1), "…")} ${more}`;
@@ -491,7 +494,7 @@ export default function (pi: ExtensionAPI) {
 		panelLines[lines.length] = 0;
 		lines.push(line(main, marked === 0));
 
-		const label = (entry: Entry) => (entry.kind === "agent" ? entry.row.type : entry.task.kind === "loop wakeup" ? "loop" : "scheduled");
+		const label = (entry: Entry) => (entry.kind === "agent" ? entry.row.type : entry.task.kind === "loop wakeup" ? "↻ loop" : "↻ scheduled");
 		const nameWidth = Math.min(MAX_NAME_WIDTH, Math.max(4, ...list.map((e) => label(e).length)));
 		const statuses = visible.map((e) => (e.kind === "agent" ? statusText(e.row) : `${e.task.kind === "loop wakeup" ? "" : `${e.task.schedule} · `}next ${e.task.next}`));
 		const statusWidth = Math.max(...statuses.map((s) => s.length), 0);
@@ -499,24 +502,38 @@ export default function (pi: ExtensionAPI) {
 			const index = scroll + i + 1;
 			const isSelected = marked === index;
 			const name = truncateToWidth(label(entry), nameWidth, "…").padEnd(nameWidth);
-			const descWidth = Math.max(8, width - 2 - 2 - nameWidth - 2 - statusWidth - 2);
+			const descWidth = Math.max(8, width - 2 - nameWidth - 3 - statusWidth - 2);
 			const desc = truncateToWidth((entry.kind === "agent" ? entry.row.description : entry.task.prompt) || "", descWidth, "…").padEnd(descWidth);
-			let status = statuses[i].padStart(statusWidth);
-			if (!isSelected) status = status.replace(/\d+ queued/, (m) => theme.fg("warning", m));
-			const plain = `${name}  ${desc}  ${status}`;
+			const status = statuses[i].padStart(statusWidth);
 			panelLines[lines.length] = index;
-			const dim = !isSelected && !focused && (entry.kind === "scheduled" || entry.row.agentId !== viewing);
-			const body = isSelected ? theme.fg("accent", plain) : dim ? theme.fg("dim", plain) : plain;
-			if (entry.kind === "scheduled") {
-				lines.push(line(`${pointer(isSelected)}${theme.fg("accent", "↻")} ${body}`, isSelected));
+			const shown = entry.kind === "agent" && entry.row.agentId === viewing;
+			if (isSelected) {
+				const text = `${shown ? theme.bold(name) : name} › ${desc}  ${status}`;
+				lines.push(line(`${pointer(true)}${theme.fg("accent", text)}`, true));
 				return;
 			}
-			const row = entry.row;
-			const icon = row.status === "completed" ? theme.fg("success", "◯") : row.status === "running" ? "◯" : theme.fg("error", "◯");
-			lines.push(line(`${pointer(isSelected)}${row.agentId === viewing ? "●" : icon} ${body}`, isSelected));
+			// Finished agents and, while the panel is not in use, every row recede, all but the agent shown.
+			const recede = entry.kind === "scheduled" ? !focused : !shown && (entry.row.status === "completed" || !focused);
+			const tone = (text: string) => (recede ? theme.fg("dim", text) : text);
+			const state = entry.kind === "agent" ? statusColor(entry.row, status, theme, recede) : tone(status);
+			lines.push(line(`${pointer(false)}${shown ? theme.bold(name) : tone(name)} ${theme.fg("dim", "›")} ${tone(desc)}  ${state}`, false));
 		});
 		if (scroll + visible.length < total) lines.push(theme.fg("dim", `    ↓ ${total - scroll - visible.length} more`));
 		return lines;
+	}
+
+	/**
+	 * The state at the end of an agent's row in the colour of the state: what needs you, what failed, what is done; a
+	 * running agent's in the tone of its row.
+	 */
+	function statusColor(row: Row, status: string, theme: Theme, recede: boolean): string {
+		if (row.status === "running") {
+			if (row.waiting) return theme.fg("warning", status);
+			const text = recede ? theme.fg("dim", status) : status;
+			return text.replace(/\d+ queued/, (m) => theme.fg("warning", m));
+		}
+		if (row.status === "completed") return theme.fg("success", status);
+		return theme.fg("error", status);
 	}
 
 	function statusText(row: Row): string {
@@ -766,7 +783,7 @@ export default function (pi: ExtensionAPI) {
 					? "The prompt gives this agent its instruction · Esc stops it"
 					: "The prompt writes to this agent · Esc interrupts it · ↓ then Enter on main shows the conversation again";
 			const head = [
-				`${theme.fg("accent", "●")} ${theme.bold(current.type)} ${theme.fg("dim", "›")} ${current.description || current.agentId}`,
+				`${theme.fg("accent", theme.bold(current.type))} ${theme.fg("dim", "›")} ${current.description || current.agentId}`,
 				`${stateLine(current, theme)}  ${usageLine(current, theme)}`,
 				theme.fg("dim", help),
 			];
