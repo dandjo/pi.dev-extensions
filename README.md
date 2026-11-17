@@ -1298,7 +1298,8 @@ Claude Code, the prompt writes to the agent shown, and Esc interrupts it.
 
 - The panel appears under the editor as soon as a subagent runs: a
   `main` row, then one row per agent, `type › description`, with its state,
-  elapsed time, and tokens at the end. At most five rows are visible; the
+  elapsed time, and tokens at the end, and a dimmed rule that sets it apart
+  from the status line below. At most five rows are visible; the
   window follows the selection, with `↑ N more` and `↓ N more` for the rest.
   The state carries the colour: an agent that asks you or waits for your
   instruction in the warning colour, a completed one in green and dimmed, a

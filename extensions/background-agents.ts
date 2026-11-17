@@ -529,6 +529,8 @@ export default function (pi: ExtensionAPI) {
 			lines.push(line(`${pointer(false)}${shown ? theme.bold(name) : tone(name)} ${theme.fg("dim", "›")} ${tone(desc)}  ${state}`, false));
 		});
 		if (scroll + visible.length < total) lines.push(theme.fg("dim", `    ↓ ${total - scroll - visible.length} more`));
+		// A rule under the panel: it stands between two rules like the editor, apart from the footer below.
+		lines.push(theme.fg("borderMuted", "─".repeat(Math.max(0, width))));
 		return lines;
 	}
 
