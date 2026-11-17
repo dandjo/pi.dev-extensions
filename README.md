@@ -1027,7 +1027,7 @@ interrupt it, and answer its questions, and it stays alive after its report.
 - Agent types: the built-ins `general-purpose`, `Explore`, and `Plan` (the
   last two without `edit` and `write`), and definitions in Claude Code's format
   — Markdown with `name`, `description`, `tools`, `disallowedTools`, `model`,
-  `effort`, `skills`, `omitClaudeMd`, `background` — from
+  `effort`, `maxTurns`, `skills`, `omitClaudeMd`, `background` — from
   `~/.pi/agent/agents/` and the trusted project's `.pi/agents/`.
   [claude-agents](#claude-agents) adds Claude Code's directories and
   plugins.
@@ -1047,6 +1047,18 @@ interrupt it, and answer its questions, and it stays alive after its report.
 - Model: the call's `model` (a full model id), else the definition's, else the
   current one. [claude-agents](#claude-agents) adds the families `sonnet`,
   `opus`, `haiku`, and `fable`, and a default model.
+- `Explore` runs on `haiku` at medium effort, without the context files, and
+  reports after at most 30 turns. A search of many steps costs a fraction
+  there of what each step costs in a long conversation, and only the report
+  comes back; the model is told to hand such searches to it. Without a
+  `haiku` on the current provider, `Explore` keeps the current model. Claude
+  Code's own `Explore` runs on the parent's model: a user agent named
+  `Explore` with `model: inherit` does the same here.
+- `maxTurns`: at the limit the subagent's step is stopped, and a message of
+  its own asks for the report; a request that came beside a tool result could
+  be taken for an injection. A subagent that calls tools again is stopped,
+  and what it wrote last comes back marked as partial. Either way the report
+  says that the limit was reached, and `resume` lets the subagent go on.
 - Several `Agent` calls in one response run in parallel.
   `run_in_background: true` returns at once; the report arrives later as a
   message that starts a turn, and the footer counts the running agents. A

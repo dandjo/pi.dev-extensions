@@ -3,7 +3,7 @@
  * final report comes back (https://code.claude.com/docs/en/sub-agents).
  *
  * - Agent types: the built-ins general-purpose, Explore, and Plan (read-only: no edit/write), plus definitions in
- *   Claude Code's format (Markdown with name, description, tools, disallowedTools, model, effort, skills,
+ *   Claude Code's format (Markdown with name, description, tools, disallowedTools, model, effort, maxTurns, skills,
  *   omitClaudeMd, background) from <project>/.pi/agents (walking up from the working directory, only once the project
  *   is trusted) and ~/.pi/agent/agents, plus the directories providers add (below). Project beats user beats plugin;
  *   a user or project agent named like a built-in replaces it.
@@ -14,6 +14,13 @@
  * - Model: the call's model, else the definition's (a model family a provider names resolves within the current
  *   provider; a family the current model belongs to keeps the current model), else a provider's default, else the
  *   current model, at the parent's thinking level unless the definition sets effort.
+ * - Explore runs on haiku at medium effort, without the context files, and reports after at most 30 turns: a search
+ *   of many steps costs a fraction there of what it costs in a long conversation, and only the report comes back.
+ *   Without a haiku on the current provider it keeps the current model. (Claude Code's own Explore keeps the parent's
+ *   model; a user agent named Explore with model: inherit does the same here.)
+ * - maxTurns: at the limit the subagent's step is stopped and it is asked for its report, as a message of its own,
+ *   since a request that comes beside a tool result can be taken for an injection. A subagent that calls tools again
+ *   is stopped, and what it wrote last comes back marked as partial. resume continues it.
  * - run_in_background: true (or background: true in the definition) returns at once; the report arrives later as a
  *   message that starts a turn. A foreground subagent can be moved to the background while it runs (Ctrl+B in
  *   background-agents.ts): its Agent call then returns at once in the same way. resume: <agentId> continues an earlier
@@ -124,6 +131,8 @@ interface AgentDef {
 	disallowedTools?: string[];
 	model?: string;
 	effort?: string;
+	/** After this many turns the subagent is stopped and asked for its report. */
+	maxTurns?: number;
 	skills?: string[];
 	omitClaudeMd?: boolean;
 	background?: boolean;
@@ -171,6 +180,7 @@ interface Meta {
 	tools: string[];
 	noMcp: boolean;
 	noContext: boolean;
+	maxTurns?: number;
 	cwd: string;
 	createdAt: number;
 	/** It started with a copy of the conversation, and starts no fork of its own. */
@@ -187,6 +197,8 @@ interface Run {
 	lastStop?: string;
 	/** The user asked for an interrupt, and the subagent has not settled since. */
 	interrupting: boolean;
+	/** maxTurns: its step was stopped at the limit, it was asked for its report, or stopped for going on after that. */
+	turnLimit?: "limit" | "reporting" | "stopped";
 	/** What the user wrote to the subagent during this run. */
 	userMessages: string[];
 	onProgress: (details: RunDetails) => void;
@@ -377,8 +389,12 @@ const BUILT_INS: AgentDef[] = [
 	{
 		name: "Explore",
 		description:
-			'Fast agent specialized for exploring codebases. Use it to quickly find files by patterns, search code for keywords, or answer questions about the codebase. When calling it, state the thoroughness you want: "quick", "medium", or "very thorough".',
+			'Fast agent specialized for exploring codebases, on a small model with its own context: a search of several steps costs far less there than in this conversation, and only its report comes back. Use it to find files by patterns, search code for keywords, or answer questions about the codebase. When calling it, state the thoroughness you want: "quick", "medium", or "very thorough".',
 		prompt: EXPLORE_PROMPT,
+		model: "haiku",
+		effort: "medium",
+		maxTurns: 30,
+		omitClaudeMd: true,
 		source: "built-in",
 	},
 	{
@@ -440,6 +456,7 @@ function loadDir(dir: string, source: string, plugin?: string): AgentDef[] {
 			disallowedTools: list(fm.disallowedTools),
 			model: typeof fm.model === "string" ? fm.model.trim() : undefined,
 			effort: typeof fm.effort === "string" ? fm.effort.trim() : undefined,
+			maxTurns: typeof fm.maxTurns === "number" && fm.maxTurns >= 1 ? Math.floor(fm.maxTurns) : undefined,
 			skills: list(fm.skills),
 			omitClaudeMd: fm.omitClaudeMd === true,
 			background: fm.background === true,
@@ -730,7 +747,16 @@ function settle(child: Child, how: "settled" | "rejected" | "stopped" | "abandon
 	details.waiting = undefined;
 	details.durationMs = Date.now() - details.startedAt;
 	details.output = run.lastText;
-	if (how === "stopped") {
+	const limit = child.meta.maxTurns;
+	if (run.turnLimit === "stopped") {
+		details.notes = [...(details.notes ?? []), `Stopped at its limit of ${limit} turns before it reported: the output is what it wrote last and may be partial. Resume ${details.agentId} to let it go on.`];
+	} else if (run.turnLimit === "reporting") {
+		details.notes = [...(details.notes ?? []), `Reported when it reached its limit of ${limit} turns; the search may be incomplete. Resume ${details.agentId} to let it go on.`];
+	}
+	if (run.turnLimit === "stopped" && how === "settled") {
+		details.status = run.lastText ? "completed" : "failed";
+		if (!run.lastText) details.error = `Stopped at its limit of ${limit} turns without a report.`;
+	} else if (how === "stopped") {
 		details.status = "aborted";
 		details.error = "The subagent was stopped.";
 	} else if (how === "abandoned") {
@@ -833,8 +859,29 @@ function record(child: Child, line: string, hooks: ChildHooks): void {
 		if (text) run.lastText = text;
 		run.lastStop = message.stopReason;
 		run.lastError = message.errorMessage ?? run.lastError;
+		const limit = child.meta.maxTurns;
+		if (limit && message.stopReason === "toolUse") {
+			if (run.turnLimit === "reporting") {
+				run.turnLimit = "stopped";
+				send(child, { type: "abort" });
+			} else if (!run.turnLimit && details.turns >= limit) {
+				run.turnLimit = "limit";
+				send(child, { type: "abort" });
+			}
+		}
 		progress(run);
 	} else if (event.type === "agent_settled") {
+		if (event.aborted && run.turnLimit === "limit") {
+			// Stopped at maxTurns: the report is asked for in a turn of its own.
+			run.turnLimit = "reporting";
+			prompt(
+				child,
+				`${FROM_AGENT}\n\nYou reached your limit of ${child.meta.maxTurns} turns, so your last step was stopped. Call no more tools: reply now with your report — what you found, with paths, and what is still open.`,
+				undefined,
+				true,
+			);
+			return;
+		}
 		if (event.aborted && run.interrupting) {
 			// Interrupted by the user: the run stays open until an instruction settles it, or nobody gives one.
 			run.interrupting = false;
@@ -1375,7 +1422,8 @@ export default function (pi: ExtensionAPI) {
 		return done.then((result) => {
 			abort.signal.removeEventListener("abort", stop);
 			if (running.get(agentId)?.run === run) running.delete(agentId);
-			result.details.notes = notes.length ? notes : undefined;
+			const allNotes = [...notes, ...(result.details.notes ?? [])];
+			result.details.notes = allNotes.length ? allNotes : undefined;
 			result.details.userMessages = result.userMessages.length ? result.userMessages : undefined;
 			finished.push(result.details);
 			if (finished.length > 50) finished.shift();
@@ -1465,6 +1513,9 @@ export default function (pi: ExtensionAPI) {
 			label: "Agent",
 			description: toolDescription(agents),
 			promptSnippet: "Agent: delegate a task to a subagent with its own context window (Explore, Plan, general-purpose, …)",
+			promptGuidelines: [
+				"Agent: hand a search that takes more than a few greps or reads (where something is defined, how a feature works across files, which files use something) to Explore with a thoroughness, instead of reading file after file in this conversation: Explore runs on a small model with its own context, and only its report enters this one. Read or grep yourself when you know the file or need one or two lookups.",
+			],
 			parameters: agentParams(modelFamilies()),
 			executionMode: "parallel",
 
@@ -1518,7 +1569,8 @@ export default function (pi: ExtensionAPI) {
 					if (unmatched.length) notes.push(`Tools in the definition that Pi does not have: ${unmatched.join(", ")}.`);
 					const noMcp = !tools.some((t) => t.startsWith("mcp__")) && !def.mcpServers;
 					const resolved = await resolveModel(ctx, params.model ?? def.model ?? defaultModel());
-					if (resolved.note) notes.push(resolved.note);
+					// A built-in's model is a preference: without it on this provider the current model is no news.
+					if (resolved.note && !(def.source === "built-in" && !params.model)) notes.push(resolved.note);
 					const effort = def.effort && THINKING.has(def.effort) ? def.effort : undefined;
 					meta = {
 						agentId: randomBytes(8).toString("hex"),
@@ -1529,6 +1581,7 @@ export default function (pi: ExtensionAPI) {
 						tools: noMcp ? tools.filter((t) => t !== "tool_search") : tools,
 						noMcp,
 						noContext: def.omitClaudeMd === true,
+						...(def.maxTurns ? { maxTurns: def.maxTurns } : {}),
 						cwd: ctx.cwd,
 						createdAt: Date.now(),
 					};
