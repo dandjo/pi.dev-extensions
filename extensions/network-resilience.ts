@@ -18,7 +18,8 @@
  *   model. Data in the first 5 s after a change does not count: it can be the last bytes of a connection the change
  *   already cut. A change also concerns the requests that start after it, until data comes through: Claude Code, for
  *   one, sends them over a connection opened before the change, which never answers. Such a request is restarted
- *   after 30 s without data, or after 60 s when the last response is more than 5 min old and the prompt cache cold.
+ *   after 30 s without data, or after 60 s when the last response is older than the prompt cache lives
+ *   (cacheWarmMinutes) and the cache is cold.
  *   So is any request silent for 5 min while the host answers. At most three restarts follow each other without a
  *   response in between.
  * - Waiting for the network: before every request that follows a connection error, Pi's own retries included, the
@@ -36,7 +37,10 @@
  *
  * Optional settings in ~/.pi/agent/network-resilience.json: noticeSeconds (20), graceSeconds (10), stallSeconds
  * (300, 0 turns the silence restart off), maxRestarts (3), maxAttempts (10), offlineWaitMinutes (30, 0 turns the
- * waiting off), and probeHost ("host:port" to probe instead of the model's API host).
+ * waiting off), cacheWarmMinutes (how long the provider's prompt cache lives: 5, Anthropic's default; 60 for the
+ * claude-sdk provider, whose cache lives an hour), and probeHost ("host:port" to probe instead of the model's API
+ * host). Under "providers", every key can be set for one provider ({"providers": {"openai": {"cacheWarmMinutes": 10}}});
+ * a key set there wins over the same key at the top, which wins over the built-in values.
  */
 
 import { existsSync, readFileSync } from "node:fs";
@@ -75,8 +79,6 @@ const REUSED_WAIT_MS = 30_000;
  * 100k to 950k tokens to the cache took up to 42 s to their first complete content block (November 2026).
  */
 const REUSED_COLD_WAIT_MS = 60_000;
-/** Anthropic's prompt cache lives 5 min by default: a response this recent leaves it warm. */
-const CACHE_WARM_MS = 5 * 60_000;
 /**
  * Interfaces of containers and virtual machines come and go without touching the route to the API: Linux names, the
  * macOS VM bridges and Apple's peer-to-peer links, and the Windows adapters of WSL, Hyper-V, VirtualBox, and VMware.
@@ -91,6 +93,8 @@ interface Config {
 	maxRestarts: number;
 	maxAttempts: number;
 	offlineWaitMinutes: number;
+	/** A response this recent leaves the prompt cache warm. */
+	cacheWarmMinutes: number;
 	probeHost?: string;
 }
 
@@ -101,18 +105,29 @@ const DEFAULTS: Config = {
 	maxRestarts: 3,
 	maxAttempts: 10,
 	offlineWaitMinutes: 30,
+	cacheWarmMinutes: 5,
 };
 
-function loadConfig(): Config {
-	const config = { ...DEFAULTS };
+/** Built-in values that differ by provider; the claude-sdk provider writes its prompt cache for an hour. */
+const PROVIDER_DEFAULTS: Record<string, Partial<Config>> = {
+	"claude-sdk": { cacheWarmMinutes: 60 },
+};
+
+/** The settings for a provider: built-in values, the file's top level, then the file's entry for the provider. */
+function loadConfig(provider?: string): Config {
+	const config: Config = { ...DEFAULTS, ...(provider ? PROVIDER_DEFAULTS[provider] : undefined) };
+	const apply = (raw: any) => {
+		for (const key of Object.keys(DEFAULTS) as (keyof typeof DEFAULTS)[]) {
+			const value = raw?.[key];
+			if (typeof value === "number" && Number.isFinite(value) && value >= 0) (config as unknown as Record<string, unknown>)[key] = value;
+		}
+		if (typeof raw?.probeHost === "string" && raw.probeHost.trim()) config.probeHost = raw.probeHost.trim();
+	};
 	try {
 		if (!existsSync(CONFIG_FILE)) return config;
 		const raw = JSON.parse(readFileSync(CONFIG_FILE, "utf8"));
-		for (const key of Object.keys(DEFAULTS) as (keyof typeof DEFAULTS)[]) {
-			const value = raw?.[key];
-			if (typeof value === "number" && Number.isFinite(value) && value >= 0) (config as Record<string, unknown>)[key] = value;
-		}
-		if (typeof raw?.probeHost === "string" && raw.probeHost.trim()) config.probeHost = raw.probeHost.trim();
+		apply(raw);
+		if (provider) apply(raw?.providers?.[provider]);
 	} catch {
 		// A broken settings file must not cost the protection: the defaults apply.
 	}
@@ -363,7 +378,8 @@ interface Retry {
 }
 
 export default function (pi: ExtensionAPI): void {
-	const config = loadConfig();
+	/** The settings for the provider of the request under way, read again at every request. */
+	let config = loadConfig();
 	let ctxRef: ExtensionContext | undefined;
 	let request: Request | undefined;
 	let ticker: NodeJS.Timeout | undefined;
@@ -405,7 +421,7 @@ export default function (pi: ExtensionAPI): void {
 		const now = performance.now();
 		request = { started: now, lastData: now, probing: false, lastProbeAt: 0, shown: false, gaveUp: false };
 		if (pendingChange) {
-			const waitMs = now - lastDataAt < CACHE_WARM_MS ? REUSED_WAIT_MS : REUSED_COLD_WAIT_MS;
+			const waitMs = now - lastDataAt < config.cacheWarmMinutes * 60_000 ? REUSED_WAIT_MS : REUSED_COLD_WAIT_MS;
 			request.disruption = { reason: pendingChange.reason, at: pendingChange.at, countsFrom: now, waitMs };
 		}
 	}
@@ -639,6 +655,7 @@ export default function (pi: ExtensionAPI): void {
 
 	pi.on("context", async (_event, ctx) => {
 		ctxRef = ctx;
+		config = loadConfig(ctx.model?.provider);
 		const pending = retry;
 		retry = undefined;
 		if (pending || lastError?.transient) await gate(ctx, pending);

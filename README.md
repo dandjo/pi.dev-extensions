@@ -16,36 +16,56 @@ resumes after edited history.
 Install it as a Pi package (step 3 of the setup below); `extensions/` holds
 one file per extension.
 
-| Extension                  | What it does                                                                              | Needs                                                            |
-| :------------------------- | :---------------------------------------------------------------------------------------- | :--------------------------------------------------------------- |
-| `claude-marketplaces.ts`   | Loads the plugins of Claude Code marketplace packages into Pi and keeps them current      | Each marketplace installed with `pi install`                     |
-| `statusline.ts`            | Replaces Pi's footer with a Claude Code style status line, for any provider               | —                                                                |
-| `claude-usage.ts`          | Adds the Claude subscription limits and usage credits to the status line                  | `statusline.ts`, a Claude subscription login (Pi or Claude Code) |
-| `claude-login.ts`          | Picks the claude.ai login (Pi's, then Claude Code's) and renews it when it ran out        | A Claude subscription login (Pi or Claude Code)                  |
-| `compact-tools.ts`         | Cuts each collapsed tool row to four lines; Ctrl+O shows all of it                        | —                                                                |
-| `web-tools.ts`             | Adds `web_fetch`: reads a page locally and lets a small model answer from it              | —                                                                |
-| `openproject.ts`           | Adds `openproject`: reads and changes OpenProject through its API v3, as you              | An OpenProject API token for each instance                       |
-| `gitlab.ts`                | Adds `gitlab` and `gitlab_pipeline`: GitLab through its API, as you, and its CI in brief  | A GitLab personal access token for each instance                 |
-| `clipboard.ts`             | Adds `clipboard`: the model reads and writes the clipboard, text and images               | Linux: `wl-clipboard` (Wayland) or `xclip`                       |
-| `memory.ts`                | Keeps a memory per project, shared with Claude Code's auto memory when it is there        | —                                                                |
-| `session-title.ts`         | Names each session after its first prompt and shows it in the terminal title              | —                                                                |
-| `session-socket.ts`        | Lets sessions message each other and your Claude Code sessions, as Claude Code does       | Linux or macOS                                                   |
-| `claude-hooks.ts`          | Runs Claude Code's hooks, from settings files and plugins, at Pi's events                 | —                                                                |
-| `ask-user-question.ts`     | Adds `AskUserQuestion`, Claude Code's multiple-choice questions                           | —                                                                |
-| `subagents.ts`             | Adds the `Agent` tool: subagents in their own Pi process, with Pi's agent definitions     | —                                                                |
-| `claude-agents.ts`         | Adds Claude Code's agent definitions, tool names, and model families to `Agent`           | `subagents.ts`                                                   |
-| `btw.ts`                   | `/btw`: a side question about the session that stays out of the conversation              | —                                                                |
-| `goal.ts`                  | `/goal`: keeps working until an evaluator model judges a condition met                    | —                                                                |
-| `scheduled-tasks.ts`       | `/loop`, `/cron`, and the cron tools: prompts on a schedule within the session            | —                                                                |
-| `diff.ts`                  | `/diff`: a panel beside the conversation with the changes and each turn's edits           | git                                                              |
-| `claude-remote-control.ts` | `/remote-control`: drive the session from the Claude app and claude.ai/code               | A Claude model on the Claude Code login                          |
-| `background-agents.ts`     | The agent panel below the prompt: ↓ to the agents, Enter opens one, Ctrl+B to background  | `subagents.ts`                                                   |
-| `claude-stream-only.ts`    | Keeps Claude Code on streamed responses, so a stalled one cannot leave Pi waiting         | `pi-claude-subscription`                                         |
-| `claude-sdk-update.ts`     | Installs a newer Claude Agent SDK, and with it Claude Code, as soon as there is one       | `pi-claude-subscription`, npm                                    |
-| `claude-sdk-resume-fix.ts` | Fixes pi-claude-subscription 0.2.4, which loses responses after edits in older messages   | `pi-claude-subscription`, GitHub at the first start              |
-| `network-resilience.ts`    | Claude Code's handling of dropped connections: stall notice, restart, network wait        | —                                                                |
-| `context-gc.ts`            | Cuts thinking and long tool outputs of older turns from the context, in batches           | —                                                                |
-| `wait.ts`                  | Adds `wait`: checks a command or tool until a condition holds, without model requests     | —                                                                |
+| Extension                   | What it does                                                                              | Needs                                                            |
+| :-------------------------- | :---------------------------------------------------------------------------------------- | :--------------------------------------------------------------- |
+| `statusline.ts`             | Replaces Pi's footer with a Claude Code style status line, for any provider               | —                                                                |
+| `compact-tools.ts`          | Cuts each collapsed tool row to four lines; Ctrl+O shows all of it                        | —                                                                |
+| `web-tools.ts`              | Adds `web_fetch`: reads a page locally and lets a small model answer from it              | —                                                                |
+| `openproject.ts`            | Adds `openproject`: reads and changes OpenProject through its API v3, as you              | An OpenProject API token for each instance                       |
+| `gitlab.ts`                 | Adds `gitlab` and `gitlab_pipeline`: GitLab through its API, as you, and its CI in brief  | A GitLab personal access token for each instance                 |
+| `clipboard.ts`              | Adds `clipboard`: the model reads and writes the clipboard, text and images               | Linux: `wl-clipboard` (Wayland) or `xclip`                       |
+| `memory.ts`                 | Keeps a memory per project, shared with Claude Code's auto memory when it is there        | —                                                                |
+| `session-title.ts`          | Names each session after its first prompt and shows it in the terminal title              | —                                                                |
+| `session-socket.ts`         | Lets sessions message each other and your Claude Code sessions, as Claude Code does       | Linux or macOS                                                   |
+| `ask-user-question.ts`      | Adds `AskUserQuestion`, Claude Code's multiple-choice questions                           | —                                                                |
+| `subagents.ts`              | Adds the `Agent` tool: subagents in their own Pi process, on a tier or a model of choice  | —                                                                |
+| `btw.ts`                    | `/btw`: a side question about the session that stays out of the conversation              | —                                                                |
+| `goal.ts`                   | `/goal`: keeps working until an evaluator model judges a condition met                    | —                                                                |
+| `scheduled-tasks.ts`        | `/loop`, `/cron`, and the cron tools: prompts on a schedule within the session            | —                                                                |
+| `diff.ts`                   | `/diff`: a panel beside the conversation with the changes and each turn's edits           | git                                                              |
+| `background-agents.ts`      | The agent panel below the prompt: ↓ to the agents, Enter opens one, Ctrl+B to background  | `subagents.ts`                                                   |
+| `network-resilience.ts`     | Claude Code's handling of dropped connections: stall notice, restart, network wait        | —                                                                |
+| `context-gc.ts`             | Cuts thinking and long tool outputs of older turns from the context, in batches           | —                                                                |
+| `wait.ts`                   | Adds `wait`: checks a command or tool until a condition holds, without model requests     | —                                                                |
+
+**Claude Code's formats, any model** (`claude-code-*`). They read Claude Code's
+plugins, hooks, and agent definitions and run them in Pi, whichever model
+answers.
+
+| Extension                   | What it does                                                                              | Needs                                                            |
+| :-------------------------- | :---------------------------------------------------------------------------------------- | :--------------------------------------------------------------- |
+| `claude-code-plugins.ts`    | Loads the plugins of Claude Code marketplace packages into Pi and keeps them current      | Each marketplace installed with `pi install`                     |
+| `claude-code-hooks.ts`      | Runs Claude Code's hooks, from settings files and plugins, at Pi's events                 | —                                                                |
+| `claude-code-agents.ts`     | Adds Claude Code's agent definitions, tool names, and model families to `Agent`           | `subagents.ts`                                                   |
+
+**The Claude subscription** (`claude-*`). They need a Claude Code login and
+show nothing without one; Remote Control connects only while a Claude model is
+active.
+
+| Extension                   | What it does                                                                              | Needs                                                            |
+| :-------------------------- | :---------------------------------------------------------------------------------------- | :--------------------------------------------------------------- |
+| `claude-usage.ts`           | Adds the Claude subscription limits and usage credits to the status line                  | `statusline.ts`, a Claude Code login                             |
+| `claude-login.ts`           | Hands out Claude Code's claude.ai login and renews it once it has run out                 | A Claude Code login                                              |
+| `claude-remote-control.ts`  | `/remote-control`: drive the session from the Claude app and claude.ai/code               | A Claude model on the Claude Code login                          |
+
+**The claude-sdk provider** (`claude-sdk-*`). They work on
+`pi-claude-subscription` and do nothing without it.
+
+| Extension                   | What it does                                                                              | Needs                                                            |
+| :-------------------------- | :---------------------------------------------------------------------------------------- | :--------------------------------------------------------------- |
+| `claude-sdk-stream-only.ts` | Keeps Claude Code on streamed responses, so a stalled one cannot leave Pi waiting         | `pi-claude-subscription`                                         |
+| `claude-sdk-update.ts`      | Installs a newer Claude Agent SDK, and with it Claude Code, as soon as there is one       | `pi-claude-subscription`, npm                                    |
+| `claude-sdk-resume-fix.ts`  | Fixes pi-claude-subscription 0.2.4, which loses responses after edits in older messages   | `pi-claude-subscription`, GitHub at the first start              |
 
 Every extension is a single file that works on its own. Code that several of
 them need — the [small model](#small-model) choice, the overlay frame,
@@ -183,7 +203,7 @@ November 2026): remove them, or Pi loads every extension twice:
 
 ```bash
 for f in ~/.pi/agent/git/github.com/dandjo/pi.dev-extensions/extensions/*.ts; do rm -f ~/.pi/agent/extensions/"${f##*/}"; done
-rm -f ~/.pi/agent/extensions/{claude-memory,remote-control}.ts
+rm -f ~/.pi/agent/extensions/{claude-memory,remote-control,claude-marketplaces,claude-hooks,claude-agents,claude-stream-only}.ts
 ```
 
 Then add web search, pinned to the tested version, and configure it as
@@ -274,10 +294,38 @@ To turn an extension off, disable it in `pi config` and `/reload`.
 `pi remove npm:pi-web-access@0.44.0` removes web search.
 `pi mcp remove chrome-devtools` removes the browser connection.
 
-## claude-marketplaces
+## Another provider
+
+Every extension loads with any provider, and a model switch within a session
+needs nothing. What changes with a provider other than Claude:
+
+- The groups of the extension table tell what keeps working: all but the
+  Claude subscription and the `claude-sdk` provider groups. `claude-usage.ts`
+  and `claude-login.ts` show nothing without a Claude Code login,
+  `claude-remote-control.ts` connects only while a Claude model is active, and
+  the `claude-sdk-*` files do nothing without `pi-claude-subscription`.
+- Subagents name a tier: `small` and `large` resolve on the current provider,
+  `Explore` runs on `small`, and a Claude family the provider lacks (`haiku`
+  elsewhere) falls back to its tier. `~/.pi/agent/subagents.json` names the
+  model of a tier per provider where the automatic choice does not fit; see
+  [subagents](#subagents).
+- Values that follow Claude's prompt cache can be set per provider:
+  `cacheWarmMinutes` in [network-resilience](#network-resilience) and
+  `coldMinutes` in [context-gc](#context-gc).
+- Side requests ([Small model](#small-model)) run at once; only on
+  `claude-sdk` they wait for each other.
+- An extension for another subscription's limits adds status line rows of its
+  own and offers the limits to other extensions as `claude-usage.ts` does,
+  through `plan-usage:source` (see [claude-usage](#claude-usage)).
+- The memory follows `memory.json`. When the folder in use is empty after a
+  switch, Claude Code removed for one, `/memory migrate` copies the project's
+  entries over (see [memory](#memory)).
+
+## claude-code-plugins
 
 Brings the plugins of Claude Code marketplaces — their skills, hooks, and
-agents — into Pi and keeps them current.
+agents — into Pi and keeps them current. It reads Claude Code's plugin format
+and needs no Claude model: the plugins work with any provider.
 
 - A marketplace is a Pi package whose folder holds
   `.claude-plugin/marketplace.json`, installed for you (not with `--local`)
@@ -314,8 +362,8 @@ agents — into Pi and keeps them current.
 - `/marketplace-update` updates every marketplace and reloads at once.
 - Builds a copy of every plugin listed in `.claude-plugin/marketplace.json`
   whose source is a folder of the marketplace, in
-  `~/.pi/agent/claude-marketplaces/<name>/plugins`, `<name>` taken from the
-  package folder, and adapts it to Pi:
+  `~/.pi/agent/claude-code-marketplaces/<name>/plugins`, `<name>` taken from
+  the package folder, and adapts it to Pi:
   - Skill names carry the plugin, since Pi has no plugin namespaces:
     `/my-plugin:guidelines` becomes `/skill:my-plugin-guidelines`. References
     between the skills of a marketplace are rewritten the same way.
@@ -325,13 +373,15 @@ agents — into Pi and keeps them current.
   The copy of a package from git is rebuilt when its commit changes, the copy
   of a local folder at every start, so that changes not yet committed show.
 - The plugins' `hooks/` and `scripts/` are mirrored as they are, and every
-  mirrored plugin is linked into `~/.pi/agent/claude-plugins/<plugin>`, where
-  [claude-hooks](#claude-hooks) and [claude-agents](#claude-agents) look for
+  mirrored plugin is linked into `~/.pi/agent/claude-code-plugins/<plugin>`,
+  where [claude-code-hooks](#claude-code-hooks) and
+  [claude-code-agents](#claude-code-agents) look for
   Claude Code plugins, so their hooks and agents work in Pi as in Claude
   Code. The links are made at every start and
   after every update, and removed when a marketplace is. A plugin name two
   marketplaces share goes to the first. Links into a copy (this extension's,
-  or an earlier one's) follow the copies; any other entry there is left alone.
+  or an earlier one's) follow the copies, and so does a broken link of a
+  mirrored plugin's name; any other entry there is left alone.
 - Subagent processes ([subagents](#subagents)) skip the update.
 - Earlier versions read the marketplaces from
   `~/.pi/agent/claude-marketplaces.json` and kept a clone of each in
@@ -339,10 +389,20 @@ agents — into Pi and keeps them current.
   itself, unless a package lives in it. While the file exists, every start
   names what is left: `pi install` for a marketplace in it not installed yet,
   else deleting the file.
+- Until November 17, 2026 this extension was `claude-code-plugins.ts`, with
+  the copies in `~/.pi/agent/claude-marketplaces/` and the links in
+  `~/.pi/agent/claude-plugins/`. Two days after a start first finds those
+  folders, so that sessions still running the old version keep their skills
+  and hooks until they reload, the old copies and the links into them are
+  deleted, and so are links the new folder has a name for or whose target is
+  gone; other entries move into `~/.pi/agent/claude-code-plugins/`. Until
+  then [claude-code-hooks](#claude-code-hooks) and
+  [claude-code-agents](#claude-code-agents) read the old link folder after
+  the new one.
 - Pi warns at start about skill descriptions longer than 1,024 characters (the
   skill loads anyway).
 - Never edit the package's clone in `~/.pi/agent/git/` or the copies in
-  `~/.pi/agent/claude-marketplaces/`: every update resets the clone and
+  `~/.pi/agent/claude-code-marketplaces/`: every update resets the clone and
   rebuilds the copies.
 
 ## statusline
@@ -417,10 +477,12 @@ without a prompt the token has run out. The extension then asks
 back with the next fetch. Without `claude-login.ts` the token is read here,
 without the account check, and the limits stay away until a prompt renews it.
 
-Other extensions get the answer through Pi's event bus: `claude-usage:source`
-carries a source with the latest answer and a refresh under the same
-two-minute rule, and `claude-usage:changed` follows every new one.
-`claude-remote-control.ts` hands the limits to the Claude app that way.
+Other extensions get the answer through Pi's event bus, in a protocol that
+names no provider: `plan-usage:source` carries a source with the plan's id
+(`claude`), the models its limits apply to, the latest answer, and a refresh
+under the same two-minute rule; `plan-usage:changed` with the id follows every
+new one. `claude-remote-control.ts` hands the limits to the Claude app that
+way, and an extension for another subscription's limits can offer them alike.
 
 Without an answer from the last hour, a single `Limits` line takes the place
 of the limit lines and says why. A warning ends in `· next try 23:52`, the
@@ -926,6 +988,14 @@ out wrong.
 - `/memory tidy` hands what `/memory lint` lists to the model as a task:
   shorten the lines, split the large files, fix links and frontmatter. It
   shows what it would remove before it removes anything.
+- `/memory migrate [provider]` copies this project's memory from another
+  provider's folder into the one in use, as long as that has no entries yet:
+  after a switch (Claude Code removed, its auto memory turned off, or
+  `memory.json` reordered) the entries come along. It takes the named
+  provider, else the first in order of priority with an index; Claude Code's
+  and Pi's own folders count even where `memory.json` leaves them out. The
+  source stays as it is, and no file in the target is overwritten except an
+  index without entries.
 - At start, a notice names the memory in use, and a second one counts what
   `/memory lint` would list. Subagents get no memory, as in Claude Code.
 - `memory.ts` replaces `claude-memory.ts`, which only read Claude Code's
@@ -1020,20 +1090,21 @@ summary — not the conversation or its files.
   Subagent processes bind no inbox, so they never appear in the list. Tested
   on Linux; on native Windows the extension stays out (no tools, no warning).
 
-## claude-hooks
+## claude-code-hooks
 
 Runs the hooks Claude Code would run, at the matching Pi events, with Claude
 Code's [hook protocol](https://code.claude.com/docs/en/hooks): the event as
-JSON on stdin, exit code 2 blocks, one JSON object on stdout decides.
+JSON on stdin, exit code 2 blocks, one JSON object on stdout decides. It needs
+no Claude model: the hooks run whichever model answers.
 
 - Sources: `~/.claude/settings.json`; the project's `.claude/settings.json`
   and `.claude/settings.local.json` once Pi trusts the project; and
   `hooks/hooks.json` of every Claude Code plugin in
-  `~/.pi/agent/claude-plugins/<plugin>/` (a directory or a link to one;
-  [claude-marketplaces](#claude-marketplaces) links its plugins there) and of
+  `~/.pi/agent/claude-code-plugins/<plugin>/` (a directory or a link to one;
+  [claude-code-plugins](#claude-code-plugins) links its plugins there) and of
   every plugin Claude Code installed for you and enabled in
   `~/.claude/settings.json` (`enabledPlugins`; a plugin of the same name in
-  `claude-plugins` replaces it), with
+  `claude-code-plugins` replaces it), with
   `CLAUDE_PLUGIN_ROOT` set to the plugin and `CLAUDE_PLUGIN_DATA` to
   `~/.pi/agent/plugin-data/<plugin>`. `disableAllHooks: true` in a settings
   file turns them all off. The files are read again before every prompt.
@@ -1107,8 +1178,8 @@ interrupt it, and answer its questions, and it stays alive after its report.
   — Markdown with `name`, `description`, `tools`, `disallowedTools`, `model`,
   `effort`, `maxTurns`, `skills`, `omitClaudeMd`, `background` — from
   `~/.pi/agent/agents/` and the trusted project's `.pi/agents/`.
-  [claude-agents](#claude-agents) adds Claude Code's directories and
-  plugins.
+  [claude-code-agents](#claude-code-agents) adds Claude Code's directories
+  and plugins.
 - A subagent gets the parent's active tools, narrowed by its definition, whose
   `tools` and `disallowedTools` name Pi tools (`read`, `bash`, …). It never
   gets the cron tools, `ListAgents`, or `SendMessage`, and subagents nest at
@@ -1122,16 +1193,30 @@ interrupt it, and answer its questions, and it stays alive after its report.
   [ask-user-question](#ask-user-question)). Without a user interface the
   dialogs are declined. Its notifications, status entries, and widgets stay
   with it.
-- Model: the call's `model` (a full model id), else the definition's, else the
-  current one. [claude-agents](#claude-agents) adds the families `sonnet`,
-  `opus`, `haiku`, and `fable`, and a default model.
-- `Explore` runs on `haiku` at medium effort, without the context files, and
+- Model: the call's `model`, else the definition's, else a default model,
+  else the current one. A model is a full model id, `inherit` (the current
+  one), a tier, or a model family:
+  - `small` and `large` stay with the current model's provider. `small` is
+    the newest model of a small family the provider has (`haiku`), else the
+    model of the [side tasks](#small-model), the cheapest; `large` is the
+    newest of a large family (`opus`, then `fable`), else the current model.
+    A current model of such a family stays. `~/.pi/agent/subagents.json`
+    names the model of a tier per provider where that does not fit:
+    `{"tiers": {"<provider>": {"small": "<model-id>", "large": "<model-id>"}}}`.
+  - [claude-code-agents](#claude-code-agents) adds the families `sonnet`,
+    `opus`, `haiku`, and `fable` and a default model. A family resolves to
+    its newest model on the current provider; one the provider lacks falls
+    back to its tier (`haiku` to `small`, `opus` and `fable` to `large`,
+    `sonnet` to the current model), with a note in the result.
+  - The tool offers the tiers and the families the current provider has, and
+    renews the offer on a switch to another provider.
+- `Explore` runs on `small` at medium effort, without the context files, and
   reports after at most 30 turns. A search of many steps costs a fraction
   there of what each step costs in a long conversation, and only the report
-  comes back; the model is told to hand such searches to it. Without a
-  `haiku` on the current provider, `Explore` keeps the current model. Claude
-  Code's own `Explore` runs on the parent's model: a user agent named
-  `Explore` with `model: inherit` does the same here.
+  comes back; the model is told to hand such searches to it. With Claude
+  models `small` is Haiku. Claude Code's own `Explore` runs on the parent's
+  model: a user agent named `Explore` with `model: inherit` does the same
+  here.
 - `maxTurns`: at the limit the subagent's step is stopped, and a message of
   its own asks for the report; a request that came beside a tool result could
   be taken for an injection. A subagent that calls tools again is stopped,
@@ -1178,7 +1263,7 @@ interrupt it, and answer its questions, and it stays alive after its report.
   and again on every `subagents:provider-request`, so the load order does not
   matter.
 
-## claude-agents
+## claude-code-agents
 
 Brings Claude Code's agent definitions and settings to the `Agent` tool of
 [subagents](#subagents), after
@@ -1188,14 +1273,18 @@ Without `subagents.ts` it does nothing.
 - Definitions from `~/.claude/agents/` (`$CLAUDE_CONFIG_DIR/agents`), above
   `~/.pi/agent/agents/`; from the trusted project's `.claude/agents/`, at every
   level up to the repository root, below that level's `.pi/agents/`; and from
-  `agents/` of the plugins in `~/.pi/agent/claude-plugins/` and of the plugins Claude Code installed for you and enabled, as
-  `<plugin>:<name>`, below every user and project agent.
+  `agents/` of the plugins in `~/.pi/agent/claude-code-plugins/` and of the plugins Claude Code installed for you and
+  enabled, as `<plugin>:<name>`, below every user and project agent.
 - Tool entries in Claude Code's names (`Read`, `Bash`, `Glob`, …) and
   permission rules (`Bash(git *)`) name the matching Pi tools, in every
   definition, those in `.pi/agents/` included.
 - `sonnet`, `opus`, `haiku`, and `fable` as a model resolve to the newest
   model of that family on the current provider; a family the current model
-  belongs to keeps the current model.
+  belongs to keeps the current model. Each carries a tier of
+  [subagents](#subagents): `haiku` is `small`, `opus` and `fable` are
+  `large`, `sonnet` stays with the current model. A family the provider lacks
+  falls back to its tier, and the tiers pick these families where the
+  provider has them.
 - `CLAUDE_CODE_SUBAGENT_MODEL` is the model when neither the call nor the
   definition names one. `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH` (default 3) and
   `CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS` (default 20) set how deep subagents
@@ -1575,7 +1664,7 @@ and you can work on from there while Pi keeps running on your machine.
   Claude Code 2.1.308. The bridge API is not a public interface and can change
   with any SDK release.
 
-## claude-stream-only
+## claude-sdk-stream-only
 
 Keeps a stalled response from hanging the run. When a streamed response
 stalls, Claude Code repeats the request without streaming and gets the answer
@@ -1697,9 +1786,10 @@ time out.
   through. Claude Code sends them over a connection opened before the change,
   which never answers, and gives up on it only after three to four minutes.
   Such a request is restarted after 30 seconds without data, once per change.
-  When the last response is more than 5 minutes old, the prompt cache is cold
-  and the API reads the whole context first, which took Claude Opus up to 42
-  seconds: then the restart waits 60 seconds.
+  When the last response is older than the prompt cache lives
+  (`cacheWarmMinutes`), the cache is cold and the API reads the whole context
+  first, which took Claude Opus up to 42 seconds: then the restart waits 60
+  seconds.
 - A request silent for 5 minutes while the host answers is restarted too. At
   most three restarts follow each other without a response in between.
 - Before every request that follows a connection error, Pi's own retries
@@ -1713,8 +1803,11 @@ time out.
 - Settings, all optional, go into `~/.pi/agent/network-resilience.json`:
   `noticeSeconds` (20), `graceSeconds` (10), `stallSeconds` (300; 0 turns
   the silence restart off), `maxRestarts` (3), `maxAttempts` (10),
-  `offlineWaitMinutes` (30; 0 turns the waiting off), and `probeHost`
-  (`host:port` to check instead of the API host).
+  `offlineWaitMinutes` (30; 0 turns the waiting off), `cacheWarmMinutes`
+  (5, Anthropic's default; 60 on `claude-sdk`, whose cache lives an hour),
+  and `probeHost` (`host:port` to check instead of the API host). Under
+  `providers`, each of them can be set for one provider and wins there over
+  the top level: `{"providers": {"openai": {"cacheWarmMinutes": 10}}}`.
 - When the API delivers data while the check fails, the check does not
   reflect your network, behind a proxy Pi does not know of, for example.
   Checking then stops until Pi restarts, and restarts after a disruption
@@ -1764,7 +1857,11 @@ long tool inputs.
   `keepRecent` (10 responses), `minResultChars` (4000), `minArgChars` (2000),
   `batchTokens` (100000), `coldMinutes` (60), `coldMinTokens` (5000),
   `thinking`, `toolResults`, and `toolArgs` (true each), and `keepTools`
-  (`["Agent", "AskUserQuestion"]`).
+  (`["Agent", "AskUserQuestion"]`). Under `providers`, each of them can be
+  set for one provider and wins there over the top level: `coldMinutes`
+  follows the one-hour cache of `claude-sdk`, and a provider whose cache
+  lives shorter can cut sooner:
+  `{"providers": {"openai": {"coldMinutes": 10}}}`.
 
 ## wait
 
@@ -1821,11 +1918,15 @@ picks the model for side tasks — session titles, `web_fetch` answers, and the
   (100 tokens) sometimes failed with "Claude's response exceeded the 100 output
   token maximum".
 - `PI_SMALL_MODEL=<provider>/<model-id>` overrides the choice.
-- Side requests run one at a time, across all extensions, and give up after two
-  minutes. `/btw` waits its turn the same way, on the session's own model. `claude-sdk` keeps at most three Claude Code processes and closes
-  the least recently used one outside a call, which can be the conversation's
-  own process while it waits for tool results: four parallel `web_fetch` calls
-  then reached the model as "Tool call interrupted".
+- Side requests give up after two minutes. On `claude-sdk` they run one at a
+  time, across all extensions, and `/btw` waits its turn the same way, on the
+  session's own model: `claude-sdk` keeps at most three Claude Code processes
+  and closes the least recently used one outside a call, which can be the
+  conversation's own process while it waits for tool results; four parallel
+  `web_fetch` calls then reached the model as "Tool call interrupted". Other
+  providers take side requests at once.
+- The `small` tier of [subagents](#subagents) takes the same model where the
+  provider has no small model family of its own.
 - Through `claude-sdk`, a side request carries its own short system prompt
   instead of Claude Code's. Tested with extra usage switched off, Anthropic
   counted it against the subscription; a request counted as third-party

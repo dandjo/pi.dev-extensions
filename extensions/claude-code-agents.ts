@@ -1,15 +1,17 @@
 /**
- * Claude agents: Claude Code's agent definitions and settings for the Agent tool of subagents.ts
- * (https://code.claude.com/docs/en/sub-agents).
+ * Claude Code agents: Claude Code's agent definitions and settings for the Agent tool of subagents.ts
+ * (https://code.claude.com/docs/en/sub-agents). It reads Claude Code's formats only and works with any provider.
  *
  * - Agent definitions from ~/.claude/agents (CLAUDE_CONFIG_DIR is honoured), above ~/.pi/agent/agents; from
  *   <project>/.claude/agents at every level of the walk up, below that level's .pi/agents, once the project is
- *   trusted; and from agents/ of every Claude Code plugin in ~/.pi/agent/claude-plugins (one directory per
+ *   trusted; and from agents/ of every Claude Code plugin in ~/.pi/agent/claude-code-plugins (one directory per
  *   plugin) and of every plugin Claude Code installed for the user and enabled in its user settings, named
  *   <plugin>:<name>.
  * - Tool entries of every definition in Claude Code's names (Read, Bash, Glob, …) and permission rules (Bash(git *))
  *   name the matching Pi tools (CLAUDE_TO_PI below).
- * - model: sonnet, opus, haiku, and fable resolve to the newest model of that family on the current provider.
+ * - model: sonnet, opus, haiku, and fable resolve to the newest model of that family on the current provider. They
+ *   carry the tiers of subagents.ts: haiku is small, sonnet inherit, opus and fable large, so a provider without the
+ *   family falls back to that tier, and a tier asked for on a Claude provider picks haiku, or opus before fable.
  * - CLAUDE_CODE_SUBAGENT_MODEL is the model when neither the call nor the definition names one;
  *   CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH (default 3) and CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS (default 20) set how deep
  *   subagents nest and how many run at once.
@@ -27,24 +29,28 @@ function claudeDir(): string {
 }
 
 /**
- * The Claude Code plugins Pi uses, by name: every directory in ~/.pi/agent/claude-plugins (or a link to one), then the
- * plugins Claude Code installed for the user (plugins/installed_plugins.json) and enabled in its user settings
- * (enabledPlugins), at their installPath. A name in claude-plugins wins over an installed plugin, and the first of two
- * installed plugins of one name wins over the second. claude-hooks.ts carries a copy of this function: change them alike.
+ * The Claude Code plugins Pi uses, by name: every directory in ~/.pi/agent/claude-code-plugins (or a link to one),
+ * then in ~/.pi/agent/claude-plugins, the folder of earlier versions, until claude-code-plugins.ts has moved its
+ * entries over; then the plugins Claude Code installed for the user (plugins/installed_plugins.json) and enabled in
+ * its user settings (enabledPlugins), at their installPath. Of two plugins of one name, the one found first wins.
+ * claude-code-hooks.ts carries a copy of this function: change them alike.
  */
 function claudePlugins(): { name: string; root: string }[] {
 	const plugins = new Map<string, string>();
-	const linked = path.join(getAgentDir(), "claude-plugins");
-	try {
-		for (const name of readdirSync(linked).sort()) {
-			try {
-				if (statSync(path.join(linked, name)).isDirectory()) plugins.set(name, path.join(linked, name));
-			} catch {
-				// a broken link
+	for (const folder of ["claude-code-plugins", "claude-plugins"]) {
+		const linked = path.join(getAgentDir(), folder);
+		try {
+			for (const name of readdirSync(linked).sort()) {
+				if (plugins.has(name)) continue;
+				try {
+					if (statSync(path.join(linked, name)).isDirectory()) plugins.set(name, path.join(linked, name));
+				} catch {
+					// a broken link
+				}
 			}
+		} catch {
+			// no such folder
 		}
-	} catch {
-		// no claude-plugins
 	}
 	const json = (file: string): any => {
 		try {
@@ -72,7 +78,7 @@ function pluginAgentDirs(): { plugin: string; dir: string }[] {
  * Claude Code <-> Pi tool names and inputs, shared by the extensions that speak Claude Code's formats (hooks, subagent
  * definitions).
  *
- * claude-hooks.ts, claude-remote-control.ts carry a copy of this block, or of a part of it: change them alike.
+ * claude-code-hooks.ts, claude-remote-control.ts carry a copy of this block, or of a part of it: change them alike.
  */
 /** Claude Code tool name -> the Pi tools that provide it. An empty list: Pi has no equivalent. */
 const CLAUDE_TO_PI: Record<string, string[]> = {
@@ -126,6 +132,11 @@ interface SubagentsProvider {
 	toolNames?: (entry: string) => string[] | undefined;
 	/** Model families that resolve to the newest model of the current provider whose id contains them. */
 	modelFamilies?: string[];
+	/**
+	 * The tier of a family: a family the current provider lacks falls back to it, and a tier asked for picks the first
+	 * family of that tier the provider has, in the order given here.
+	 */
+	familyTiers?: Record<string, "small" | "large" | "inherit">;
 	/** The model when neither the call nor the definition names one. */
 	defaultModel?: () => string | undefined;
 	/** How deep subagents nest (default 3) and how many run at once (default 20). */
@@ -135,12 +146,13 @@ interface SubagentsProvider {
 
 export default function (pi: ExtensionAPI) {
 	const provider: SubagentsProvider = {
-		id: "claude-agents",
+		id: "claude-code-agents",
 		pluginAgentDirs,
 		userAgentDirs: () => [path.join(claudeDir(), "agents")],
 		projectAgentDirs: (dir) => [path.join(dir, ".claude", "agents")],
 		toolNames: piToolNames,
 		modelFamilies: ["sonnet", "opus", "haiku", "fable"],
+		familyTiers: { haiku: "small", sonnet: "inherit", opus: "large", fable: "large" },
 		defaultModel: () => process.env.CLAUDE_CODE_SUBAGENT_MODEL,
 		maxDepth: Number(process.env.CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH) || undefined,
 		maxConcurrent: Number(process.env.CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS) || undefined,

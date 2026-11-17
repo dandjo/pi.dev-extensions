@@ -30,6 +30,11 @@
  *   subject). Edits that shrink a large file pass, so it can be tidied. {"guard": false} in memory.json turns the
  *   check off. Claude Code, writing to the same memory, is not checked.
  * - /memory tidy asks the model to fix what /memory lint lists, showing what it would remove before it removes it.
+ * - /memory migrate [provider] copies this project's memory from another provider's folder into the one in use, as
+ *   long as that has no entries yet: after a switch of provider (Claude Code uninstalled, its auto memory turned off,
+ *   memory.json reordered) the entries come along. The source is the named provider, else the first one in order of
+ *   priority whose folder has an index; Claude Code's and Pi's own folders count even when memory.json leaves them
+ *   out. The source stays as it is, and a file of the same name in the target is not overwritten.
  * - Subagents (PI_SUBAGENT_DEPTH) get no memory, as in Claude Code.
  */
 
@@ -42,7 +47,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Key, matchesKey, type TUI, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
@@ -273,7 +278,7 @@ function toolPath(value: string, cwd: string): string {
  * /agents, /cron, and /memory, and the frame and scrolling of the boxes /btw and the /diff dialog show above the
  * prompt.
  *
- * background-agents.ts, btw.ts, claude-hooks.ts, claude-remote-control.ts, diff.ts, scheduled-tasks.ts, subagents.ts
+ * background-agents.ts, btw.ts, claude-code-hooks.ts, claude-remote-control.ts, diff.ts, scheduled-tasks.ts, subagents.ts
  * carry a copy of this block, or of a part of it: change them alike.
  */
 const OVERLAY_OPTIONS = { anchor: "center", width: "90%", maxHeight: "90%", margin: 1 } as const;
@@ -543,9 +548,10 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("memory", {
-		description: "Show this project's memory and its providers; /memory edit opens the index, lint checks it, tidy fixes it",
+		description:
+			"Show this project's memory and its providers; /memory edit opens the index, lint checks it, tidy fixes it, migrate copies it from another provider",
 		getArgumentCompletions: (prefix) => {
-			const matches = ["edit", "lint", "tidy"].filter((v) => v !== prefix && v.startsWith(prefix));
+			const matches = ["edit", "lint", "tidy", "migrate"].filter((v) => v !== prefix && v.startsWith(prefix));
 			return matches.length ? matches.map((v) => ({ value: v, label: v })) : null;
 		},
 		handler: async (args, ctx) => {
@@ -579,6 +585,37 @@ export default function (pi: ExtensionAPI) {
 				].join("\n");
 				if (ctx.isIdle()) pi.sendUserMessage(task);
 				else pi.sendUserMessage(task, { deliverAs: "followUp" });
+				return;
+			}
+			const [verb, named] = args.trim().split(/\s+/);
+			if (verb === "migrate") {
+				if (memory.exists && readFileSync(index, "utf8").split("\n").some((line) => line.trim())) {
+					ctx.ui.notify(`${shortPath(memory.dir)} has entries already, so nothing was copied: /memory migrate fills an empty memory only.`, "warning");
+					return;
+				}
+				const root = projectRoot(ctx.cwd);
+				const key = root.replace(/[^a-zA-Z0-9]/g, "-");
+				const configured = loadProviders().providers;
+				const candidates = [...configured, ...DEFAULT_PROVIDERS.filter((d) => !configured.some((p) => p.name === d.name))]
+					.filter((p) => !named || p.name === named)
+					.map((p) => resolve(p, root, key, trustedIn(ctx)))
+					.filter((r) => r.dir && path.resolve(r.dir) !== path.resolve(memory.dir));
+				const source = candidates.find((r) => existsSync(path.join(r.dir, INDEX)));
+				if (!source) {
+					const where = named ? `provider ${named}` : "any other provider";
+					ctx.ui.notify(`No memory of this project in the folder of ${where}; nothing to copy.`, "warning");
+					return;
+				}
+				const before = new Set(existsSync(memory.dir) ? readdirSync(memory.dir) : []);
+				mkdirSync(memory.dir, { recursive: true });
+				cpSync(source.dir, memory.dir, { recursive: true, force: false, errorOnExist: false });
+				// An index without entries is replaced by the source's.
+				if (memory.exists) cpSync(path.join(source.dir, INDEX), index, { force: true });
+				const copied = readdirSync(memory.dir).filter((name) => !before.has(name) || name === INDEX).length;
+				ctx.ui.notify(
+					`Copied ${copied} file${copied === 1 ? "" : "s"} of this project's memory from ${source.provider} (${shortPath(source.dir)}) to ${memory.provider} (${shortPath(memory.dir)}). The source stays as it is.`,
+					"info",
+				);
 				return;
 			}
 			if (args.trim() === "edit") {

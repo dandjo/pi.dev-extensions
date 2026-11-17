@@ -19,7 +19,10 @@
  * - /gc cuts at the next request, regardless of the thresholds; /gc status shows what was cut and what could go now.
  * - Settings in ~/.pi/agent/context-gc.json, every key optional: {"enabled": true, "keepRecent": 10,
  *   "minResultChars": 4000, "minArgChars": 2000, "batchTokens": 100000, "coldMinutes": 60, "coldMinTokens": 5000,
- *   "thinking": true, "toolResults": true, "toolArgs": true, "keepTools": ["Agent", "AskUserQuestion"]}.
+ *   "thinking": true, "toolResults": true, "toolArgs": true, "keepTools": ["Agent", "AskUserQuestion"]}. Under
+ *   "providers", every key can be set for one provider and wins there over the top level: coldMinutes matches the
+ *   claude-sdk provider's prompt cache, which lives an hour, and a provider whose cache lives shorter can cut sooner
+ *   ({"providers": {"openai": {"coldMinutes": 10}}}).
  */
 
 import { readFileSync } from "node:fs";
@@ -67,7 +70,8 @@ const DEFAULTS: Config = {
 	keepTools: ["Agent", "AskUserQuestion"],
 };
 
-function loadConfig(): { config: Config; problem?: string } {
+/** The settings for a provider: the defaults, the file's top level, then the file's entry for the provider. */
+function loadConfig(provider?: string): { config: Config; problem?: string } {
 	let raw: any;
 	try {
 		raw = JSON.parse(readFileSync(CONFIG_FILE, "utf8"));
@@ -77,16 +81,20 @@ function loadConfig(): { config: Config; problem?: string } {
 	}
 	const config: Config = { ...DEFAULTS };
 	const wrong: string[] = [];
-	for (const key of Object.keys(DEFAULTS) as (keyof Config)[]) {
-		const value = raw?.[key];
-		if (value === undefined) continue;
-		const fallback = DEFAULTS[key];
-		const ok = Array.isArray(fallback)
-			? Array.isArray(value) && value.every((v) => typeof v === "string")
-			: typeof value === typeof fallback && (typeof value !== "number" || (Number.isFinite(value) && value >= 0));
-		if (ok) (config as any)[key] = value;
-		else wrong.push(key);
-	}
+	const apply = (values: any, prefix: string) => {
+		for (const key of Object.keys(DEFAULTS) as (keyof Config)[]) {
+			const value = values?.[key];
+			if (value === undefined) continue;
+			const fallback = DEFAULTS[key];
+			const ok = Array.isArray(fallback)
+				? Array.isArray(value) && value.every((v) => typeof v === "string")
+				: typeof value === typeof fallback && (typeof value !== "number" || (Number.isFinite(value) && value >= 0));
+			if (ok) (config as any)[key] = value;
+			else wrong.push(prefix + key);
+		}
+	};
+	apply(raw, "");
+	if (provider) apply(raw?.providers?.[provider], `providers.${provider}.`);
 	return { config, problem: wrong.length ? `${CONFIG_FILE}: ignored ${wrong.join(", ")} (wrong type)` : undefined };
 }
 
@@ -326,7 +334,7 @@ export default function (pi: ExtensionAPI) {
 	let switched = false;
 
 	const settings = (ctx: ExtensionContext): Config => {
-		const { config, problem } = loadConfig();
+		const { config, problem } = loadConfig(ctx.model?.provider);
 		if (problem && !warned && ctx.hasUI) {
 			warned = true;
 			ctx.ui.notify(`context-gc: ${problem}`, "warning");
@@ -412,7 +420,7 @@ export default function (pi: ExtensionAPI) {
 	pi.registerCommand("gc", {
 		description: "Cut older tool outputs and thinking from the context at the next request (/gc status shows what was cut)",
 		handler: async (args, ctx) => {
-			const config = loadConfig().config;
+			const config = loadConfig(ctx.model?.provider).config;
 			const p = plan(ctx.sessionManager.buildSessionProjection().entries as unknown as Entry[], config);
 			const done = passes(ctx);
 			if (args.trim() === "status") {

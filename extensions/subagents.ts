@@ -10,14 +10,24 @@
  * - Tools: the parent's active tools, narrowed by the definition, whose entries name Pi tools unless a provider
  *   translates them. A subagent never gets AskUserQuestion, the cron and loop tools, or cross-session messaging; Agent
  *   only up to three levels deep. MCP servers start only when the subagent's tools name an MCP tool. Hooks
- *   (claude-hooks.ts) run inside it too.
- * - Model: the call's model, else the definition's (a model family a provider names resolves within the current
- *   provider; a family the current model belongs to keeps the current model), else a provider's default, else the
- *   current model, at the parent's thinking level unless the definition sets effort.
- * - Explore runs on haiku at medium effort, without the context files, and reports after at most 30 turns: a search
+ *   (claude-code-hooks.ts) run inside it too.
+ * - Model: the call's model, else the definition's, else a provider's default, else the current model, at the
+ *   parent's thinking level unless the definition sets effort. A model is a full id, inherit (the current model), a
+ *   tier, or a model family a provider names:
+ *   - small and large stay within the current model's provider: the model ~/.pi/agent/subagents.json names for the
+ *     provider and tier ({"tiers": {"<provider>": {"small": "<model-id>", "large": "<model-id>"}}}), else the newest
+ *     model of the first family of that tier the provider has (claude-code-agents.ts: haiku for small, opus then
+ *     fable for large; a current model of such a family stays). Else small is the model side tasks use, the one with
+ *     the lowest list price among the current maker's that read text, and large is the current model.
+ *   - A family resolves to its newest model on the current provider; a family the current model belongs to keeps the
+ *     current model; a family the provider lacks falls back to its tier (haiku small, sonnet inherit, opus and fable
+ *     large), with a note in the result.
+ *   - The Agent tool offers the tiers and the families the current provider has, renewed on a switch to another
+ *     provider.
+ * - Explore runs on small at medium effort, without the context files, and reports after at most 30 turns: a search
  *   of many steps costs a fraction there of what it costs in a long conversation, and only the report comes back.
- *   Without a haiku on the current provider it keeps the current model. (Claude Code's own Explore keeps the parent's
- *   model; a user agent named Explore with model: inherit does the same here.)
+ *   (Claude Code's own Explore keeps the parent's model; a user agent named Explore with model: inherit does the same
+ *   here.)
  * - maxTurns: at the limit the subagent's step is stopped and it is asked for its report, as a message of its own,
  *   since a request that comes beside a tool result can be taken for an injection. A subagent that calls tools again
  *   is stopped, and what it wrote last comes back marked as partial. resume continues it.
@@ -51,11 +61,12 @@
  *
  * Providers extend the Agent tool through the event bus as well, whatever the load order: an extension emits
  * "subagents:provider" with a SubagentsProvider at load and again on every "subagents:provider-request".
- * claude-agents.ts is one: it adds Claude Code's agent directories, tool names, model families, and settings.
+ * claude-code-agents.ts is one: it adds Claude Code's agent directories, tool names, model families with their
+ * tiers, and settings.
  */
 
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
-import type { Usage } from "@earendil-works/pi-ai";
+import type { Api, Model, Usage } from "@earendil-works/pi-ai";
 import {
 	type ExtensionAPI,
 	type ExtensionContext,
@@ -268,6 +279,10 @@ export interface SubagentView {
 	error?: string;
 }
 
+/** The model tiers a call or definition can name instead of a model; inherit is the current model. */
+const TIERS = ["small", "large"] as const;
+export type Tier = (typeof TIERS)[number] | "inherit";
+
 /** What another extension adds to the Agent tool ("subagents:provider" on the event bus). */
 export interface SubagentsProvider {
 	/** Providers apply in the order of their ids; one emitted again under the same id replaces the earlier one. */
@@ -282,6 +297,11 @@ export interface SubagentsProvider {
 	toolNames?: (entry: string) => string[] | undefined;
 	/** Model families that resolve to the newest model of the current provider whose id contains them. */
 	modelFamilies?: string[];
+	/**
+	 * The tier of a family: a family the current provider lacks falls back to it, and a tier asked for picks the first
+	 * family of that tier the provider has, in the order given here.
+	 */
+	familyTiers?: Record<string, Tier>;
 	/** The model when neither the call nor the definition names one. */
 	defaultModel?: () => string | undefined;
 	/** How deep subagents nest (default 3) and how many run at once (default 20). */
@@ -314,6 +334,27 @@ function maxConcurrent(): number {
 
 function modelFamilies(): string[] {
 	return [...new Set(provided((p) => p.modelFamilies).map((f) => f.toLowerCase()))];
+}
+
+/** The tier of every family the providers name one for; the first provider to name a family decides. */
+function familyTiers(): Map<string, Tier> {
+	const tiers = new Map<string, Tier>();
+	for (const [family, tier] of provided((p) => Object.entries(p.familyTiers ?? {}))) {
+		const key = family.toLowerCase();
+		if (!tiers.has(key) && (TIERS as readonly string[]).concat("inherit").includes(tier)) tiers.set(key, tier);
+	}
+	return tiers;
+}
+
+/** The families the current model's provider has a model of; every family while no model is chosen. */
+function offeredFamilies(ctx: ExtensionContext): string[] {
+	const current = ctx.model;
+	if (!current) return modelFamilies();
+	const ids = ctx.modelRegistry
+		.getAll()
+		.filter((m) => m.provider === current.provider)
+		.map((m) => m.id.toLowerCase());
+	return modelFamilies().filter((family) => ids.some((id) => id.includes(family)));
 }
 
 function defaultModel(): string | undefined {
@@ -391,7 +432,7 @@ const BUILT_INS: AgentDef[] = [
 		description:
 			'Fast agent specialized for exploring codebases, on a small model with its own context: a search of several steps costs far less there than in this conversation, and only its report comes back. Use it to find files by patterns, search code for keywords, or answer questions about the codebase. When calling it, state the thoroughness you want: "quick", "medium", or "very thorough".',
 		prompt: EXPLORE_PROMPT,
-		model: "haiku",
+		model: "small",
 		effort: "medium",
 		maxTurns: 30,
 		omitClaudeMd: true,
@@ -515,20 +556,73 @@ function newer(a: string, b: string): boolean {
 	return false;
 }
 
+function newest<T extends { id: string }>(models: T[]): T | undefined {
+	return models.reduce<T | undefined>((acc, m) => (!acc || newer(m.id, acc.id) ? m : acc), undefined);
+}
+
+/** The model ~/.pi/agent/subagents.json names for a provider and tier. */
+function configuredTier(provider: string, tier: (typeof TIERS)[number]): string | undefined {
+	try {
+		const id = JSON.parse(readFileSync(path.join(getAgentDir(), "subagents.json"), "utf8"))?.tiers?.[provider]?.[tier];
+		return typeof id === "string" && id.trim() ? id.trim() : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+function price(model: Model<Api>): number {
+	return model.cost.input + model.cost.output;
+}
+
+/** The model maker named at the start of an id, or "" when the id names none (session-title.ts has the same). */
+function maker(id: string): string {
+	const match = id.match(/^([a-z0-9-]+)\//i) ?? id.match(/^(?:[a-z]{2,6}\.)?([a-z][a-z0-9-]*)\.[a-z]/i);
+	return match ? match[1].toLowerCase() : "";
+}
+
+/** The model of a tier on the current model's provider (see the header); the current model when nothing fits. */
+async function tierModel(ctx: ExtensionContext, current: Model<Api>, tier: Tier): Promise<Model<Api>> {
+	if (tier === "inherit") return current;
+	const configured = configuredTier(current.provider, tier);
+	const named = configured ? ctx.modelRegistry.find(current.provider, configured) : undefined;
+	if (named) return named;
+	const families = [...familyTiers()].filter(([, t]) => t === tier).map(([family]) => family);
+	if (families.some((family) => current.id.toLowerCase().includes(family))) return current;
+	const available = await ctx.modelRegistry.getAvailableOfType("chat", current.provider);
+	for (const family of families) {
+		const best = newest(available.filter((m) => m.id.toLowerCase().includes(family)));
+		if (best) return best;
+	}
+	if (tier === "large" || !(price(current) > 0)) return current;
+	const currentMaker = maker(current.id);
+	let best = current;
+	for (const model of available) {
+		if (!model.input.includes("text") || maker(model.id) !== currentMaker) continue;
+		if (price(model) > 0 && price(model) < price(best)) best = model;
+	}
+	return best;
+}
+
 async function resolveModel(ctx: ExtensionContext, requested: string | undefined): Promise<{ ref: string; note?: string }> {
 	const current = ctx.model;
 	const currentRef = current ? `${current.provider}/${current.id}` : "";
 	const wanted = requested?.trim();
 	if (!wanted || wanted === "inherit" || !current) return { ref: currentRef };
 	const alias = wanted.toLowerCase();
+	const ref = (m: Model<Api>) => `${m.provider}/${m.id}`;
+	if ((TIERS as readonly string[]).includes(alias)) return { ref: ref(await tierModel(ctx, current, alias as Tier)) };
 	if (modelFamilies().includes(alias)) {
 		if (current.id.toLowerCase().includes(alias)) return { ref: currentRef };
-		const models = (await ctx.modelRegistry.getAvailableOfType("chat", current.provider)).filter((m) =>
-			m.id.toLowerCase().includes(alias),
+		const best = newest(
+			(await ctx.modelRegistry.getAvailableOfType("chat", current.provider)).filter((m) => m.id.toLowerCase().includes(alias)),
 		);
-		const best = models.reduce<(typeof models)[number] | undefined>((acc, m) => (!acc || newer(m.id, acc.id) ? m : acc), undefined);
-		if (best) return { ref: `${best.provider}/${best.id}` };
-		return { ref: currentRef, note: `Model "${wanted}" is not available on ${current.provider}; the subagent uses ${current.id}.` };
+		if (best) return { ref: ref(best) };
+		const tier = familyTiers().get(alias);
+		const fallback = tier ? await tierModel(ctx, current, tier) : current;
+		return {
+			ref: ref(fallback),
+			note: `Model "${wanted}" is not available on ${current.provider}; the subagent uses ${fallback.id}${tier && tier !== "inherit" ? ` (tier ${tier})` : ""}.`,
+		};
 	}
 	const slash = wanted.indexOf("/");
 	const found =
@@ -1062,6 +1156,7 @@ function cleanup(): void {
 
 /** The Agent tool's parameters; a fork is not offered `fork`, which it must not use. */
 function agentParams(families: string[], canFork = !process.env.PI_SUBAGENT_FORK) {
+	const named = ["small or large (a cheaper or a stronger model of the current provider)", ...families, "or a full model id"];
 	return Type.Object({
 		description: Type.String({ description: "A short (3-5 word) description of the task" }),
 		prompt: Type.String({ description: "The task for the agent to perform" }),
@@ -1070,7 +1165,7 @@ function agentParams(families: string[], canFork = !process.env.PI_SUBAGENT_FORK
 		),
 		model: Type.Optional(
 			Type.String({
-				description: `Optional model for this agent: ${families.length ? `${families.join(", ")}, or a full model id` : "a full model id"}. Defaults to the agent definition's model, else the current model.`,
+				description: `Optional model for this agent: ${named.join(", ")}. Defaults to the agent definition's model, else the current model.`,
 			}),
 		),
 		run_in_background: Type.Optional(
@@ -1145,7 +1240,7 @@ Usage notes:
  * /agents, /cron, and /memory, and the frame and scrolling of the boxes /btw and the /diff dialog show above the
  * prompt.
  *
- * background-agents.ts, btw.ts, claude-hooks.ts, claude-remote-control.ts, diff.ts, memory.ts, scheduled-tasks.ts carry
+ * background-agents.ts, btw.ts, claude-code-hooks.ts, claude-remote-control.ts, diff.ts, memory.ts, scheduled-tasks.ts carry
  * a copy of this block, or of a part of it: change them alike.
  */
 const OVERLAY_OPTIONS = { anchor: "center", width: "90%", maxHeight: "90%", margin: 1 } as const;
@@ -1506,8 +1601,13 @@ export default function (pi: ExtensionAPI) {
 		void done.then((result) => deliver(result));
 	});
 
+	/** The families the registered Agent tool offers. */
+	let offeredKey = "";
+
 	function register(ctx: ExtensionContext): void {
 		const agents = discoverAgents(ctx.cwd, ctx.isProjectTrusted());
+		const offered = offeredFamilies(ctx);
+		offeredKey = offered.join(",");
 		pi.registerTool<Params, RunDetails>({
 			name: "Agent",
 			label: "Agent",
@@ -1516,7 +1616,7 @@ export default function (pi: ExtensionAPI) {
 			promptGuidelines: [
 				"Agent: hand a search that takes more than a few greps or reads (where something is defined, how a feature works across files, which files use something) to Explore with a thoroughness, instead of reading file after file in this conversation: Explore runs on a small model with its own context, and only its report enters this one. Read or grep yourself when you know the file or need one or two lookups.",
 			],
-			parameters: agentParams(modelFamilies()),
+			parameters: agentParams(offered),
 			executionMode: "parallel",
 
 			async execute(toolCallId, params, signal, onUpdate, ctx) {
@@ -1731,6 +1831,11 @@ export default function (pi: ExtensionAPI) {
 		currentCtx = ctx;
 		if (canSpawn()) register(ctx);
 		if (DEPTH === 0) setTimeout(cleanup, 5_000).unref();
+	});
+
+	// Another provider may have other families: the Agent tool offers those it has.
+	pi.on("model_select", (_event, ctx) => {
+		if (active && canSpawn() && offeredFamilies(ctx).join(",") !== offeredKey) register(ctx);
 	});
 
 	pi.on("session_shutdown", () => {

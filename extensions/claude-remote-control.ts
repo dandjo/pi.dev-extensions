@@ -36,7 +36,8 @@
  *   outcome, and the new context usage; a compaction outside a run is a turn of its own. Pi knows no context usage from
  *   a compaction until the next response, so the estimate of the compacted context stands in, as Pi computes it for
  *   the compaction's result. The history shows earlier compactions the same way.
- * - Plan usage: claude-usage.ts hands over the claude.ai plan limits through the event bus (claude-usage:source). They
+ * - Plan usage: claude-usage.ts hands over the claude.ai plan limits through the event bus (plan-usage:source, the
+ *   source whose plan applies to the current model). They
  *   go to the app as Claude Code forwards its rate limits: a rate_limit_event and rate_limit_info in the worker
  *   metadata, at connect and whenever they change. The usage card asks for get_usage; the answer carries Pi's totals of
  *   the session (tokens and cost per model, time, lines changed by edit) and the plan's windows.
@@ -1038,7 +1039,7 @@ interface BtwAsk {
 	reply?: (result: { answer?: string; error?: string }) => void;
 }
 
-// A copy of ClaudeUsageSource, UsageSnapshot from claude-usage.ts, the event-bus contract between the two: change
+// A copy of PlanUsageSource, UsageSnapshot from claude-usage.ts, the event-bus contract between the two: change
 // both alike.
 interface LimitRow {
 	label: string;
@@ -1058,12 +1059,22 @@ interface UsageSnapshot {
 	fetchedAt: number;
 	limits: LimitRow[];
 	credits: Credits | null;
-	/** The endpoint's windows, limit rows and extra usage as it sent them (ANSWER_KEYS); absent in older cache files. */
+	/**
+	 * The plan's own answer, for consumers that speak its format: here the endpoint's windows, limit rows and extra usage
+	 * as it sent them (ANSWER_KEYS); absent in older cache files.
+	 */
 	answer?: Record<string, unknown>;
 }
 
-/** What "claude-usage:source" carries. */
-interface ClaudeUsageSource {
+/**
+ * What "plan-usage:source" carries: the limits of one subscription plan, in a form that does not depend on its
+ * provider. A source for another plan (a ChatGPT plan, for one) joins the same way.
+ */
+interface PlanUsageSource {
+	/** The plan's id, "claude" here; "plan-usage:changed" names it. */
+	id: string;
+	/** Whether the plan's limits apply to a model, so a consumer picks the source of the model in use. */
+	appliesTo(model: { provider: string; id: string } | undefined): boolean;
 	/** The latest answer younger than USAGE_MAX_AGE_MS, or null. */
 	snapshot(): UsageSnapshot | null;
 	/** Asks the endpoint unless the shared answer is younger than USAGE_TTL_MS; settles once that is done. */
@@ -1127,7 +1138,7 @@ interface ClaudeLoginRefusal {
  * Claude Code <-> Pi tool names and inputs, shared by the extensions that speak Claude Code's formats (hooks, subagent
  * definitions).
  *
- * claude-agents.ts, claude-hooks.ts carry a copy of this block, or of a part of it: change them alike.
+ * claude-code-agents.ts, claude-code-hooks.ts carry a copy of this block, or of a part of it: change them alike.
  */
 /** Pi tool name -> Claude Code tool name. Tools without an entry keep their name (MCP tools, Agent, …). */
 const PI_TO_CLAUDE: Record<string, string> = {
@@ -1250,7 +1261,7 @@ function toClaudeResponse(
  * /agents, /cron, and /memory, and the frame and scrolling of the boxes /btw and the /diff dialog show above the
  * prompt.
  *
- * background-agents.ts, btw.ts, claude-hooks.ts, diff.ts, memory.ts, scheduled-tasks.ts, subagents.ts carry a copy of
+ * background-agents.ts, btw.ts, claude-code-hooks.ts, diff.ts, memory.ts, scheduled-tasks.ts, subagents.ts carry a copy of
  * this block, or of a part of it: change them alike.
  */
 /** Draws a rounded frame around `body`, with `title` in the top edge and `help` under it. */
@@ -2247,14 +2258,17 @@ export default function (pi: ExtensionAPI) {
 
 	// --- Plan usage ----------------------------------------------------------------------------------------------------
 
-	/** claude-usage.ts's plan limits, through the event bus; null without that extension. */
-	let usageSource: ClaudeUsageSource | null = null;
+	/** The plan sources on the event bus by id (claude-usage.ts: "claude"). */
+	const usageSources = new Map<string, PlanUsageSource>();
+	/** The plan limits of the model in use; null without a source for it. */
+	const usageSource = (): PlanUsageSource | null =>
+		[...usageSources.values()].find((source) => source.appliesTo(ctx?.model ?? undefined)) ?? null;
 	/** claude-login.ts, once it answered; without it a run-out login is not renewed. */
 	let loginSource: ClaudeLoginSource | null = null;
 
 	/** The plan limits as Claude Code forwards its rate limits: a rate_limit_event and rate_limit_info in the worker metadata. */
 	function reportRateLimits(c: Connection, force = false): void {
-		const snapshot = usageSource?.snapshot();
+		const snapshot = usageSource()?.snapshot();
 		const info = snapshot ? rateLimitInfo(snapshot) : undefined;
 		if (!info || c.closing) return;
 		const key = JSON.stringify(info);
@@ -2338,10 +2352,11 @@ export default function (pi: ExtensionAPI) {
 	 * hour, rate_limits is null. behaviors, Claude Code's scan of its local transcripts, stays null.
 	 */
 	async function onGetUsage(): Promise<Json> {
-		if (usageSource) {
-			await Promise.race([usageSource.refresh().catch(() => {}), new Promise((resolve) => setTimeout(resolve, HTTP_TIMEOUT_MS).unref?.())]);
+		const source = usageSource();
+		if (source) {
+			await Promise.race([source.refresh().catch(() => {}), new Promise((resolve) => setTimeout(resolve, HTTP_TIMEOUT_MS).unref?.())]);
 		}
-		const snapshot = usageSource?.snapshot() ?? null;
+		const snapshot = source?.snapshot() ?? null;
 		return {
 			session: sessionUsage(),
 			subscription_type: await subscriptionType(),
@@ -2785,7 +2800,7 @@ export default function (pi: ExtensionAPI) {
 		reportSettings(c, true);
 		reportContext(c, true);
 		reportRateLimits(c, true);
-		void usageSource?.refresh().catch(() => {});
+		void usageSource()?.refresh().catch(() => {});
 		resendTasks(c);
 		setStatus("⇄ /rc active");
 		const closed = c.pendingClose;
@@ -3025,12 +3040,20 @@ export default function (pi: ExtensionAPI) {
 	const unsubscribe = [
 		pi.events.on(QUESTIONS_OPEN, onQuestionsOpen),
 		pi.events.on(QUESTIONS_CLOSE, onQuestionsClose),
-		pi.events.on("claude-usage:source", (data) => {
-			const source = data as ClaudeUsageSource | undefined;
-			if (typeof source?.snapshot === "function" && typeof source.refresh === "function") usageSource = source;
+		pi.events.on("plan-usage:source", (data) => {
+			const source = data as PlanUsageSource | undefined;
+			if (
+				typeof source?.id === "string" &&
+				typeof source.appliesTo === "function" &&
+				typeof source.snapshot === "function" &&
+				typeof source.refresh === "function"
+			) {
+				usageSources.set(source.id, source);
+			}
 		}),
-		pi.events.on("claude-usage:changed", () => {
-			if (alive && connection) reportRateLimits(connection);
+		pi.events.on("plan-usage:changed", (data) => {
+			const id = (data as { id?: unknown } | undefined)?.id;
+			if (alive && connection && (id === undefined || id === usageSource()?.id)) reportRateLimits(connection);
 		}),
 		pi.events.on("claude-login:source", (data) => {
 			const source = data as ClaudeLoginSource | undefined;
@@ -3049,7 +3072,7 @@ export default function (pi: ExtensionAPI) {
 			if (alive && connection) reportTasks(connection);
 		}),
 	];
-	pi.events.emit("claude-usage:source-request", undefined);
+	pi.events.emit("plan-usage:source-request", undefined);
 	pi.events.emit("claude-login:source-request", undefined);
 
 	pi.registerFlag("remote-control", { description: "Connect the session to claude.ai and the Claude app at start", type: "boolean", default: false });
@@ -3180,7 +3203,7 @@ export default function (pi: ExtensionAPI) {
 		writeResult(c, false);
 		c.running = false;
 		reportContext(c);
-		void usageSource?.refresh().catch(() => {});
+		void usageSource()?.refresh().catch(() => {});
 	});
 
 	pi.on("agent_settled", (event) => {

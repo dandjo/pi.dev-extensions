@@ -15,7 +15,7 @@
  *   of the terminal.
  */
 
-import { type Message, uuidv7 } from "@earendil-works/pi-ai";
+import { type Api, type Message, type Model, uuidv7 } from "@earendil-works/pi-ai";
 import {
 	buildSessionContext,
 	convertToLlm,
@@ -55,7 +55,7 @@ interface Exchange {
  * /agents, /cron, and /memory, and the frame and scrolling of the boxes /btw and the /diff dialog show above the
  * prompt.
  *
- * background-agents.ts, claude-hooks.ts, claude-remote-control.ts, diff.ts, memory.ts, scheduled-tasks.ts, subagents.ts
+ * background-agents.ts, claude-code-hooks.ts, claude-remote-control.ts, diff.ts, memory.ts, scheduled-tasks.ts, subagents.ts
  * carry a copy of this block, or of a part of it: change them alike.
  */
 /** Draws a rounded frame around `body`, with `title` in the top edge and `help` under it. */
@@ -101,16 +101,18 @@ function viewport(lines: string[], offset: number, rows: number): string[] {
  * goal.ts, session-title.ts, web-tools.ts carry a copy of this block, or of a part of it: change them alike.
  */
 /**
- * Side requests run one at a time, across every extension that loads this file. A provider that runs one process per
- * request may otherwise close the conversation's own process while it waits for tool results: pi-claude-subscription
- * keeps at most three Claude Code processes and closes the least recently used one outside a call.
+ * Side requests to the claude-sdk provider run one at a time, across every extension that loads this file: it runs one
+ * process per request and may otherwise close the conversation's own process while it waits for tool results
+ * (pi-claude-subscription keeps at most three Claude Code processes and closes the least recently used one outside a
+ * call). Other providers take them at once.
  */
 const gate: { tail: Promise<unknown> } = ((globalThis as Record<symbol, unknown>)[Symbol.for("pi.small-model.gate")] ??= {
 	tail: Promise.resolve(),
 }) as { tail: Promise<unknown> };
 
-/** Runs `run` after every side request queued before it has finished. */
-function oneAtATime<T>(run: () => Promise<T>): Promise<T> {
+/** Runs `run` after every side request to claude-sdk queued before it has finished; to other providers at once. */
+function oneAtATime<T>(model: Model<Api>, run: () => Promise<T>): Promise<T> {
+	if (model.provider !== "claude-sdk") return run();
 	const result = gate.tail.then(run, run);
 	gate.tail = result.catch(() => {});
 	return result;
@@ -212,7 +214,7 @@ export default function (pi: ExtensionAPI) {
 			]
 				.filter(Boolean)
 				.join("\n\n");
-			const reply = await oneAtATime(async () => {
+			const reply = await oneAtATime(model, async () => {
 				const stream = ctx.modelRegistry.streamSimple(
 					model,
 					{ systemPrompt: SYSTEM_PROMPT, messages: [{ role: "user", content: [{ type: "text", text }], timestamp: Date.now() }] },

@@ -26,8 +26,9 @@
  * Claude Code's back.
  *
  * The rows reach statusline.ts through the event bus ("statusline:section"); without it this file does nothing.
- * Other extensions read the answer through the event bus as well: "claude-usage:source" carries a ClaudeUsageSource,
- * at load and on every "claude-usage:source-request", and "claude-usage:changed" follows every new state.
+ * Other extensions read the answer through the event bus as well, in a protocol that does not depend on the provider:
+ * "plan-usage:source" carries a PlanUsageSource (id "claude", for the Claude models) at load and on every
+ * "plan-usage:source-request", and "plan-usage:changed" with { id: "claude" } follows every new state.
  * claude-remote-control.ts hands the limits to the Claude app that way.
  */
 
@@ -68,12 +69,22 @@ export interface UsageSnapshot {
 	fetchedAt: number;
 	limits: LimitRow[];
 	credits: Credits | null;
-	/** The endpoint's windows, limit rows and extra usage as it sent them (ANSWER_KEYS); absent in older cache files. */
+	/**
+	 * The plan's own answer, for consumers that speak its format: here the endpoint's windows, limit rows and extra usage
+	 * as it sent them (ANSWER_KEYS); absent in older cache files.
+	 */
 	answer?: Record<string, unknown>;
 }
 
-/** What "claude-usage:source" carries. */
-export interface ClaudeUsageSource {
+/**
+ * What "plan-usage:source" carries: the limits of one subscription plan, in a form that does not depend on its
+ * provider. A source for another plan (a ChatGPT plan, for one) joins the same way.
+ */
+export interface PlanUsageSource {
+	/** The plan's id, "claude" here; "plan-usage:changed" names it. */
+	id: string;
+	/** Whether the plan's limits apply to a model, so a consumer picks the source of the model in use. */
+	appliesTo(model: { provider: string; id: string } | undefined): boolean;
 	/** The latest answer younger than USAGE_MAX_AGE_MS, or null. */
 	snapshot(): UsageSnapshot | null;
 	/** Asks the endpoint unless the shared answer is younger than USAGE_TTL_MS; settles once that is done. */
@@ -421,7 +432,7 @@ export default function (pi: ExtensionAPI) {
 
 	const changed = () => {
 		pi.events.emit("statusline:changed", undefined);
-		pi.events.emit("claude-usage:changed", undefined);
+		pi.events.emit("plan-usage:changed", { id: "claude" });
 	};
 
 	/** Takes over a newer state another session wrote; true when it did. */
@@ -549,15 +560,17 @@ export default function (pi: ExtensionAPI) {
 	pi.events.on("statusline:section-request", () => pi.events.emit("statusline:section", section));
 	pi.events.emit("statusline:section", section);
 
-	const source: ClaudeUsageSource = {
+	const source: PlanUsageSource = {
+		id: "claude",
+		appliesTo: isClaudeModel,
 		snapshot: () => {
 			const snap = state?.snapshot;
 			return snap && Date.now() - snap.fetchedAt < USAGE_MAX_AGE_MS ? snap : null;
 		},
 		refresh: () => refreshUsage(),
 	};
-	pi.events.on("claude-usage:source-request", () => pi.events.emit("claude-usage:source", source));
-	pi.events.emit("claude-usage:source", source);
+	pi.events.on("plan-usage:source-request", () => pi.events.emit("plan-usage:source", source));
+	pi.events.emit("plan-usage:source", source);
 
 	pi.events.on("claude-login:source", (data) => {
 		const offered = data as ClaudeLoginSource | undefined;

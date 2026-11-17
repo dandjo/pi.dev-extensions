@@ -305,7 +305,7 @@ function loopFile(cwd: string): { file: string; text: string } | undefined {
  * /agents, /cron, and /memory, and the frame and scrolling of the boxes /btw and the /diff dialog show above the
  * prompt.
  *
- * background-agents.ts, btw.ts, claude-hooks.ts, claude-remote-control.ts, diff.ts, memory.ts, subagents.ts carry a
+ * background-agents.ts, btw.ts, claude-code-hooks.ts, claude-remote-control.ts, diff.ts, memory.ts, subagents.ts carry a
  * copy of this block, or of a part of it: change them alike.
  */
 /** Draws a rounded frame around `body`, with `title` in the top edge and `help` under it. */

@@ -1,13 +1,14 @@
 /**
  * Claude Code hooks in Pi: runs the hooks Claude Code would run, at the matching Pi events, with Claude Code's hook
- * protocol (https://code.claude.com/docs/en/hooks): JSON on stdin, exit code 2 blocks, JSON on stdout decides.
+ * protocol (https://code.claude.com/docs/en/hooks): JSON on stdin, exit code 2 blocks, JSON on stdout decides. It
+ * reads Claude Code's formats only and needs no Claude model: the hooks run with any provider.
  *
  * Hooks come from
  * - ~/.claude/settings.json (CLAUDE_CONFIG_DIR is honoured),
  * - <project>/.claude/settings.json and .claude/settings.local.json, only once the project is trusted in Pi,
- * - hooks/hooks.json of every Claude Code plugin in ~/.pi/agent/claude-plugins (one directory per plugin, or a link
- *   to one) and of every plugin Claude Code installed for the user and enabled in its user settings (a plugin in
- *   claude-plugins replaces an installed one of the same name), with CLAUDE_PLUGIN_ROOT pointing at the plugin.
+ * - hooks/hooks.json of every Claude Code plugin in ~/.pi/agent/claude-code-plugins (one directory per plugin, or a
+ *   link to one) and of every plugin Claude Code installed for the user and enabled in its user settings (a plugin in
+ *   claude-code-plugins replaces an installed one of the same name), with CLAUDE_PLUGIN_ROOT pointing at the plugin.
  * `disableAllHooks: true` in one of the settings files turns them all off.
  *
  * Events, and the Pi event each one runs at:
@@ -131,24 +132,28 @@ function readJson(file: string): any {
 
 /** The directories in dir, links to directories included. */
 /**
- * The Claude Code plugins Pi uses, by name: every directory in ~/.pi/agent/claude-plugins (or a link to one), then the
- * plugins Claude Code installed for the user (plugins/installed_plugins.json) and enabled in its user settings
- * (enabledPlugins), at their installPath. A name in claude-plugins wins over an installed plugin, and the first of two
- * installed plugins of one name wins over the second. claude-agents.ts carries a copy of this function: change them alike.
+ * The Claude Code plugins Pi uses, by name: every directory in ~/.pi/agent/claude-code-plugins (or a link to one),
+ * then in ~/.pi/agent/claude-plugins, the folder of earlier versions, until claude-code-plugins.ts has moved its
+ * entries over; then the plugins Claude Code installed for the user (plugins/installed_plugins.json) and enabled in
+ * its user settings (enabledPlugins), at their installPath. Of two plugins of one name, the one found first wins.
+ * claude-code-agents.ts carries a copy of this function: change them alike.
  */
 function claudePlugins(): { name: string; root: string }[] {
 	const plugins = new Map<string, string>();
-	const linked = path.join(getAgentDir(), "claude-plugins");
-	try {
-		for (const name of readdirSync(linked).sort()) {
-			try {
-				if (statSync(path.join(linked, name)).isDirectory()) plugins.set(name, path.join(linked, name));
-			} catch {
-				// a broken link
+	for (const folder of ["claude-code-plugins", "claude-plugins"]) {
+		const linked = path.join(getAgentDir(), folder);
+		try {
+			for (const name of readdirSync(linked).sort()) {
+				if (plugins.has(name)) continue;
+				try {
+					if (statSync(path.join(linked, name)).isDirectory()) plugins.set(name, path.join(linked, name));
+				} catch {
+					// a broken link
+				}
 			}
+		} catch {
+			// no such folder
 		}
-	} catch {
-		// no claude-plugins
 	}
 	const json = (file: string): any => {
 		try {
@@ -442,7 +447,7 @@ function interpret(hook: Hook, run: RunResult, timeoutS: number): Outcome {
  * Claude Code <-> Pi tool names and inputs, shared by the extensions that speak Claude Code's formats (hooks, subagent
  * definitions).
  *
- * claude-agents.ts, claude-remote-control.ts carry a copy of this block, or of a part of it: change them alike.
+ * claude-code-agents.ts, claude-remote-control.ts carry a copy of this block, or of a part of it: change them alike.
  */
 /** Pi tool name -> Claude Code tool name. Tools without an entry keep their name (MCP tools, Agent, …). */
 const PI_TO_CLAUDE: Record<string, string> = {

@@ -73,16 +73,18 @@ const REQUEST_TIMEOUT_MS = 120_000;
 const THINKING_ROOM = 4_096;
 
 /**
- * Side requests run one at a time, across every extension that loads this file. A provider that runs one process per
- * request may otherwise close the conversation's own process while it waits for tool results: pi-claude-subscription
- * keeps at most three Claude Code processes and closes the least recently used one outside a call.
+ * Side requests to the claude-sdk provider run one at a time, across every extension that loads this file: it runs one
+ * process per request and may otherwise close the conversation's own process while it waits for tool results
+ * (pi-claude-subscription keeps at most three Claude Code processes and closes the least recently used one outside a
+ * call). Other providers take them at once.
  */
 const gate: { tail: Promise<unknown> } = ((globalThis as Record<symbol, unknown>)[Symbol.for("pi.small-model.gate")] ??= {
 	tail: Promise.resolve(),
 }) as { tail: Promise<unknown> };
 
-/** Runs `run` after every side request queued before it has finished. */
-function oneAtATime<T>(run: () => Promise<T>): Promise<T> {
+/** Runs `run` after every side request to claude-sdk queued before it has finished; to other providers at once. */
+function oneAtATime<T>(model: Model<Api>, run: () => Promise<T>): Promise<T> {
+	if (model.provider !== "claude-sdk") return run();
 	const result = gate.tail.then(run, run);
 	gate.tail = result.catch(() => {});
 	return result;
@@ -148,7 +150,7 @@ function askModel(
 ): Promise<AssistantMessage> {
 	const reasoning = lowestThinking(ctx, model);
 	const maxTokens = options.maxTokens + (reasoning ? THINKING_ROOM : 0);
-	return oneAtATime(() => {
+	return oneAtATime(model, () => {
 		const timeout = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
 		return ctx.modelRegistry
 			.streamSimple(
