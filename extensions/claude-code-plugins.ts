@@ -18,7 +18,8 @@
  *     /skill:my-plugin-review);
  *   - ${CLAUDE_SKILL_DIR} and ${CLAUDE_PLUGIN_ROOT} are replaced with the absolute mirror paths, which Pi does not
  *     substitute itself.
- *   A git package's mirror is rebuilt when its commit changes, a local folder's at every load.
+ *   A git package's mirror is rebuilt when its commit changes, a local folder's at every load, either while the
+ *   extension loads, before session_start, so claude-code-hooks.ts runs the SessionStart hooks of the current mirror.
  * - Plugin hooks and scripts are mirrored as they are. Every mirrored plugin is linked into
  *   ~/.pi/agent/claude-code-plugins, where claude-code-hooks.ts runs its hooks and claude-code-agents.ts finds its
  *   agents; a plugin name two marketplaces share goes to the first. Links into a mirror (a directory with a .source stamp, this one's or an earlier one's) are
@@ -48,7 +49,7 @@ import {
 	SettingsManager,
 } from "@earendil-works/pi-coding-agent";
 import type { TUI } from "@earendil-works/pi-tui";
-import { execFile } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
 	cpSync,
@@ -83,6 +84,8 @@ const RETIRE_AFTER_MS = 2 * 24 * 60 * 60_000;
 const STAMP_NAME = ".source";
 const GENERATOR_VERSION = 2;
 const GIT_TIMEOUT_MS = 60_000;
+/** git rev-parse while the extension loads, which holds up Pi's start. */
+const REV_PARSE_TIMEOUT_MS = 10_000;
 /** A `pi update` running longer is stopped; it may install npm dependencies. */
 const UPDATE_TIMEOUT_MS = 180_000;
 /** Held by the Pi process that updates, with its pid inside; another one waits for it. */
@@ -168,16 +171,37 @@ async function git(args: string[], cwd?: string): Promise<string> {
 	return stdout.trim();
 }
 
-/** The package's commit, or for an npm package its version; null when neither is known. */
-async function revision(m: Marketplace): Promise<string | null> {
-	const commit = await git(["rev-parse", "--short", "HEAD"], m.repo).catch(() => null);
-	if (commit) return commit;
+/** The version in an npm package's package.json, or null. */
+function packageVersion(m: Marketplace): string | null {
 	try {
 		const version = JSON.parse(readFileSync(path.join(m.repo, "package.json"), "utf8"))?.version;
 		return typeof version === "string" && version ? version : null;
 	} catch {
 		return null;
 	}
+}
+
+/** The package's commit, or for an npm package its version; null when neither is known. */
+async function revision(m: Marketplace): Promise<string | null> {
+	const commit = await git(["rev-parse", "--short", "HEAD"], m.repo).catch(() => null);
+	return commit || packageVersion(m);
+}
+
+/** revision() for the load of the extension, which must be done before session_start. */
+function revisionSync(m: Marketplace): string | null {
+	try {
+		const commit = execFileSync("git", ["rev-parse", "--short", "HEAD"], {
+			cwd: m.repo,
+			timeout: REV_PARSE_TIMEOUT_MS,
+			encoding: "utf8",
+			stdio: ["ignore", "pipe", "ignore"],
+			env: { ...process.env, ...GIT_ENV },
+		}).trim();
+		if (commit) return commit;
+	} catch {
+		// not a git checkout
+	}
+	return packageVersion(m);
 }
 
 /** Runs `pi update <source>` with the Pi that runs this extension, its output kept out of the terminal. */
@@ -695,8 +719,27 @@ export default function (pi: ExtensionAPI) {
 		return;
 	}
 
-	// Before any session_start, when claude-code-hooks.ts reads the plugins: the links of the mirrors as they are.
-	if (!process.env.PI_SUBAGENT_DEPTH) {
+	// Before any session_start, at the start and at /reload alike, since claude-code-hooks.ts runs the SessionStart
+	// hooks there: mirrors rebuilt where the package changed, then linked. A git or npm package's mirror is rebuilt when
+	// its revision changed (by a `pi update` by hand, say), a local folder's at every load, as it may have changed
+	// without a commit, though not by subagent processes, which use the mirror of the Pi that started them.
+	/** The revision per marketplace package (by folder) whose plugins and resources this runtime loads. */
+	const loaded = new Map<string, string | null>();
+	let generated = false;
+	for (const m of marketplaces) {
+		const current = revisionSync(m);
+		const stamp = m.updatable ? current : process.env.PI_SUBAGENT_DEPTH ? null : `${current ?? "local"}+${Date.now().toString(36)}`;
+		if (stamp && !isCurrent(m, stamp)) {
+			try {
+				generate(m, stamp);
+				generated = true;
+			} catch {
+				// Keep the previous mirror; the next load or update retries.
+			}
+		}
+		loaded.set(m.repo, current);
+	}
+	if (generated || !process.env.PI_SUBAGENT_DEPTH) {
 		try {
 			linkPlugins(marketplaces);
 		} catch {
@@ -709,8 +752,6 @@ export default function (pi: ExtensionAPI) {
 	// Pi's TUI answers which component has the focus, though its TUI interface does not declare the method; without it
 	// the focus counts as the editor's.
 	let tui: (TUI & { getFocusedComponent?: () => unknown }) | null = null;
-	/** The revision per marketplace package (by folder) whose plugins and resources this runtime loaded. */
-	const loaded = new Map<string, string | null>();
 	// Pi emits resources_discover after session_start, at the start and at /reload alike.
 	let markDiscovered = () => {};
 	const discovered = new Promise<void>((resolve) => (markDiscovered = resolve));
@@ -784,29 +825,6 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	pi.on("resources_discover", async () => {
-		let generated = false;
-		for (const m of marketplaces) {
-			const current = await revision(m);
-			// A local folder may have changed without a commit, so its mirror is rebuilt at every load, though not by
-			// subagent processes, which use the mirror of the Pi that started them.
-			const stamp = m.updatable ? current : process.env.PI_SUBAGENT_DEPTH ? null : `${current ?? "local"}+${Date.now().toString(36)}`;
-			if (stamp && !isCurrent(m, stamp)) {
-				try {
-					generate(m, stamp);
-					generated = true;
-				} catch {
-					// Keep the previous mirror; the next update retries.
-				}
-			}
-			loaded.set(m.repo, current);
-		}
-		if (generated) {
-			try {
-				linkPlugins(marketplaces);
-			} catch {
-				// The next start or update retries.
-			}
-		}
 		markDiscovered();
 		return { skillPaths: skillPaths(marketplaces) };
 	});

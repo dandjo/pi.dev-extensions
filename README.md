@@ -372,6 +372,9 @@ and needs no Claude model: the plugins work with any provider.
 
   The copy of a package from git is rebuilt when its commit changes, the copy
   of a local folder at every start, so that changes not yet committed show.
+  Both happen while Pi loads its extensions, before the session starts, so
+  the SessionStart hooks of the plugins run from the current copy, on the
+  very first start and after a `pi update` by hand too.
 - The plugins' `hooks/` and `scripts/` are mirrored as they are, and every
   mirrored plugin is linked into `~/.pi/agent/claude-code-plugins/<plugin>`,
   where [claude-code-hooks](#claude-code-hooks) and
@@ -389,7 +392,7 @@ and needs no Claude model: the plugins work with any provider.
   itself, unless a package lives in it. While the file exists, every start
   names what is left: `pi install` for a marketplace in it not installed yet,
   else deleting the file.
-- Until November 17, 2026 this extension was `claude-code-plugins.ts`, with
+- Until November 17, 2026 this extension was `claude-marketplaces.ts`, with
   the copies in `~/.pi/agent/claude-marketplaces/` and the links in
   `~/.pi/agent/claude-plugins/`. Two days after a start first finds those
   folders, so that sessions still running the old version keep their skills
