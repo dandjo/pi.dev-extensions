@@ -21,7 +21,9 @@
  * - /memory shows the providers and the index in use; /memory edit opens the index in Pi's editor.
  * - /memory lint checks the memory against its rules and the size it costs: index lines over 150 characters, an index
  *   over 200 lines, links to missing files, topic files without an index line or frontmatter, and topic files over
- *   8 KB, which cost that much every time they are read. At start, a notice counts what it finds.
+ *   8 KB, which cost that much every time they are read. A file the topic map of an indexed core file links ([[name]]
+ *   or a Markdown link) counts as indexed: a subject split into several files needs one index line, not one per file.
+ *   At start, a notice counts what it finds.
  * - The same limits hold when the model writes: a write or edit that would put an index line over 150 characters or
  *   the index over 200 lines, a topic file without frontmatter, or a topic file over 8 KB that grows further is
  *   refused, with what to do instead (shorten the line and keep the details in the topic file; split the file by
@@ -56,7 +58,7 @@ const RULES = [
 	"- Save what a later session needs and cannot read from the code, the docs, or the git history: who the user is and how they work (type user); corrections and preferences they gave you (feedback); facts and decisions about the project and its surroundings, with the reason (project); where outside information lives (reference). Save at once when the user asks you to remember something, corrects you, or a non-obvious fact took effort to establish.",
 	"- Do not save the steps of the current task, guesses, or what the repository already says, and never secrets, tokens, or other people's personal data.",
 	"- One topic file per subject, named in kebab-case (deploy-needs-vpn.md), beginning with this frontmatter: `name` (the file name without .md), `description` (one line, specific enough to judge relevance), and `metadata` with `node_type: memory`, `type` (user, feedback, project, or reference), and `modified` (an ISO 8601 timestamp). Then the fact; feedback and project entries add **Why:** (the reason given) and **How to apply:** (when it matters).",
-	"- Every topic file has one line in MEMORY.md: `- [Title](file.md) — what it says`, under 150 characters. The index holds no content of its own and stays under 200 lines; create it with the first entry if it is missing.",
+	"- Every topic file has one line in MEMORY.md: `- [Title](file.md) — what it says`, under 150 characters. A topic file stays under 8 KB: a subject that needs more gets a core file whose topic map links its other files ([[name]]), and only the core file has a line in MEMORY.md, ending in a topic map hint. The index holds no content of its own and stays under 200 lines; create it with the first entry if it is missing.",
 	"- Before adding an entry, look for one on the same subject and update it instead, setting `modified`. Correct or delete an entry, with its index line, as soon as it turns out wrong or stale. Write dates as absolute dates.",
 ].join("\n");
 
@@ -164,7 +166,7 @@ function guardProblem(file: string, content: string | undefined, edits: { oldTex
 			? Buffer.byteLength(content)
 			: before + edits.reduce((n, e) => n + Buffer.byteLength(e.newText) - Buffer.byteLength(e.oldText), 0);
 	if (after > MAX_TOPIC_BYTES && after > before) {
-		return `Not written: ${name} would have ${(after / 1024).toFixed(1)} KB, over the ${MAX_TOPIC_BYTES / 1024} KB a topic file should stay under, since it costs its size each time it is read. Split it by subject into topic files of their own, each with frontmatter and an index line, and drop what is stale (superseded statements, finished intermediate states, removed workarounds); then write the part that belongs here.`;
+		return `Not written: ${name} would have ${(after / 1024).toFixed(1)} KB, over the ${MAX_TOPIC_BYTES / 1024} KB a topic file should stay under, since it costs its size each time it is read. Split it by subject: keep this file as the core with a topic map that links new topic files ([[name]], each with frontmatter), and drop what is stale (superseded statements, finished intermediate states, removed workarounds); then write the part that belongs here.`;
 	}
 	return undefined;
 }
@@ -391,6 +393,17 @@ function lint(dir: string): Lint {
 			if (!existsSync(path.join(dir, m[1]))) result.missing.push(m[1]);
 		}
 	});
+	// Files the topic maps of indexed files link count as indexed.
+	for (const file of [...linked]) {
+		let text = "";
+		try {
+			text = readFileSync(path.join(dir, file), "utf8");
+		} catch {
+			continue;
+		}
+		for (const m of text.matchAll(/\]\(([^)\s]+\.md)\)/g)) linked.add(m[1]);
+		for (const m of text.matchAll(/\[\[([^\]|#]+)/g)) linked.add(`${m[1].trim()}.md`);
+	}
 	let files: string[] = [];
 	try {
 		files = readdirSync(dir).filter((f) => f.endsWith(".md") && f !== INDEX);
@@ -416,7 +429,7 @@ function lintSummary(l: Lint): string | undefined {
 		l.longLines.length && `${n(l.longLines.length, "index line")} over ${MAX_LINE_CHARS} characters`,
 		l.indexLines > MAX_INDEX_LINES && `an index of ${l.indexLines} lines (cut at ${MAX_INDEX_LINES})`,
 		l.missing.length && `${n(l.missing.length, "link")} to missing files`,
-		l.unindexed.length && `${n(l.unindexed.length, "topic file")} without an index line`,
+		l.unindexed.length && `${n(l.unindexed.length, "topic file")} not linked from the index`,
 		l.noFrontmatter.length && `${n(l.noFrontmatter.length, "topic file")} without frontmatter`,
 		l.large.length && `${n(l.large.length, "topic file")} over ${MAX_TOPIC_BYTES / 1024} KB`,
 	].filter(Boolean);
@@ -437,7 +450,7 @@ function lintReport(l: Lint, theme: Theme): string[] {
 	);
 	if (l.indexLines > MAX_INDEX_LINES) section("Index too long", [`${l.indexLines} lines; the prompt gets the first ${MAX_INDEX_LINES}`]);
 	section(`Links to missing files (${l.missing.length})`, l.missing);
-	section(`Topic files without an index line (${l.unindexed.length})`, l.unindexed);
+	section(`Topic files without an index line or a topic map that links them (${l.unindexed.length})`, l.unindexed);
 	section(`Topic files without frontmatter (name, description, type) (${l.noFrontmatter.length})`, l.noFrontmatter);
 	section(
 		`Topic files over ${MAX_TOPIC_BYTES / 1024} KB (${l.large.length}): each read costs about as many tokens as the file has bytes / 3.5`,
@@ -560,7 +573,7 @@ export default function (pi: ExtensionAPI) {
 					...lintReport(result, plain),
 					"",
 					`- Index lines over ${MAX_LINE_CHARS} characters: keep the title and the one fact that decides whether the entry is relevant; check that every detail the line drops stands in its topic file, and move it there if not.`,
-					`- Topic files over ${MAX_TOPIC_BYTES / 1024} KB: split each by subject into topic files of at most ${MAX_TOPIC_BYTES / 1024} KB, each with frontmatter and its own index line, so that a task reads only the part it needs. Keep every fact, prohibition, decision, and preference that still holds; drop only what is clearly stale (superseded statements, finished intermediate states, removed workarounds).`,
+					`- Topic files over ${MAX_TOPIC_BYTES / 1024} KB: split each by subject into topic files of at most ${MAX_TOPIC_BYTES / 1024} KB, each with frontmatter, so that a task reads only the part it needs: the original file stays as the core with a topic map that links the others ([[name]]), and only it keeps a line in ${INDEX}, ending in a topic map hint. Keep every fact, prohibition, decision, and preference that still holds; drop only what is clearly stale (superseded statements, finished intermediate states, removed workarounds).`,
 					"- Links to missing files, files without an index line or frontmatter: fix the index or the file.",
 					"- Before you remove anything or overwrite a file, show me what would go, with the reason, and wait for my answer.",
 				].join("\n");

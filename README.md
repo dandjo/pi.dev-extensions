@@ -847,7 +847,9 @@ out wrong.
   first 200), links to missing files, topic files without an index line or
   without frontmatter, and topic files over 8 KB. The index is in every
   request, and a topic file costs its size each time it is read, so both pay
-  for being short.
+  for being short. A subject too large for one file gets a core file with a
+  topic map that links its other files (`[[name]]`): only the core file needs
+  an index line, and the files its map links count as indexed.
 - The same limits hold when the model writes. A write or edit is refused
   when it would put an index line over 150 characters or the index over 200
   lines, write a topic file without frontmatter, or let a topic file over
