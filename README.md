@@ -10,7 +10,8 @@ diff view, agent panel, and Remote Control for the Claude app, reads and
 changes OpenProject and GitLab, reads and writes the clipboard, controls your
 Chrome, keeps requests alive through network trouble, keeps long
 conversations small, waits for pipelines and deploys without spending
-requests, and keeps the Claude Agent SDK current.
+requests, keeps the Claude Agent SDK current, and fixes how the provider
+resumes after edited history.
 
 Install it as a Pi package (step 3 of the setup below); `extensions/` holds
 one file per extension.
@@ -41,6 +42,7 @@ one file per extension.
 | `background-agents.ts`     | The agent panel below the prompt: ↓ to the agents, Enter opens one, Ctrl+B to background  | `subagents.ts`                                                   |
 | `claude-stream-only.ts`    | Keeps Claude Code on streamed responses, so a stalled one cannot leave Pi waiting         | `pi-claude-subscription`                                         |
 | `claude-sdk-update.ts`     | Installs a newer Claude Agent SDK, and with it Claude Code, as soon as there is one       | `pi-claude-subscription`, npm                                    |
+| `claude-sdk-resume-fix.ts` | Fixes pi-claude-subscription 0.2.4, which loses responses after edits in older messages   | `pi-claude-subscription`, GitHub at the first start              |
 | `network-resilience.ts`    | Claude Code's handling of dropped connections: stall notice, restart, network wait        | —                                                                |
 | `context-gc.ts`            | Cuts thinking and long tool outputs of older turns from the context, in batches           | —                                                                |
 | `wait.ts`                  | Adds `wait`: checks a command or tool until a condition holds, without model requests     | —                                                                |
@@ -69,7 +71,7 @@ What differs is the tool around the model.
   panels, and dialogs, see and change what goes to the model, and react to
   every step of a session. Claude Code offers hooks, skills, MCP servers, and
   a status line script; its interface and agent loop stay closed. All
-  twenty-seven extensions here are such files: the GitLab and OpenProject
+  twenty-eight extensions here are such files: the GitLab and OpenProject
   tools, the plan limits in the status line, the diff panel, scheduled
   prompts, messages between sessions. Each can be read in one go, and a fix
   is a commit here, not a wait for the next Claude Code release.
@@ -103,7 +105,7 @@ Where Claude Code stays the better choice:
 ## Set up Pi
 
 Follow the steps in order — together they are the complete setup: Pi itself,
-the Claude subscription, all twenty-seven extensions, and the browser connection.
+the Claude subscription, all twenty-eight extensions, and the browser connection.
 Every step except the Chrome switch in step 4 is a
 shell command, so an agent can carry them out as well.
 
@@ -170,7 +172,7 @@ Install this repository as a Pi package:
 pi install git:github.com/dandjo/pi.dev-extensions
 ```
 
-Pi clones it into `~/.pi/agent/git/` and loads all twenty-seven extensions from
+Pi clones it into `~/.pi/agent/git/` and loads all twenty-eight extensions from
 there; `pi list` shows the package, and `pi update --extensions` brings new
 versions, new and renamed extensions included. There is no build step and no
 `npm install`: the extensions import only packages Pi provides itself. Each
@@ -1567,6 +1569,35 @@ since npm keeps a dependency at the version of `package-lock.json`.
 - Works with npm, Pi's default. With an `npmCommand` setting for pnpm or Bun,
   the extension does nothing.
 
+## claude-sdk-resume-fix
+
+Brings the fixes of `pi-claude-subscription`'s
+[pull request #4](https://github.com/jkeskikangas/pi-claude-subscription/pull/4)
+into a version without them. Up to 0.2.4, after a change in older messages —
+a cut by [context-gc](#context-gc), any context edit — the provider resumes
+Claude Code's transcript at the last unchanged message and sends everything
+after it as one user turn: every later response is lost, without an error.
+With the pull request it writes them into a fork of the transcript instead,
+and the cached part before the change stays cached.
+
+- At every start in the terminal, it looks for `pi-claude-subscription` among
+  Pi's packages. When the three files the pull request changes are exactly
+  those of 0.2.4, it fetches the pull request's versions from GitHub at a
+  fixed commit, checks each against the SHA-256 it carries, and puts them in
+  place once all of them have arrived. Pi then reloads as soon as it is at
+  rest, and the provider runs with the fix. Print, JSON, and RPC mode,
+  subagents, and `PI_OFFLINE` skip the check.
+- A reinstall of the package brings the old files back; the next start fixes
+  them again.
+- It warns at every start until someone acts: with an error when the fix
+  cannot be applied — a version or files it does not know, or GitHub not
+  answering with the expected files — since Claude then loses responses after
+  every cut; with a warning when the installed version has the fix itself,
+  since the extension is no longer needed then.
+- `/claude-sdk-resume-fix` shows the state and applies the fix at once.
+- Pi processes starting together patch one at a time, through a lock file in
+  `~/.pi/agent`.
+
 ## network-resilience
 
 Keeps a request alive through network trouble the way Claude Code does. Pi on
@@ -1658,7 +1689,7 @@ long tool inputs.
   [pull request #4](https://github.com/jkeskikangas/pi-claude-subscription/pull/4):
   up to 0.2.4, after a change in older messages, the provider resumes its own
   transcript at the last unchanged message and leaves out every later
-  response.
+  response. [claude-sdk-resume-fix](#claude-sdk-resume-fix) brings them in.
 - `/gc` cuts at the next request, regardless of the thresholds. `/gc status`
   shows the passes so far, the context, and what could go now. A notice names
   every cut.

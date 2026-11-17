@@ -15,7 +15,7 @@
  *   cache keeps everything before the first cut.
  * - With pi-claude-subscription it needs the fixes of that provider's pull request #4 ("Resume correctly after edited
  *   history"): up to 0.2.4, after an edit in older messages, it resumes its own transcript at the last unchanged
- *   message and leaves out every later response.
+ *   message and leaves out every later response. claude-sdk-resume-fix.ts brings the fixes in.
  * - /gc cuts at the next request, regardless of the thresholds; /gc status shows what was cut and what could go now.
  * - Settings in ~/.pi/agent/context-gc.json, every key optional: {"enabled": true, "keepRecent": 10,
  *   "minResultChars": 4000, "minArgChars": 2000, "batchTokens": 100000, "coldMinutes": 60, "coldMinTokens": 5000,
