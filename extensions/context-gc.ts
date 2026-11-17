@@ -11,18 +11,29 @@
  *   a request or after a switch to another model (/model, Ctrl+P), it cuts whatever it can before the first request,
  *   so the cache is built from the smaller context only. That request carries the cuts itself; they are stored at
  *   the end of its turn.
- * - The system prompt gains a section that tells the model about the stubs, with the number of the pass. A changed
- *   prompt makes pi-claude-subscription synthesize the conversation instead of resuming its own transcript at the
- *   last unchanged message, which would leave out every later response.
+ * - The system prompt carries a section that tells the model about the stubs. Its text stays the same, so the prompt
+ *   cache keeps everything before the first cut. pi-claude-subscription up to 0.2.4 is the exception: after an edit
+ *   in older messages it resumes its own transcript at the last unchanged message and leaves out every later
+ *   response. For it the section names the pass, appears with the first cut, and changes with every cut, which makes
+ *   the provider synthesize the conversation instead, at the price of writing all of it to the cache again. The
+ *   fixes of its pull request #4 ("Resume correctly after edited history") make that unnecessary; with "forceRebuild":
+ *   "auto" the extension looks for them in the installed package.
  * - /gc cuts at the next request, regardless of the thresholds; /gc status shows what was cut and what could go now.
  * - Settings in ~/.pi/agent/context-gc.json, every key optional: {"enabled": true, "keepRecent": 10,
  *   "minResultChars": 4000, "minArgChars": 2000, "batchTokens": 100000, "coldMinutes": 60, "coldMinTokens": 5000,
- *   "thinking": true, "toolResults": true, "toolArgs": true, "keepTools": ["Agent", "AskUserQuestion"]}.
+ *   "thinking": true, "toolResults": true, "toolArgs": true, "keepTools": ["Agent", "AskUserQuestion"],
+ *   "forceRebuild": "auto"} (true or false override the detection).
  */
 
 import { readFileSync } from "node:fs";
 import path from "node:path";
-import { type ExtensionAPI, type ExtensionContext, getAgentDir } from "@earendil-works/pi-coding-agent";
+import {
+	DefaultPackageManager,
+	type ExtensionAPI,
+	type ExtensionContext,
+	getAgentDir,
+	SettingsManager,
+} from "@earendil-works/pi-coding-agent";
 
 const CONFIG_FILE = path.join(getAgentDir(), "context-gc.json");
 const ENTRY_TYPE = "context-gc";
@@ -49,6 +60,7 @@ interface Config {
 	toolResults: boolean;
 	toolArgs: boolean;
 	keepTools: string[];
+	forceRebuild: "auto" | boolean;
 }
 
 const DEFAULTS: Config = {
@@ -63,6 +75,7 @@ const DEFAULTS: Config = {
 	toolResults: true,
 	toolArgs: true,
 	keepTools: ["Agent", "AskUserQuestion"],
+	forceRebuild: "auto",
 };
 
 function loadConfig(): { config: Config; problem?: string } {
@@ -81,7 +94,9 @@ function loadConfig(): { config: Config; problem?: string } {
 		const fallback = DEFAULTS[key];
 		const ok = Array.isArray(fallback)
 			? Array.isArray(value) && value.every((v) => typeof v === "string")
-			: typeof value === typeof fallback && (typeof value !== "number" || (Number.isFinite(value) && value >= 0));
+			: key === "forceRebuild"
+				? value === "auto" || typeof value === "boolean"
+				: typeof value === typeof fallback && (typeof value !== "number" || (Number.isFinite(value) && value >= 0));
 		if (ok) (config as any)[key] = value;
 		else wrong.push(key);
 	}
@@ -296,13 +311,58 @@ function lastRequest(ctx: ExtensionContext): { at: number; model: string } | und
 	return undefined;
 }
 
-function sectionText(pass: number): string {
+/** The section for the system prompt; with a pass it changes with every cut, without one it never changes. */
+function sectionText(pass?: number): string {
 	return [
 		`<${SECTION}>`,
-		`Older parts of this conversation were cut to keep the context small (pass ${pass}): the thinking of older responses, long inputs of older tool calls, and long outputs and images of older tool results.`,
+		pass === undefined
+			? "Older parts of this conversation may be cut to keep the context small: the thinking of older responses, long inputs of older tool calls, and long outputs and images of older tool results."
+			: `Older parts of this conversation were cut to keep the context small (pass ${pass}): the thinking of older responses, long inputs of older tool calls, and long outputs and images of older tool results.`,
 		`A cut output reads "${STUB} …]" and keeps its first and last lines; a cut input keeps its start and end. When you need a cut output again, run the command or read the file again instead of guessing what it said.`,
 		`</${SECTION}>`,
 	].join("\n");
+}
+
+let resumeFix: boolean | undefined;
+
+/**
+ * Whether the configured pi-claude-subscription carries the fixes of its pull request #4: fix 1 writes the responses
+ * after an edit into a fork of Claude Code's transcript (appendToSession), fix 5 finds an anchor in history the
+ * provider wrote itself (rememberWritten). Looked up once per process. The package listing is the same as in
+ * claude-marketplaces.ts.
+ */
+function providerResumesEdits(): boolean {
+	if (resumeFix !== undefined) return resumeFix;
+	resumeFix = false;
+	try {
+		const cwd = process.cwd();
+		const agentDir = getAgentDir();
+		const settingsManager = SettingsManager.create(cwd, agentDir);
+		for (const pkg of new DefaultPackageManager({ cwd, agentDir, settingsManager }).listConfiguredPackages()) {
+			if (!pkg.installedPath) continue;
+			const dir = path.resolve(pkg.installedPath);
+			let name: unknown;
+			try {
+				name = JSON.parse(readFileSync(path.join(dir, "package.json"), "utf8")).name;
+			} catch {
+				continue;
+			}
+			if (name !== "pi-claude-subscription") continue;
+			const sessions = readFileSync(path.join(dir, "src", "cc-sessions.ts"), "utf8");
+			const provider = readFileSync(path.join(dir, "src", "provider.ts"), "utf8");
+			resumeFix = sessions.includes("appendToSession") && provider.includes("rememberWritten");
+			break;
+		}
+	} catch {
+		// Unreadable package or settings: keep forcing the rebuild, which is safe with every version.
+	}
+	return resumeFix;
+}
+
+/** Whether the section has to change with every cut, so the provider rebuilds its transcript. */
+function forceRebuild(ctx: ExtensionContext, config: Config): boolean {
+	if (typeof config.forceRebuild === "boolean") return config.forceRebuild;
+	return ctx.model?.provider === "claude-sdk" && !providerResumesEdits();
 }
 
 function describe(p: Plan): string {
@@ -393,13 +453,16 @@ export default function (pi: ExtensionAPI) {
 			}
 		}
 		const pass = pending ? pending.pass : done;
-		if (pass === 0) return undefined;
+		const rebuild = forceRebuild(ctx, config);
+		// A stable section is there from the first request on, so the prompt never changes; the other one only after cuts.
+		if (pass === 0 && (rebuild || !config.enabled)) return undefined;
+		const section = sectionText(rebuild ? pass : undefined);
 		const byKey = new Map((pending?.edits ?? []).map((e) => [e.key, e]));
 		let marked = false;
 		const messages = (event.messages as Message[]).map((m) => {
 			if (m.role === "system" && !marked) {
 				marked = true;
-				return { ...m, sections: { ...(m.sections ?? {}), [SECTION]: sectionText(pass) } };
+				return { ...m, sections: { ...(m.sections ?? {}), [SECTION]: section } };
 			}
 			const edit = byKey.get(messageKey(m));
 			return edit ? { ...m, content: edit.content } : m;
@@ -423,6 +486,9 @@ export default function (pi: ExtensionAPI) {
 						`Context now: ${usage?.tokens != null ? `~${fmtTokens(usage.tokens)} tokens` : "unknown"}; ${age}.`,
 						p.edits.length ? `Could go now: ${describe(p)}.` : "Nothing older than the last responses to cut.",
 						`Batch cut from ${fmtTokens(config.batchTokens)} tokens, cold cut after ${config.coldMinutes} min; settings in ${CONFIG_FILE}.`,
+						forceRebuild(ctx, config)
+							? "Every cut rebuilds the provider's transcript and writes the whole context to the cache again."
+							: "The cache keeps everything before the first cut.",
 					].join("\n"),
 					"info",
 				);

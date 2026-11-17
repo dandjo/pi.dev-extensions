@@ -116,7 +116,7 @@ interface ConfiguredPackage {
 	installedPath?: string;
 }
 
-/** The packages of Pi's settings, the user's and the project's of the current directory. */
+/** The packages of Pi's settings, the user's and the project's of the current directory (also in context-gc.ts). */
 function configuredPackages(): ConfiguredPackage[] {
 	const agentDir = getAgentDir();
 	const cwd = process.cwd();
