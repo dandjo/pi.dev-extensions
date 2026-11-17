@@ -196,9 +196,9 @@ pi install git:github.com/dandjo/pi.dev-extensions
 Pi clones it into `~/.pi/agent/git/` and loads all twenty-nine extensions from
 there; `pi list` shows the package. [package-update](#package-update) brings
 new versions at every start, new and renamed extensions included, and reloads
-Pi once it is idle; `/update` fetches them at once. There is no build step and no
-`npm install`: the extensions import only packages Pi provides itself. Each
-file stands on its own; `pi config` turns single ones off.
+Pi once it is idle; `/update` fetches them at once. There is no build step
+and no `npm install`: the extensions import only packages Pi provides itself.
+Each file stands on its own; `pi config` turns single ones off.
 
 Then add web search, pinned to the tested version, and configure it as
 [Web search](#web-search) describes:
