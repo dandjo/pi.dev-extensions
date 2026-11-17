@@ -84,10 +84,9 @@ export interface ClaudeLoginSource {
 	token(options?: { renew?: boolean }): Promise<ClaudeLoginToken | ClaudeLoginRefusal>;
 }
 
-/** What token() answers with a token: whose login it is ("pi" only from older versions), and whether it was renewed for this call. */
+/** What token() answers with a token, and whether it was renewed for this call. */
 export interface ClaudeLoginToken {
 	value: string;
-	source: "pi" | "claude-code";
 	renewed: boolean;
 }
 
@@ -367,7 +366,7 @@ async function loginToken(renew: boolean): Promise<ClaudeLoginToken | ClaudeLogi
 		renewed = access !== undefined;
 	}
 	if (!access) return { reason: (await claudeCodeLogin()).ended ? "ended" : "none" };
-	if (await sameAccount(access)) return { value: access, source: "claude-code", renewed };
+	if (await sameAccount(access)) return { value: access, renewed };
 	return { reason: "other-account" };
 }
 

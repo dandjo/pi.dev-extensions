@@ -30,27 +30,23 @@ function claudeDir(): string {
 
 /**
  * The Claude Code plugins Pi uses, by name: every directory in ~/.pi/agent/claude-code-plugins (or a link to one),
- * then in ~/.pi/agent/claude-plugins, the folder of earlier versions, until claude-code-plugins.ts has moved its
- * entries over; then the plugins Claude Code installed for the user (plugins/installed_plugins.json) and enabled in
+ * then the plugins Claude Code installed for the user (plugins/installed_plugins.json) and enabled in
  * its user settings (enabledPlugins), at their installPath. Of two plugins of one name, the one found first wins.
  * claude-code-hooks.ts carries a copy of this function: change them alike.
  */
 function claudePlugins(): { name: string; root: string }[] {
 	const plugins = new Map<string, string>();
-	for (const folder of ["claude-code-plugins", "claude-plugins"]) {
-		const linked = path.join(getAgentDir(), folder);
-		try {
-			for (const name of readdirSync(linked).sort()) {
-				if (plugins.has(name)) continue;
-				try {
-					if (statSync(path.join(linked, name)).isDirectory()) plugins.set(name, path.join(linked, name));
-				} catch {
-					// a broken link
-				}
+	const linked = path.join(getAgentDir(), "claude-code-plugins");
+	try {
+		for (const name of readdirSync(linked).sort()) {
+			try {
+				if (statSync(path.join(linked, name)).isDirectory()) plugins.set(name, path.join(linked, name));
+			} catch {
+				// a broken link
 			}
-		} catch {
-			// no such folder
 		}
+	} catch {
+		// no such folder
 	}
 	const json = (file: string): any => {
 		try {

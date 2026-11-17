@@ -613,8 +613,7 @@ function parameters(instances: Instance[]) {
  * (openproject.json).
  *
  * - The file holds {"instances": {"https://…": {"token": "…"}, …}}, a map from each instance's URL to its settings,
- *   like mcpServers in Pi's mcp.json; the first instance is the default. Older forms are read as well: a list
- *   [{"url": …, "token": …}, …] and a single {"url": …, "token": …}.
+ *   like mcpServers in Pi's mcp.json; the first instance is the default.
  * - token follows Pi's apiKey convention in models.json: a literal token, "$NAME" or "${NAME}" for an environment
  *   variable, or "!command" for the output of a shell command (a password manager); "$$" and "$!" are a literal $ and
  *   !. "tokenEnv": "NAME" is short for "token": "$NAME"; without either, the tool's default variable holds the token.
@@ -728,27 +727,17 @@ function parseInstance(address: unknown, entry: Record<string, unknown>, where: 
 	return { name: url.host + basePath, origin: url.origin, base: url.origin + basePath, basePath, token };
 }
 
-/** The instances of a parsed config file in the order they are written: the map, or one of the older forms. */
+/** The instances of a parsed config file in the order they are written. */
 function parseConfig(config: unknown, defaultTokenEnv: string): ConfiguredInstance[] {
-	if (isObject(config) && config.instances !== undefined) {
-		if (!isObject(config.instances)) throw new Error(`instances must be a map from URL to settings: ${FORMAT}`);
-		const entries = Object.entries(config.instances);
-		if (entries.length === 0) throw new Error("instances is empty");
-		return entries.map(([address, entry]) => {
-			if (!isObject(entry)) throw new Error(`${address}: expected the settings of the instance, {"token": "…"}`);
-			if (entry.url !== undefined) throw new Error(`${address}: the URL is the key; leave url out`);
-			return parseInstance(address, entry, address, defaultTokenEnv);
-		});
-	}
-	if (Array.isArray(config)) {
-		if (config.length === 0) throw new Error("the list of instances is empty");
-		return config.map((entry, index) => {
-			if (!isObject(entry)) throw new Error(`[${index}]: expected {"url": "https://…", "token": "…"}`);
-			return parseInstance(entry.url, entry, `[${index}]`, defaultTokenEnv);
-		});
-	}
-	if (isObject(config) && config.url !== undefined) return [parseInstance(config.url, config, "", defaultTokenEnv)];
-	throw new Error(`expected ${FORMAT}`);
+	if (!isObject(config) || config.instances === undefined) throw new Error(`expected ${FORMAT}`);
+	if (!isObject(config.instances)) throw new Error(`instances must be a map from URL to settings: ${FORMAT}`);
+	const entries = Object.entries(config.instances);
+	if (entries.length === 0) throw new Error("instances is empty");
+	return entries.map(([address, entry]) => {
+		if (!isObject(entry)) throw new Error(`${address}: expected the settings of the instance, {"token": "…"}`);
+		if (entry.url !== undefined) throw new Error(`${address}: the URL is the key; leave url out`);
+		return parseInstance(address, entry, address, defaultTokenEnv);
+	});
 }
 
 /**

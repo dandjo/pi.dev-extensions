@@ -71,9 +71,9 @@ export interface UsageSnapshot {
 	credits: Credits | null;
 	/**
 	 * The plan's own answer, for consumers that speak its format: here the endpoint's windows, limit rows and extra usage
-	 * as it sent them (ANSWER_KEYS); absent in older cache files.
+	 * as it sent them (ANSWER_KEYS).
 	 */
-	answer?: Record<string, unknown>;
+	answer: Record<string, unknown>;
 }
 
 /**
@@ -268,18 +268,17 @@ function parseUsage(json: any): UsageSnapshot {
 }
 
 /**
- * The token for the usage endpoint from claude-login.ts, or an error for the Limits row; an older claude-login.ts
- * without token() only renews, and without the extension the token is read here.
+ * The token for the usage endpoint from claude-login.ts, or an error for the Limits row; without the extension the
+ * token is read here, and a run-out login is not renewed.
  */
 async function usageToken(login: ClaudeLoginSource | null): Promise<{ value: string } | { error: string }> {
-	if (typeof login?.token === "function") {
+	if (login) {
 		const token = await login.token();
 		if (!("reason" in token)) return { value: token.value };
 		if (token.reason === "ended") return { error: "login ended: !!claude auth login" };
 		return { error: token.reason === "other-account" ? "login: other account than CLAUDE_CODE_OAUTH_TOKEN" : "no valid login: !!claude auth login" };
 	}
-	let token = await readAccessToken();
-	if (!token && login && (await login.renew())) token = await readAccessToken();
+	const token = await readAccessToken();
 	return token ? { value: token } : { error: "no valid login: !!claude auth login" };
 }
 
@@ -310,7 +309,7 @@ async function readState(): Promise<UsageState | null> {
 		const s = JSON.parse(await readFile(CACHE_FILE, "utf8"));
 		if (typeof s?.attemptAt !== "number" || typeof s?.updatedAt !== "number") return null;
 		const snap = s.snapshot;
-		const valid = typeof snap?.fetchedAt === "number" && Array.isArray(snap?.limits);
+		const valid = typeof snap?.fetchedAt === "number" && Array.isArray(snap?.limits) && typeof snap?.answer === "object" && snap.answer !== null;
 		return {
 			attemptAt: s.attemptAt,
 			updatedAt: s.updatedAt,
@@ -366,15 +365,14 @@ interface ClaudeLoginSource {
 	 * The claude.ai access token of Claude Code's login, valid for at least another minute. With renew (the default) a
 	 * run-out login is renewed by Claude Code first, as renew() does. While CLAUDE_CODE_OAUTH_TOKEN is set, a login of
 	 * another organization is passed over. Without a token, reason says whether there was none, the login ended (it
-	 * needs /login in Claude Code), or it is one of another account. Never rejects. Missing in older versions.
+	 * needs /login in Claude Code), or it is one of another account. Never rejects.
 	 */
-	token?(options?: { renew?: boolean }): Promise<ClaudeLoginToken | ClaudeLoginRefusal>;
+	token(options?: { renew?: boolean }): Promise<ClaudeLoginToken | ClaudeLoginRefusal>;
 }
 
-/** What token() answers with a token: whose login it is ("pi" only from older versions), and whether it was renewed for this call. */
+/** What token() answers with a token, and whether it was renewed for this call. */
 interface ClaudeLoginToken {
 	value: string;
-	source: "pi" | "claude-code";
 	renewed: boolean;
 }
 
@@ -574,7 +572,7 @@ export default function (pi: ExtensionAPI) {
 
 	pi.events.on("claude-login:source", (data) => {
 		const offered = data as ClaudeLoginSource | undefined;
-		if (typeof offered?.renew === "function") loginSource = offered;
+		if (typeof offered?.token === "function") loginSource = offered;
 	});
 	pi.events.emit("claude-login:source-request", undefined);
 }

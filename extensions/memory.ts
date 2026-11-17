@@ -88,10 +88,6 @@ function loadProviders(): { providers: Provider[]; problem?: string } {
 		if ((error as NodeJS.ErrnoException).code === "ENOENT") return { providers: DEFAULT_PROVIDERS };
 		return { providers: DEFAULT_PROVIDERS, problem: `${CONFIG_FILE} is not valid JSON` };
 	}
-	// {"store": "claude"|"pi"}, the form of the first version
-	if (config && typeof config === "object" && config.providers === undefined && (config.store === "claude" || config.store === "pi")) {
-		return { providers: [{ name: config.store }] };
-	}
 	const map = config?.providers;
 	if (!map || typeof map !== "object" || Array.isArray(map) || Object.keys(map).length === 0) {
 		return { providers: DEFAULT_PROVIDERS, problem: `${CONFIG_FILE}: expected {"providers": {"claude": {}, "pi": {}}}` };

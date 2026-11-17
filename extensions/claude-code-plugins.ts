@@ -24,22 +24,13 @@
  *   extension loads, before session_start, so claude-code-hooks.ts runs the SessionStart hooks of the current mirror.
  * - Plugin hooks and scripts are mirrored as they are. Every mirrored plugin is linked into
  *   ~/.pi/agent/claude-code-plugins, where claude-code-hooks.ts runs its hooks and claude-code-agents.ts finds its
- *   agents; a plugin name two marketplaces share goes to the first. Links into a mirror (a directory with a .source stamp, this one's or an earlier one's) are
- *   replaced or removed as the mirrors change; other entries there are left alone.
+ *   agents; a plugin name two marketplaces share goes to the first. Links into a mirror (a directory with a .source
+ *   stamp) are replaced or removed as the mirrors change; other entries there are left alone.
  * - When an update changed a plugin or what a package itself loads into Pi (package.json and the extensions,
  *   skills, prompts, and themes it names), Pi reloads by itself as soon as it is at rest in the terminal: no run or
  *   compaction, nothing queued, no prompt just submitted, and the empty prompt editor in focus, so no selector or
  *   dialog is open and no typing is lost. Until then what was loaded before stays active. /marketplace-update updates
  *   and reloads right away.
- * - Up to its rename this file was claude-marketplaces.ts, with the mirrors in ~/.pi/agent/claude-marketplaces and
- *   the links in ~/.pi/agent/claude-plugins. claude-code-hooks.ts and claude-code-agents.ts read the old link folder
- *   after the new one. Two days after a start first found the old folders (RETIRE_AFTER_MS), so that Pi sessions still
- *   running the old version keep their skills and hooks until they reload, the old mirrors and the links into them
- *   are deleted, and other entries of the old link folder move into ~/.pi/agent/claude-code-plugins unless the name
- *   is taken there. An old link folder that is itself a link stays as it is.
- * - Earlier versions cloned the marketplaces of ~/.pi/agent/claude-marketplaces.json into
- *   ~/.pi/agent/claude-marketplaces/<name>/repo. Such a clone is deleted unless a package lives in it; while the file
- *   is there, every start names what is left to do: the pi install of a marketplace not installed yet, or deleting it.
  */
 
 import {
@@ -63,7 +54,6 @@ import {
 	readlinkSync,
 	realpathSync,
 	renameSync,
-	rmdirSync,
 	rmSync,
 	statSync,
 	symlinkSync,
@@ -73,25 +63,15 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
-/** The marketplace list of earlier versions, no longer read. */
-const LEGACY_CONFIG = path.join(getAgentDir(), "claude-marketplaces.json");
 const ROOT = path.join(getAgentDir(), "claude-code-marketplaces");
 /** Where claude-code-hooks.ts and claude-code-agents.ts look for Claude Code plugins. */
 const PLUGIN_LINKS = path.join(getAgentDir(), "claude-code-plugins");
-/** The folders of the version named claude-marketplaces.ts: its mirrors (and older clones), its plugin links. */
-const OLD_ROOT = path.join(getAgentDir(), "claude-marketplaces");
-const OLD_LINKS = path.join(getAgentDir(), "claude-plugins");
-/** When a start first found the old folders; they are cleared RETIRE_AFTER_MS later. */
-const RETIRE_MARK = path.join(ROOT, ".old-folders-since");
-const RETIRE_AFTER_MS = 2 * 24 * 60 * 60_000;
 /** The stamp in a mirror: the commit it was built from and the generator version. */
 const STAMP_NAME = ".source";
 const GENERATOR_VERSION = 2;
 const GIT_TIMEOUT_MS = 60_000;
 /** git rev-parse while the extension loads, which holds up Pi's start. */
 const REV_PARSE_TIMEOUT_MS = 10_000;
-/** A build folder without a pid (earlier versions) is left alone this long, as a running process may own it. */
-const STALE_BUILD_MS = 10 * 60_000;
 /** A `pi update` running longer is stopped; it may install npm dependencies. */
 const UPDATE_TIMEOUT_MS = 180_000;
 /** Held by the Pi process that updates, with its pid inside; another one waits for it. */
@@ -314,161 +294,6 @@ async function takeLock(): Promise<(() => void) | null> {
 	}
 }
 
-/** A git URL or package source reduced to host/path, to tell whether two name the same repository. */
-function repoIdentity(source: string): string {
-	return source
-		.trim()
-		.replace(/^git:(?!\/\/)/, "")
-		.replace(/^[a-z+]+:\/\//i, "")
-		.replace(/^[^@/:]+@/, "")
-		.replace(/^([^/:]+):(?!\d)/, "$1/")
-		.replace(/^([^/]+):\d+\//, "$1/")
-		.replace(/@[^/]*$/, "")
-		.replace(/\/+$/, "")
-		.replace(/\.git$/, "")
-		.toLowerCase();
-}
-
-/** What is left to do about the marketplace list of earlier versions; null without the file. */
-function legacyNotice(packages: ConfiguredPackage[]): string | null {
-	let text: string;
-	try {
-		text = readFileSync(LEGACY_CONFIG, "utf8");
-	} catch {
-		return null;
-	}
-	let urls: string[] = [];
-	try {
-		const map = JSON.parse(text)?.marketplaces;
-		if (map && typeof map === "object" && !Array.isArray(map)) urls = Object.keys(map).map((url) => url.trim()).filter(Boolean);
-	} catch {
-		// Unreadable: nothing in it to carry over.
-	}
-	const installed = new Set(packages.filter((pkg) => pkg.scope === "user").map((pkg) => repoIdentity(pkg.source)));
-	const missing = urls.filter((url) => !installed.has(repoIdentity(url)));
-	if (missing.length === 0) return `${LEGACY_CONFIG} is no longer read; delete it.`;
-	const install = (url: string) => (/^[a-z+]+:\/\//i.test(url) ? url : `git:${url.replace(/\.git$/, "")}`);
-	return `${LEGACY_CONFIG} is no longer read: Claude Code marketplaces are Pi packages now. Run ${missing
-		.map((url) => `!!pi install ${install(url)}`)
-		.join(", ")}, then delete the file.`;
-}
-
-/** Deletes the clones earlier versions kept in OLD_ROOT/<name>/repo, unless a configured package lives in one. */
-function removeLegacyClones(packages: ConfiguredPackage[]): void {
-	if (!existsSync(OLD_ROOT)) return;
-	const used = packages.flatMap((pkg) => (pkg.installedPath ? [path.resolve(pkg.installedPath)] : []));
-	for (const entry of readdirSync(OLD_ROOT, { withFileTypes: true })) {
-		if (!entry.isDirectory()) continue;
-		const clone = path.join(OLD_ROOT, entry.name, "repo");
-		if (!existsSync(path.join(clone, ".git"))) continue;
-		if (used.some((dir) => dir === clone || dir.startsWith(clone + path.sep))) continue;
-		rmSync(clone, { recursive: true, force: true });
-	}
-}
-
-/** Whether something is at that path, a broken link included. */
-function present(file: string): boolean {
-	try {
-		lstatSync(file);
-		return true;
-	} catch {
-		return false;
-	}
-}
-
-/**
- * Clears the folders of the version named claude-marketplaces.ts, RETIRE_AFTER_MS after a start first found them:
- * until then Pi sessions still running that version read their skills and hooks there. The mirrors and the links into
- * them go, and so do links whose name PLUGIN_LINKS has already or whose target is gone; other entries of the old link
- * folder move into PLUGIN_LINKS, and an old link folder that is itself a link stays. A clone a configured package lives in stays too (removeLegacyClones), with
- * the folders around it.
- */
-function retireOldFolders(): void {
-	if (!present(OLD_ROOT) && !present(OLD_LINKS)) {
-		rmSync(RETIRE_MARK, { force: true });
-		return;
-	}
-	let since = Number.NaN;
-	try {
-		since = Number(readFileSync(RETIRE_MARK, "utf8"));
-	} catch {
-		// first found now
-	}
-	if (!Number.isFinite(since) || since <= 0) {
-		mkdirSync(ROOT, { recursive: true });
-		writeFileSync(RETIRE_MARK, String(Date.now()));
-		return;
-	}
-	if (Date.now() - since < RETIRE_AFTER_MS) return;
-
-	if (present(OLD_LINKS) && !lstatSync(OLD_LINKS).isSymbolicLink()) {
-		for (const entry of readdirSync(OLD_LINKS, { withFileTypes: true })) {
-			const from = path.join(OLD_LINKS, entry.name);
-			if (entry.isSymbolicLink()) {
-				let target: string | null = null;
-				try {
-					target = path.resolve(OLD_LINKS, readlinkSync(from));
-				} catch {
-					// unreadable: moved like any other entry
-				}
-				const intoMirror =
-					target !== null &&
-					(target.startsWith(OLD_ROOT + path.sep) ||
-						existsSync(path.join(path.dirname(target), STAMP_NAME)) ||
-						(!existsSync(target) && target.startsWith(getAgentDir() + path.sep)));
-				if (intoMirror) {
-					rmSync(from, { force: true });
-					continue;
-				}
-			}
-			const to = path.join(PLUGIN_LINKS, entry.name);
-			if (entry.isSymbolicLink() && (present(to) || !existsSync(from))) {
-				// shadowed by the new folder, or pointing nowhere: a link holds nothing to keep
-				rmSync(from, { force: true });
-				continue;
-			}
-			if (present(to)) continue;
-			mkdirSync(PLUGIN_LINKS, { recursive: true });
-			try {
-				renameSync(from, to);
-			} catch {
-				// another Pi process moved it
-			}
-		}
-		try {
-			rmdirSync(OLD_LINKS);
-		} catch {
-			// a name taken in the new folder keeps its entry here
-		}
-	}
-
-	if (present(OLD_ROOT)) {
-		for (const entry of readdirSync(OLD_ROOT, { withFileTypes: true })) {
-			const dir = path.join(OLD_ROOT, entry.name);
-			if (entry.name === ".update.lock") {
-				rmSync(dir, { recursive: true, force: true });
-				continue;
-			}
-			if (!entry.isDirectory()) continue;
-			const mirror = path.join(dir, "plugins");
-			if (existsSync(path.join(mirror, STAMP_NAME))) rmSync(mirror, { recursive: true, force: true });
-			for (const leftover of ["plugins.old", "plugins.tmp"]) rmSync(path.join(dir, leftover), { recursive: true, force: true });
-			try {
-				rmdirSync(dir);
-			} catch {
-				// a clone a package lives in, or something else's
-			}
-		}
-		try {
-			rmdirSync(OLD_ROOT);
-		} catch {
-			// not empty
-		}
-	}
-	if (!present(OLD_ROOT) && !present(OLD_LINKS)) rmSync(RETIRE_MARK, { force: true });
-}
-
-/** The marketplace's name in its manifest, else the directory name. */
 /** A marketplace's name, else the package's name, else its folder. */
 function label(m: KeptPackage): string {
 	for (const file of [path.join(".claude-plugin", "marketplace.json"), "package.json"]) {
@@ -543,11 +368,7 @@ function alive(pid: number): boolean {
 	}
 }
 
-/**
- * Removes the build folders (<mirror>.tmp-<pid>, <mirror>.old-<pid>) of processes that are gone, and the pid-less ones
- * of earlier versions once they are older than STALE_BUILD_MS, as a Pi process still running such a version may be
- * using one.
- */
+/** Removes the build folders (<mirror>.tmp-<pid>, <mirror>.old-<pid>) of processes that are gone. */
 function removeStaleBuilds(m: Marketplace): void {
 	const parent = path.dirname(m.out);
 	const base = path.basename(m.out);
@@ -558,15 +379,9 @@ function removeStaleBuilds(m: Marketplace): void {
 		return;
 	}
 	for (const name of entries) {
-		const match = name.startsWith(`${base}.`) ? /^(?:tmp|old)(?:-(\d+))?$/.exec(name.slice(base.length + 1)) : null;
-		if (!match) continue;
-		const dir = path.join(parent, name);
-		try {
-			if (match[1] ? alive(Number(match[1])) : Date.now() - statSync(dir).mtimeMs < STALE_BUILD_MS) continue;
-			rmSync(dir, { recursive: true, force: true });
-		} catch {
-			// gone meanwhile
-		}
+		const match = name.startsWith(`${base}.`) ? /^(?:tmp|old)-(\d+)$/.exec(name.slice(base.length + 1)) : null;
+		if (!match || alive(Number(match[1]))) continue;
+		rmSync(path.join(parent, name), { recursive: true, force: true });
 	}
 }
 
@@ -805,24 +620,6 @@ export default function (pi: ExtensionAPI) {
 		return; // Pi reports unreadable settings itself.
 	}
 	const marketplaces = findMarketplaces(packages);
-	const legacy = legacyNotice(packages);
-	if (!process.env.PI_SUBAGENT_DEPTH) {
-		try {
-			removeLegacyClones(packages);
-		} catch {
-			// The next start retries.
-		}
-		try {
-			retireOldFolders();
-		} catch {
-			// The next start retries.
-		}
-	}
-	if (legacy && !process.env.PI_SUBAGENT_DEPTH) {
-		pi.on("session_start", (event, ctx) => {
-			if (event.reason === "startup" && ctx.hasUI) ctx.ui.notify(legacy, "warning");
-		});
-	}
 	if (marketplaces.length === 0) {
 		// A marketplace removed since: its links go, so claude-code-hooks.ts no longer runs the hooks of its copy.
 		if (!process.env.PI_SUBAGENT_DEPTH && existsSync(PLUGIN_LINKS)) {

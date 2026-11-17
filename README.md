@@ -198,14 +198,6 @@ versions, new and renamed extensions included. There is no build step and no
 `npm install`: the extensions import only packages Pi provides itself. Each
 file stands on its own; `pi config` turns single ones off.
 
-Coming from links or copies in `~/.pi/agent/extensions/` (the setup before
-November 2026): remove them, or Pi loads every extension twice:
-
-```bash
-for f in ~/.pi/agent/git/github.com/dandjo/pi.dev-extensions/extensions/*.ts; do rm -f ~/.pi/agent/extensions/"${f##*/}"; done
-rm -f ~/.pi/agent/extensions/{claude-memory,remote-control,claude-marketplaces,claude-hooks,claude-agents,claude-stream-only}.ts
-```
-
 Then add web search, pinned to the tested version, and configure it as
 [Web search](#web-search) describes:
 
@@ -385,26 +377,10 @@ and needs no Claude model: the plugins work with any provider.
   Claude Code plugins, so their hooks and agents work in Pi as in Claude
   Code. The links are made at every start and
   after every update, and removed when a marketplace is. A plugin name two
-  marketplaces share goes to the first. Links into a copy (this extension's,
-  or an earlier one's) follow the copies, and so does a broken link of a
-  mirrored plugin's name; any other entry there is left alone.
+  marketplaces share goes to the first. Links into a copy follow the copies,
+  and so does a broken link of a mirrored plugin's name; any other entry there
+  is left alone.
 - Subagent processes ([subagents](#subagents)) skip the update.
-- Earlier versions read the marketplaces from
-  `~/.pi/agent/claude-marketplaces.json` and kept a clone of each in
-  `~/.pi/agent/claude-marketplaces/<name>/repo`. Such a clone is deleted by
-  itself, unless a package lives in it. While the file exists, every start
-  names what is left: `pi install` for a marketplace in it not installed yet,
-  else deleting the file.
-- Until November 17, 2026 this extension was `claude-marketplaces.ts`, with
-  the copies in `~/.pi/agent/claude-marketplaces/` and the links in
-  `~/.pi/agent/claude-plugins/`. Two days after a start first finds those
-  folders, so that sessions still running the old version keep their skills
-  and hooks until they reload, the old copies and the links into them are
-  deleted, and so are links the new folder has a name for or whose target is
-  gone; other entries move into `~/.pi/agent/claude-code-plugins/`. Until
-  then [claude-code-hooks](#claude-code-hooks) and
-  [claude-code-agents](#claude-code-agents) read the old link folder after
-  the new one.
 - Pi warns at start about skill descriptions longer than 1,024 characters (the
   skill loads anyway).
 - Never edit the package's clone in `~/.pi/agent/git/` or the copies in
@@ -747,8 +723,7 @@ written with your permissions.
 - The instances come from `~/.pi/agent/gitlab.json`: under `instances`, a map
   from each instance's URL to its settings, like `mcpServers` in Pi's
   `mcp.json`; the first is the default. Without the file the tool is not
-  registered. The forms of earlier versions, a list of `{"url", "token"}` and a
-  single `{"url", "tokenEnv"}`, are still read.
+  registered.
 
   ```json
   {
@@ -1004,10 +979,6 @@ out wrong.
   index without entries.
 - At start, a notice names the memory in use, and a second one counts what
   `/memory lint` would list. Subagents get no memory, as in Claude Code.
-- `memory.ts` replaces `claude-memory.ts`, which only read Claude Code's
-  memory: delete a link or copy of `claude-memory.ts` left in
-  `~/.pi/agent/extensions/` (Pi reports a broken link as a load error);
-  `memory.ts` comes with the package of step 3.
 
 ## session-title
 

@@ -247,7 +247,6 @@ interface BridgeModule {
 
 interface Token {
 	value: string;
-	source: "claude-code" | "pi";
 }
 
 function claudeDir(): string {
@@ -339,7 +338,7 @@ async function readAccessToken(): Promise<Token | null> {
 	try {
 		const o = (await claudeCodeCredentials())?.claudeAiOauth;
 		if (typeof o?.accessToken === "string" && o.accessToken && (!o.expiresAt || o.expiresAt > now)) {
-			return { value: o.accessToken, source: "claude-code" };
+			return { value: o.accessToken };
 		}
 	} catch {
 		// no Claude Code login
@@ -759,9 +758,9 @@ function epochSeconds(iso: unknown): number | undefined {
 	return Number.isNaN(ms) ? undefined : Math.floor(ms / 1000);
 }
 
-/** The session and weekly windows: from the endpoint's limit rows, else from the rows of an older usage cache. */
+/** The session and weekly windows: from the endpoint's limit rows, else, when it sent none, from the status line's rows. */
 function planWindows(snapshot: UsageSnapshot): PlanWindow[] {
-	const rows = snapshot.answer?.limits;
+	const rows = snapshot.answer.limits;
 	if (Array.isArray(rows)) {
 		const windows: PlanWindow[] = [];
 		for (const row of rows as Json[]) {
@@ -814,17 +813,6 @@ function usageWindow(value: unknown): Json | null {
 /** The rate_limits of Claude Code's get_usage reply (SDKControlGetUsageResponse), from the usage endpoint's answer. */
 function planRateLimits(snapshot: UsageSnapshot): Json {
 	const answer = snapshot.answer;
-	if (!answer) {
-		// An older usage cache keeps only the rows of the status line.
-		const window = (row: UsageSnapshot["limits"][number] | undefined) => (row ? { utilization: row.percent, resets_at: row.resetsAt } : null);
-		return {
-			five_hour: window(snapshot.limits.find((row) => row.label === "5h")),
-			seven_day: window(snapshot.limits.find((row) => row.label === "7d")),
-			model_scoped: snapshot.limits
-				.filter((row) => row.label !== "5h" && row.label !== "7d")
-				.map((row) => ({ display_name: row.label, utilization: row.percent, resets_at: row.resetsAt })),
-		};
-	}
 	const limits: Json = {};
 	for (const key of ["five_hour", "seven_day", "seven_day_oauth_apps", "seven_day_opus", "seven_day_sonnet"]) {
 		if (key in answer) limits[key] = usageWindow(answer[key]);
@@ -1061,9 +1049,9 @@ interface UsageSnapshot {
 	credits: Credits | null;
 	/**
 	 * The plan's own answer, for consumers that speak its format: here the endpoint's windows, limit rows and extra usage
-	 * as it sent them (ANSWER_KEYS); absent in older cache files.
+	 * as it sent them (ANSWER_KEYS).
 	 */
-	answer?: Record<string, unknown>;
+	answer: Record<string, unknown>;
 }
 
 /**
@@ -1113,15 +1101,14 @@ interface ClaudeLoginSource {
 	 * The claude.ai access token of Claude Code's login, valid for at least another minute. With renew (the default) a
 	 * run-out login is renewed by Claude Code first, as renew() does. While CLAUDE_CODE_OAUTH_TOKEN is set, a login of
 	 * another organization is passed over. Without a token, reason says whether there was none, the login ended (it
-	 * needs /login in Claude Code), or it is one of another account. Never rejects. Missing in older versions.
+	 * needs /login in Claude Code), or it is one of another account. Never rejects.
 	 */
-	token?(options?: { renew?: boolean }): Promise<ClaudeLoginToken | ClaudeLoginRefusal>;
+	token(options?: { renew?: boolean }): Promise<ClaudeLoginToken | ClaudeLoginRefusal>;
 }
 
-/** What token() answers with a token: whose login it is ("pi" only from older versions), and whether it was renewed for this call. */
+/** What token() answers with a token, and whether it was renewed for this call. */
 interface ClaudeLoginToken {
 	value: string;
-	source: "pi" | "claude-code";
 	renewed: boolean;
 }
 
@@ -2584,20 +2571,16 @@ export default function (pi: ExtensionAPI) {
 
 	/**
 	 * The access token from claude-login.ts: Claude Code's login, with renew a run-out one renewed by Claude Code first,
-	 * and while CLAUDE_CODE_OAUTH_TOKEN is set only one of that token's account. An older claude-login.ts
-	 * only renews, and without the extension the token is read here. A renewal goes into the session log.
+	 * and while CLAUDE_CODE_OAUTH_TOKEN is set only one of that token's account. Without the extension the token is
+	 * read here, and a run-out login is not renewed. A renewal goes into the session log.
 	 */
 	async function accessToken(renew = true): Promise<Token | ClaudeLoginRefusal> {
-		if (typeof loginSource?.token === "function") {
+		if (loginSource) {
 			const token = await loginSource.token({ renew });
 			if ("reason" in token) return token;
 			if (token.renewed) note("Remote Control had the claude.ai login renewed, which had run out.");
-			return { value: token.value, source: token.source };
+			return { value: token.value };
 		}
-		const token = await readAccessToken();
-		if (token) return token;
-		if (!renew || !(await loginSource?.renew())) return { reason: "none" };
-		note("Remote Control had the claude.ai login renewed, which had run out.");
 		return (await readAccessToken()) ?? { reason: "none" };
 	}
 
@@ -3057,7 +3040,7 @@ export default function (pi: ExtensionAPI) {
 		}),
 		pi.events.on("claude-login:source", (data) => {
 			const source = data as ClaudeLoginSource | undefined;
-			if (typeof source?.renew === "function") loginSource = source;
+			if (typeof source?.token === "function") loginSource = source;
 		}),
 		// A new SDK from claude-sdk-update.ts: its bridge is checked against the repairs at once, not only at the next /rc.
 		pi.events.on("claude-sdk-update:installed", (data) => {
