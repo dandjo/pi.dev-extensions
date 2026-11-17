@@ -848,6 +848,17 @@ out wrong.
   without frontmatter, and topic files over 8 KB. The index is in every
   request, and a topic file costs its size each time it is read, so both pay
   for being short.
+- The same limits hold when the model writes. A write or edit is refused
+  when it would put an index line over 150 characters or the index over 200
+  lines, write a topic file without frontmatter, or let a topic file over
+  8 KB grow; the reason says what to do instead (shorten the line and keep
+  the details in the topic file; split the file by subject). Edits that
+  shrink a large file pass, so it can be tidied. `{"guard": false}` in
+  `memory.json` turns the check off. Claude Code, which writes to the same
+  memory, is not checked.
+- `/memory tidy` hands what `/memory lint` lists to the model as a task:
+  shorten the lines, split the large files, fix links and frontmatter. It
+  shows what it would remove before it removes anything.
 - At start, a notice names the memory in use, and a second one counts what
   `/memory lint` would list. Subagents get no memory, as in Claude Code.
 - `memory.ts` replaces `claude-memory.ts`, which only read Claude Code's

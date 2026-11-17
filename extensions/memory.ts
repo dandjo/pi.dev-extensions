@@ -22,6 +22,12 @@
  * - /memory lint checks the memory against its rules and the size it costs: index lines over 150 characters, an index
  *   over 200 lines, links to missing files, topic files without an index line or frontmatter, and topic files over
  *   8 KB, which cost that much every time they are read. At start, a notice counts what it finds.
+ * - The same limits hold when the model writes: a write or edit that would put an index line over 150 characters or
+ *   the index over 200 lines, a topic file without frontmatter, or a topic file over 8 KB that grows further is
+ *   refused, with what to do instead (shorten the line and keep the details in the topic file; split the file by
+ *   subject). Edits that shrink a large file pass, so it can be tidied. {"guard": false} in memory.json turns the
+ *   check off. Claude Code, writing to the same memory, is not checked.
+ * - /memory tidy asks the model to fix what /memory lint lists, showing what it would remove before it removes it.
  * - Subagents (PI_SUBAGENT_DEPTH) get no memory, as in Claude Code.
  */
 
@@ -95,6 +101,72 @@ function loadProviders(): { providers: Provider[]; problem?: string } {
 		providers.push({ name, dir: dir as string | undefined });
 	}
 	return { providers };
+}
+
+/** Whether writes into the memory are checked against its limits ({"guard": false} in memory.json turns it off). */
+function guardOn(): boolean {
+	try {
+		return JSON.parse(readFileSync(CONFIG_FILE, "utf8"))?.guard !== false;
+	} catch {
+		return true;
+	}
+}
+
+/** Index lines (entries starting with "- [") over the limit, with their length. */
+function longIndexLines(text: string): { chars: number; text: string }[] {
+	return text
+		.split("\n")
+		.filter((l) => l.trimStart().startsWith("- ["))
+		.map((l) => ({ chars: Array.from(l).length, text: l }))
+		.filter((l) => l.chars > MAX_LINE_CHARS);
+}
+
+function hasFrontmatter(text: string): boolean {
+	if (!text.startsWith("---")) return false;
+	const end = text.indexOf("\n---", 3);
+	const front = end > 0 ? text.slice(3, end) : "";
+	return /^name:/m.test(front) && /^description:/m.test(front) && /^\s*type:/m.test(front);
+}
+
+/**
+ * Why a write or edit into the memory breaks its limits, or undefined when it does not. `content` is the whole new
+ * file for a write; `edits` the replacements of an edit.
+ */
+function guardProblem(file: string, content: string | undefined, edits: { oldText: string; newText: string }[]): string | undefined {
+	const name = path.basename(file);
+	if (name === INDEX) {
+		const added = content ?? edits.map((e) => e.newText).join("\n");
+		const long = longIndexLines(added);
+		if (long.length) {
+			const shown = long.slice(0, 3).map((l) => `${l.chars} characters: ${l.text.slice(0, 80)}…`).join("\n");
+			return `Not written: ${long.length} index line${long.length > 1 ? "s" : ""} over ${MAX_LINE_CHARS} characters, which ${long.length > 1 ? "go" : "goes"} into every request:\n${shown}\nKeep the title and the one fact that decides whether the entry is relevant; the details belong in the topic file. Write it again with shorter lines.`;
+		}
+		if (content !== undefined) {
+			const lines = content.split("\n").filter((l) => l.trim()).length;
+			if (lines > MAX_INDEX_LINES) {
+				return `Not written: the index would have ${lines} lines, and the prompt gets only the first ${MAX_INDEX_LINES}. Merge related entries or remove stale ones first.`;
+			}
+		}
+		return undefined;
+	}
+	if (!name.endsWith(".md")) return undefined;
+	if (content !== undefined && !hasFrontmatter(content)) {
+		return "Not written: a topic file begins with frontmatter: name, description, and metadata with node_type: memory, type, and modified (see the memory rules in the system prompt).";
+	}
+	let before = 0;
+	try {
+		before = statSync(file).size;
+	} catch {
+		// a new file
+	}
+	const after =
+		content !== undefined
+			? Buffer.byteLength(content)
+			: before + edits.reduce((n, e) => n + Buffer.byteLength(e.newText) - Buffer.byteLength(e.oldText), 0);
+	if (after > MAX_TOPIC_BYTES && after > before) {
+		return `Not written: ${name} would have ${(after / 1024).toFixed(1)} KB, over the ${MAX_TOPIC_BYTES / 1024} KB a topic file should stay under, since it costs its size each time it is read. Split it by subject into topic files of their own, each with frontmatter and an index line, and drop what is stale (superseded statements, finished intermediate states, removed workarounds); then write the part that belongs here.`;
+	}
+	return undefined;
 }
 
 /** ~ expanded; {project} replaced with the key. */
@@ -398,7 +470,7 @@ export default function (pi: ExtensionAPI) {
 		else if (memory.exists) {
 			ctx.ui.notify(`Memory: ${shortPath(memory.dir)}`, "info");
 			const summary = lintSummary(lint(memory.dir));
-			if (summary) ctx.ui.notify(`memory: ${summary}; /memory lint lists them`, "warning");
+			if (summary) ctx.ui.notify(`memory: ${summary}; /memory lint lists them, /memory tidy fixes them`, "warning");
 		}
 	});
 
@@ -425,6 +497,21 @@ export default function (pi: ExtensionAPI) {
 		].join("\n");
 	});
 
+	// Writes into the memory keep its limits.
+	pi.on("tool_call", (event, ctx) => {
+		if (process.env.PI_SUBAGENT_DEPTH || !guardOn()) return;
+		const write = isToolCallEventType("write", event);
+		if (!write && !isToolCallEventType("edit", event)) return;
+		const memory = memoryOf(ctx.cwd, trustedIn(ctx));
+		if (!memory) return;
+		const input = event.input as { path: string; content?: string; edits?: { oldText: string; newText: string }[]; oldText?: string; newText?: string };
+		const target = toolPath(input.path, ctx.cwd);
+		if (path.dirname(target) !== memory.dir) return;
+		const edits = write ? [] : (input.edits ?? (input.newText !== undefined ? [{ oldText: input.oldText ?? "", newText: input.newText }] : []));
+		const problem = guardProblem(target, write ? (input.content ?? "") : undefined, edits);
+		if (problem) return { block: true, reason: problem };
+	});
+
 	// The first entry in a project without memory: the folder and an empty index come with it.
 	pi.on("tool_call", (event, ctx) => {
 		if (process.env.PI_SUBAGENT_DEPTH) return;
@@ -443,9 +530,9 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("memory", {
-		description: "Show this project's memory and its providers; /memory edit opens the index, /memory lint checks it",
+		description: "Show this project's memory and its providers; /memory edit opens the index, lint checks it, tidy fixes it",
 		getArgumentCompletions: (prefix) => {
-			const matches = ["edit", "lint"].filter((v) => v !== prefix && v.startsWith(prefix));
+			const matches = ["edit", "lint", "tidy"].filter((v) => v !== prefix && v.startsWith(prefix));
 			return matches.length ? matches.map((v) => ({ value: v, label: v })) : null;
 		},
 		handler: async (args, ctx) => {
@@ -458,6 +545,27 @@ export default function (pi: ExtensionAPI) {
 			if (args.trim() === "lint") {
 				const result = lint(memory.dir);
 				await showText(ctx, `Memory lint · ${shortPath(memory.dir)}`, (_width, theme) => lintReport(result, theme));
+				return;
+			}
+			if (args.trim() === "tidy") {
+				const result = lint(memory.dir);
+				if (!lintSummary(result)) {
+					ctx.ui.notify("The memory keeps its limits; nothing to tidy.", "info");
+					return;
+				}
+				const plain = { fg: (_color: string, text: string) => text } as unknown as Theme;
+				const task = [
+					`Tidy this project's memory in ${memory.dir}, following its rules. /memory lint found:`,
+					"",
+					...lintReport(result, plain),
+					"",
+					`- Index lines over ${MAX_LINE_CHARS} characters: keep the title and the one fact that decides whether the entry is relevant; check that every detail the line drops stands in its topic file, and move it there if not.`,
+					`- Topic files over ${MAX_TOPIC_BYTES / 1024} KB: split each by subject into topic files of at most ${MAX_TOPIC_BYTES / 1024} KB, each with frontmatter and its own index line, so that a task reads only the part it needs. Keep every fact, prohibition, decision, and preference that still holds; drop only what is clearly stale (superseded statements, finished intermediate states, removed workarounds).`,
+					"- Links to missing files, files without an index line or frontmatter: fix the index or the file.",
+					"- Before you remove anything or overwrite a file, show me what would go, with the reason, and wait for my answer.",
+				].join("\n");
+				if (ctx.isIdle()) pi.sendUserMessage(task);
+				else pi.sendUserMessage(task, { deliverAs: "followUp" });
 				return;
 			}
 			if (args.trim() === "edit") {
