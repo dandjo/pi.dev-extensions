@@ -99,7 +99,7 @@ function fileHash(file: string): string | null {
 	}
 }
 
-/** The configured pi-claude-subscription, its folder and version. The package listing is the same as in claude-code-plugins.ts. */
+/** The configured pi-claude-subscription, its folder and version. The package listing is the same as in package-update.ts. */
 function findPackage(): { dir: string; version: string } | null {
 	const agentDir = getAgentDir();
 	const cwd = process.cwd();
@@ -242,7 +242,7 @@ export default function (pi: ExtensionAPI) {
 	let poll: ReturnType<typeof setInterval> | null = null;
 	let lastInput = 0;
 
-	// The reload while at rest is the same as in claude-code-plugins.ts.
+	// The reload while at rest is the same as in package-update.ts.
 	function atRest(): boolean {
 		if (!ctx || !tui) return false;
 		return (

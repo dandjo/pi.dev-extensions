@@ -10,8 +10,8 @@ diff view, agent panel, and Remote Control for the Claude app, reads and
 changes OpenProject and GitLab, reads and writes the clipboard, controls your
 Chrome, keeps requests alive through network trouble, keeps long
 conversations small, waits for pipelines and deploys without spending
-requests, keeps the Claude Agent SDK current, and fixes how the provider
-resumes after edited history.
+requests, keeps itself and the Claude Agent SDK current, and fixes how the
+provider resumes after edited history.
 
 Install it as a Pi package (step 3 of the setup below): its `package.json`
 names `extensions/`, which holds one file per extension.
@@ -37,6 +37,7 @@ names `extensions/`, which holds one file per extension.
 | `network-resilience.ts`     | Claude Code's handling of dropped connections: stall notice, restart, network wait        | —                                                                |
 | `context-gc.ts`             | Cuts thinking and long tool outputs of older turns from the context, in batches           | —                                                                |
 | `wait.ts`                   | Adds `wait`: checks a command or tool until a condition holds, without model requests     | —                                                                |
+| `package-update.ts`         | Keeps this package and the marketplace packages current, and reloads Pi when they change  | The package installed with `pi install`                          |
 
 **Claude Code's formats, any model** (`claude-code-*`). They read Claude Code's
 plugins, hooks, and agent definitions and run them in Pi, whichever model
@@ -44,7 +45,7 @@ answers.
 
 | Extension                   | What it does                                                                              | Needs                                                            |
 | :-------------------------- | :---------------------------------------------------------------------------------------- | :--------------------------------------------------------------- |
-| `claude-code-plugins.ts`    | Loads the plugins of Claude Code marketplace packages into Pi and keeps them current      | Each marketplace installed with `pi install`                     |
+| `claude-code-plugins.ts`    | Loads the plugins of Claude Code marketplace packages into Pi                             | Each marketplace installed with `pi install`                     |
 | `claude-code-hooks.ts`      | Runs Claude Code's hooks, from settings files and plugins, at Pi's events                 | —                                                                |
 | `claude-code-agents.ts`     | Adds Claude Code's agent definitions, tool names, and model families to `Agent`           | `subagents.ts`                                                   |
 
@@ -91,7 +92,7 @@ What differs is the tool around the model.
   panels, and dialogs, see and change what goes to the model, and react to
   every step of a session. Claude Code offers hooks, skills, MCP servers, and
   a status line script; its interface and agent loop stay closed. All
-  twenty-eight extensions here are such files: the GitLab and OpenProject
+  twenty-nine extensions here are such files: the GitLab and OpenProject
   tools, the plan limits in the status line, the diff panel, scheduled
   prompts, messages between sessions. Each can be read in one go, and a fix
   is a commit here, not a wait for the next Claude Code release.
@@ -125,7 +126,7 @@ Where Claude Code stays the better choice:
 ## Set up Pi
 
 Follow the steps in order — together they are the complete setup: Pi itself,
-the Claude subscription, all twenty-eight extensions, and the browser connection.
+the Claude subscription, all twenty-nine extensions, and the browser connection.
 Every step except the Chrome switch in step 4 is a
 shell command, so an agent can carry them out as well.
 
@@ -192,9 +193,10 @@ Install this repository as a Pi package:
 pi install git:github.com/dandjo/pi.dev-extensions
 ```
 
-Pi clones it into `~/.pi/agent/git/` and loads all twenty-eight extensions from
-there; `pi list` shows the package, and `pi update --extensions` brings new
-versions, new and renamed extensions included. There is no build step and no
+Pi clones it into `~/.pi/agent/git/` and loads all twenty-nine extensions from
+there; `pi list` shows the package. [package-update](#package-update) brings
+new versions at every start, new and renamed extensions included, and reloads
+Pi once it is idle; `/update` fetches them at once. There is no build step and no
 `npm install`: the extensions import only packages Pi provides itself. Each
 file stands on its own; `pi config` turns single ones off.
 
@@ -313,11 +315,47 @@ needs nothing. What changes with a provider other than Claude:
   switch, Claude Code removed for one, `/memory migrate` copies the project's
   entries over (see [memory](#memory)).
 
+## package-update
+
+Keeps this package of extensions current, and the packages other extensions
+ask for: [claude-code-plugins](#claude-code-plugins) asks for the Claude Code
+marketplaces. It needs nothing from any provider.
+
+- The package is the one `pi install` put this file in. Every other installed
+  package stays as it is until `pi update` by hand; `pi-web-access` is pinned
+  on purpose, and [claude-sdk-update](#claude-sdk-update) keeps the Claude
+  Agent SDK of `pi-claude-subscription` current.
+- At every Pi start (not with `PI_OFFLINE` set), each of these packages from
+  git or npm is brought up to date in the background with
+  `pi update <package>`, as by hand, but in a separate process, so its output
+  stays out of the terminal, and git never asks for a password: SSH runs in
+  batch mode. One Pi process updates at a time; one started meanwhile waits
+  for it and uses its result. A local folder is not updated, and subagent
+  processes ([subagents](#subagents)) update nothing.
+- When an update changed what a package loads into Pi (`package.json` and the
+  extensions, skills, prompts, and themes it names, and for a marketplace the
+  plugins and their list in `.claude-plugin/marketplace.json`), Pi reloads by
+  itself, so the new extensions, skills, hooks, and agents apply without a
+  restart. Commits that change only other files update the package without a
+  reload.
+- The reload waits until Pi is at rest in the terminal: no response or
+  compaction running, nothing queued, no prompt just submitted, and the empty
+  prompt editor in focus. An open selector such as `/resume` or `/model`, a
+  dialog, or a half-typed prompt is never interrupted. Until then
+  `<package> updated <old> -> <new>; Pi reloads once it is idle.` tells that
+  the previous version is still loaded. Outside the terminal (RPC mode) the
+  notice asks for `/reload` instead.
+- `/update` updates the packages and reloads at once.
+- Another extension asks over Pi's event bus: it sends `package-update:packages`
+  with an id and its packages (source, folder, a label, and the paths whose
+  change needs a reload) at load and whenever `package-update:request` comes;
+  a request sent again under the same id replaces the earlier one.
+
 ## claude-code-plugins
 
 Brings the plugins of Claude Code marketplaces — their skills, hooks, and
-agents — into Pi and keeps them current. It reads Claude Code's plugin format
-and needs no Claude model: the plugins work with any provider.
+agents — into Pi. It reads Claude Code's plugin format and needs no Claude
+model: the plugins work with any provider.
 
 - A marketplace is a Pi package whose folder holds
   `.claude-plugin/marketplace.json`, installed for you (not with `--local`)
@@ -332,29 +370,10 @@ and needs no Claude model: the plugins work with any provider.
   When the repository's root holds a `skills/` folder as well (a marketplace
   that is a single plugin), Pi loads those skills a second time, without the
   plugin prefix; `pi config` turns them off.
-- At every Pi start (not with `PI_OFFLINE` set), each marketplace from git is
-  brought up to date in the background with `pi update <package>`, and so is
-  the package this extension comes from (here this repository), so that the
-  extensions stay as current as the plugins; with no marketplace installed,
-  nothing is updated. It runs as by hand,
-  but in a separate process, so its output stays out of the terminal, and git
-  never asks for a password: SSH runs in batch mode. One Pi process updates at
-  a time; one started meanwhile waits for it and uses its result. A local
-  folder is not updated.
-- When an update changed a plugin (its files, or the plugin list in
-  `.claude-plugin/marketplace.json`) or what a package itself loads into Pi
-  (`package.json` and the extensions, skills, prompts, and themes it names),
-  Pi reloads by itself, so the new extensions, skills, hooks, and agents apply
-  without a restart. Commits that change only other files update the package
-  without a reload.
-- The reload waits until Pi is at rest in the terminal: no response or
-  compaction running, nothing queued, no prompt just submitted, and the empty
-  prompt editor in focus. An open selector such as `/resume` or `/model`, a
-  dialog, or a half-typed prompt is never interrupted. Until then
-  `<marketplace> updated <old> -> <new>; Pi reloads once it is idle.` tells
-  that the previous version is still loaded. Outside the terminal (RPC mode)
-  the notice asks for `/reload` instead.
-- `/marketplace-update` updates every marketplace and reloads at once.
+- [package-update](#package-update) keeps the marketplaces current: this
+  extension asks it to, with the plugins and their list as what needs a
+  reload. Without it a marketplace stays as installed until `pi update` by
+  hand.
 - Builds a copy of every plugin listed in `.claude-plugin/marketplace.json`
   whose source is a folder of the marketplace, in
   `~/.pi/agent/claude-code-marketplaces/<name>/plugins`, `<name>` taken from
@@ -365,22 +384,21 @@ and needs no Claude model: the plugins work with any provider.
   - `${CLAUDE_SKILL_DIR}` and `${CLAUDE_PLUGIN_ROOT}` are replaced with the
     absolute paths of the copy, because Pi does not substitute them.
 
-  The copy of a package from git is rebuilt when its commit changes, the copy
-  of a local folder at every start, so that changes not yet committed show.
-  Both happen while Pi loads its extensions, before the session starts, so
-  the SessionStart hooks of the plugins run from the current copy, on the
-  very first start and after a `pi update` by hand too.
+  The copy of a package from git is rebuilt when its commit changes, so after
+  an update at the next load, the copy of a local folder at every start, so
+  that changes not yet committed show. Both happen while Pi loads its
+  extensions, before the session starts, so the SessionStart hooks of the
+  plugins run from the current copy, on the very first start too.
 - The plugins' `hooks/` and `scripts/` are mirrored as they are, and every
   mirrored plugin is linked into `~/.pi/agent/claude-code-plugins/<plugin>`,
   where [claude-code-hooks](#claude-code-hooks) and
   [claude-code-agents](#claude-code-agents) look for
   Claude Code plugins, so their hooks and agents work in Pi as in Claude
   Code. The links are made at every start and
-  after every update, and removed when a marketplace is. A plugin name two
+  removed when a marketplace is. A plugin name two
   marketplaces share goes to the first. Links into a copy follow the copies,
   and so does a broken link of a mirrored plugin's name; any other entry there
   is left alone.
-- Subagent processes ([subagents](#subagents)) skip the update.
 - Pi warns at start about skill descriptions longer than 1,024 characters (the
   skill loads anyway).
 - Never edit the package's clone in `~/.pi/agent/git/` or the copies in
