@@ -52,7 +52,7 @@ import type { TUI } from "@earendil-works/pi-tui";
 import { execFile, execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
-	cpSync,
+	copyFileSync,
 	existsSync,
 	lstatSync,
 	mkdirSync,
@@ -86,6 +86,8 @@ const GENERATOR_VERSION = 2;
 const GIT_TIMEOUT_MS = 60_000;
 /** git rev-parse while the extension loads, which holds up Pi's start. */
 const REV_PARSE_TIMEOUT_MS = 10_000;
+/** A build folder without a pid (earlier versions) is left alone this long, as a running process may own it. */
+const STALE_BUILD_MS = 10 * 60_000;
 /** A `pi update` running longer is stopped; it may install npm dependencies. */
 const UPDATE_TIMEOUT_MS = 180_000;
 /** Held by the Pi process that updates, with its pid inside; another one waits for it. */
@@ -474,7 +476,62 @@ function frontmatterName(skillFile: string): string | null {
 
 const escapeRegExp = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
-/** Builds the Pi mirror of all plugins of a marketplace from its clone and swaps it in atomically. */
+/**
+ * Copies a directory tree file by file. Not fs.cpSync: Node implements it with std::filesystem, and an error there, such
+ * as a folder another process removed meanwhile, aborts the whole Pi process instead of throwing.
+ */
+function copyTree(from: string, to: string): void {
+	mkdirSync(to, { recursive: true });
+	for (const entry of readdirSync(from, { withFileTypes: true })) {
+		const source = path.join(from, entry.name);
+		const target = path.join(to, entry.name);
+		if (entry.isDirectory()) copyTree(source, target);
+		else if (entry.isSymbolicLink()) symlinkSync(readlinkSync(source), target);
+		else if (entry.isFile()) copyFileSync(source, target);
+	}
+}
+
+function alive(pid: number): boolean {
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch (error) {
+		return (error as NodeJS.ErrnoException).code === "EPERM";
+	}
+}
+
+/**
+ * Removes the build folders (<mirror>.tmp-<pid>, <mirror>.old-<pid>) of processes that are gone, and the pid-less ones
+ * of earlier versions once they are older than STALE_BUILD_MS, as a Pi process still running such a version may be
+ * using one.
+ */
+function removeStaleBuilds(m: Marketplace): void {
+	const parent = path.dirname(m.out);
+	const base = path.basename(m.out);
+	let entries: string[];
+	try {
+		entries = readdirSync(parent);
+	} catch {
+		return;
+	}
+	for (const name of entries) {
+		const match = name.startsWith(`${base}.`) ? /^(?:tmp|old)(?:-(\d+))?$/.exec(name.slice(base.length + 1)) : null;
+		if (!match) continue;
+		const dir = path.join(parent, name);
+		try {
+			if (match[1] ? alive(Number(match[1])) : Date.now() - statSync(dir).mtimeMs < STALE_BUILD_MS) continue;
+			rmSync(dir, { recursive: true, force: true });
+		} catch {
+			// gone meanwhile
+		}
+	}
+}
+
+/**
+ * Builds the Pi mirror of all plugins of a marketplace from its clone and swaps it in. Pi processes that load at the same
+ * time (a /reload in every session) each build in a folder of their own; the first to finish swaps its mirror in, and
+ * the others drop theirs once they find the mirror current.
+ */
 function generate(m: Marketplace, commit: string): void {
 	const plugins = marketplacePlugins(m);
 
@@ -489,13 +546,14 @@ function generate(m: Marketplace, commit: string): void {
 	const reference =
 		plugins.length > 0 ? new RegExp(`(\\/?)\\b((?:${plugins.map((p) => escapeRegExp(p.name)).join("|")}):[a-z0-9-]+)`, "g") : null;
 
-	const tmp = `${m.out}.tmp`;
+	removeStaleBuilds(m);
+	const tmp = `${m.out}.tmp-${process.pid}`;
 	rmSync(tmp, { recursive: true, force: true });
 	mkdirSync(tmp, { recursive: true });
 	for (const plugin of plugins) {
 		const target = path.join(tmp, plugin.name);
 		const finalRoot = path.join(m.out, plugin.name);
-		cpSync(plugin.dir, target, { recursive: true });
+		copyTree(plugin.dir, target);
 
 		for (const file of markdownFiles(target)) {
 			const relative = path.relative(target, file).split(path.sep);
@@ -523,10 +581,25 @@ function generate(m: Marketplace, commit: string): void {
 	}
 	writeFileSync(path.join(tmp, STAMP_NAME), `${commit} ${GENERATOR_VERSION}\n`);
 
-	const old = `${m.out}.old`;
+	// Another process may have swapped in the same mirror meanwhile.
+	if (isCurrent(m, commit)) {
+		rmSync(tmp, { recursive: true, force: true });
+		return;
+	}
+	const old = `${m.out}.old-${process.pid}`;
 	rmSync(old, { recursive: true, force: true });
-	if (existsSync(m.out)) renameSync(m.out, old);
-	renameSync(tmp, m.out);
+	try {
+		renameSync(m.out, old);
+	} catch {
+		// No mirror yet, or another process is swapping its own in.
+	}
+	try {
+		renameSync(tmp, m.out);
+	} catch (error) {
+		// Another process was quicker: keep its mirror, which is current unless the package moved on meanwhile.
+		rmSync(tmp, { recursive: true, force: true });
+		if (!isCurrent(m, commit)) throw error;
+	}
 	rmSync(old, { recursive: true, force: true });
 }
 
