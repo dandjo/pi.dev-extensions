@@ -13,8 +13,8 @@ conversations small, waits for pipelines and deploys without spending
 requests, keeps the Claude Agent SDK current, and fixes how the provider
 resumes after edited history.
 
-Install it as a Pi package (step 3 of the setup below); `extensions/` holds
-one file per extension.
+Install it as a Pi package (step 3 of the setup below): its `package.json`
+names `extensions/`, which holds one file per extension.
 
 | Extension                   | What it does                                                                              | Needs                                                            |
 | :-------------------------- | :---------------------------------------------------------------------------------------- | :--------------------------------------------------------------- |
@@ -341,13 +341,16 @@ and needs no Claude model: the plugins work with any provider.
   that is a single plugin), Pi loads those skills a second time, without the
   plugin prefix; `pi config` turns them off.
 - At every Pi start (not with `PI_OFFLINE` set), each marketplace from git is
-  brought up to date in the background with `pi update <package>`, as by hand,
+  brought up to date in the background with `pi update <package>`, and so is
+  the package this extension comes from (here this repository), so that the
+  extensions stay as current as the plugins; with no marketplace installed,
+  nothing is updated. It runs as by hand,
   but in a separate process, so its output stays out of the terminal, and git
   never asks for a password: SSH runs in batch mode. One Pi process updates at
   a time; one started meanwhile waits for it and uses its result. A local
   folder is not updated.
 - When an update changed a plugin (its files, or the plugin list in
-  `.claude-plugin/marketplace.json`) or what the package itself loads into Pi
+  `.claude-plugin/marketplace.json`) or what a package itself loads into Pi
   (`package.json` and the extensions, skills, prompts, and themes it names),
   Pi reloads by itself, so the new extensions, skills, hooks, and agents apply
   without a restart. Commits that change only other files update the package
@@ -412,11 +415,11 @@ and needs no Claude model: the plugins work with any provider.
 
 Replaces Pi's footer in the interactive terminal with the lines of
 [claude-code-cli-status-line](https://github.com/dandjo/claude-code-cli-status-line),
-the same status line for Claude Code: model with its thinking level,
-working directory, git branch, context-window usage, tokens, session cost, and
-elapsed time, for any provider. Below them come the rows other extensions add
-— [claude-usage](#claude-usage) adds the subscription limits — and the
-statuses that other extensions set appear as a last line.
+the same status line for Claude Code: model with its thinking level, working
+directory, git branch, context-window usage, tokens, session cost, and elapsed
+time, for any provider. Below them come the rows other extensions add —
+[claude-usage](#claude-usage) adds the subscription limits — and the statuses
+that other extensions set appear as a last line.
 
 The session name stands in the line above the prompt, as in Claude Code's
 prompt box, set in from the right end as far as Pi sets in the working status

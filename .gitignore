@@ -1,0 +1,10 @@
+.DS_Store
+Thumbs.db
+*.swp
+*~
+node_modules/
+.idea/
+.vscode/
+
+# npm install of Pi's git package (package.json names the extensions; no dependencies)
+/package-lock.json

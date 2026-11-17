@@ -7,7 +7,9 @@
  *   .claude-plugin/marketplace.json, from git as well as from a local folder. Without one the extension does nothing.
  *   It clones nothing itself: the files are Pi's package install.
  * - On every Pi start, `pi update <source>` brings each git or npm marketplace package up to date in the background,
- *   as by hand, but in a child process whose output stays out of the terminal, and git never prompts
+ *   and the package this extension comes from too, so that the extensions stay as current as the plugins (with no
+ *   marketplace installed nothing is updated). It runs as by hand, but in a child process whose output stays out of
+ *   the terminal, and git never prompts
  *   (GIT_TERMINAL_PROMPT=0, SSH in batch mode). One Pi process updates at a time; one starting meanwhile waits and uses
  *   the result. Local folders are not updated, and subagent processes and Pi with PI_OFFLINE set update nothing.
  * - From the package, a mirror of every plugin listed in .claude-plugin/marketplace.json is built in
@@ -24,7 +26,7 @@
  *   ~/.pi/agent/claude-code-plugins, where claude-code-hooks.ts runs its hooks and claude-code-agents.ts finds its
  *   agents; a plugin name two marketplaces share goes to the first. Links into a mirror (a directory with a .source stamp, this one's or an earlier one's) are
  *   replaced or removed as the mirrors change; other entries there are left alone.
- * - When an update changed a plugin or what the package itself loads into Pi (package.json and the extensions,
+ * - When an update changed a plugin or what a package itself loads into Pi (package.json and the extensions,
  *   skills, prompts, and themes it names), Pi reloads by itself as soon as it is at rest in the terminal: no run or
  *   compaction, nothing queued, no prompt just submitted, and the empty prompt editor in focus, so no selector or
  *   dialog is open and no typing is lost. Until then what was loaded before stays active. /marketplace-update updates
@@ -59,6 +61,7 @@ import {
 	readdirSync,
 	readFileSync,
 	readlinkSync,
+	realpathSync,
 	renameSync,
 	rmdirSync,
 	rmSync,
@@ -67,6 +70,7 @@ import {
 	writeFileSync,
 } from "node:fs";
 import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
 /** The marketplace list of earlier versions, no longer read. */
@@ -111,17 +115,25 @@ const INPUT_GRACE_MS = 5_000;
 
 const run = promisify(execFile);
 
-interface Marketplace {
+/** A package this extension keeps current: a marketplace, or the package this extension comes from. */
+interface KeptPackage {
 	/** The package source in Pi's settings, as `pi update` takes it. */
 	source: string;
 	/** Whether `pi update` moves it: a git or npm package, not a local folder. */
 	updatable: boolean;
-	/** The directory name below ROOT, from the package folder. */
+	/** The directory name below ROOT for a marketplace, from the package folder; the folder name otherwise. */
 	slug: string;
 	/** The package folder. */
 	repo: string;
+}
+
+interface Marketplace extends KeptPackage {
 	out: string;
 	stamp: string;
+}
+
+function isMarketplace(p: KeptPackage): p is Marketplace {
+	return "stamp" in p;
 }
 
 interface Plugin {
@@ -168,13 +180,40 @@ function findMarketplaces(packages: ConfiguredPackage[]): Marketplace[] {
 	});
 }
 
+/**
+ * The user package this file came with, unless it is a marketplace itself (then it is kept current as one) or none is
+ * found (loaded with -e, say).
+ */
+function ownPackage(packages: ConfiguredPackage[], marketplaces: Marketplace[]): KeptPackage | null {
+	let self: string;
+	try {
+		self = realpathSync(fileURLToPath(import.meta.url));
+	} catch {
+		return null;
+	}
+	for (const pkg of packages) {
+		if (pkg.scope !== "user" || !pkg.installedPath) continue;
+		let real: string;
+		try {
+			real = realpathSync(pkg.installedPath);
+		} catch {
+			continue;
+		}
+		if (!self.startsWith(real + path.sep)) continue;
+		const repo = path.resolve(pkg.installedPath);
+		if (marketplaces.some((m) => m.repo === repo)) return null;
+		return { source: pkg.source, updatable: !isLocalSource(pkg.source), slug: path.basename(repo), repo };
+	}
+	return null;
+}
+
 async function git(args: string[], cwd?: string): Promise<string> {
 	const { stdout } = await run("git", args, { cwd, timeout: GIT_TIMEOUT_MS, env: { ...process.env, ...GIT_ENV } });
 	return stdout.trim();
 }
 
 /** The version in an npm package's package.json, or null. */
-function packageVersion(m: Marketplace): string | null {
+function packageVersion(m: KeptPackage): string | null {
 	try {
 		const version = JSON.parse(readFileSync(path.join(m.repo, "package.json"), "utf8"))?.version;
 		return typeof version === "string" && version ? version : null;
@@ -184,13 +223,13 @@ function packageVersion(m: Marketplace): string | null {
 }
 
 /** The package's commit, or for an npm package its version; null when neither is known. */
-async function revision(m: Marketplace): Promise<string | null> {
+async function revision(m: KeptPackage): Promise<string | null> {
 	const commit = await git(["rev-parse", "--short", "HEAD"], m.repo).catch(() => null);
 	return commit || packageVersion(m);
 }
 
 /** revision() for the load of the extension, which must be done before session_start. */
-function revisionSync(m: Marketplace): string | null {
+function revisionSync(m: KeptPackage): string | null {
 	try {
 		const commit = execFileSync("git", ["rev-parse", "--short", "HEAD"], {
 			cwd: m.repo,
@@ -430,17 +469,21 @@ function retireOldFolders(): void {
 }
 
 /** The marketplace's name in its manifest, else the directory name. */
-function label(m: Marketplace): string {
-	try {
-		const name = JSON.parse(readFileSync(path.join(m.repo, ".claude-plugin", "marketplace.json"), "utf8"))?.name;
-		return typeof name === "string" && name ? name : m.slug;
-	} catch {
-		return m.slug;
+/** A marketplace's name, else the package's name, else its folder. */
+function label(m: KeptPackage): string {
+	for (const file of [path.join(".claude-plugin", "marketplace.json"), "package.json"]) {
+		try {
+			const name = JSON.parse(readFileSync(path.join(m.repo, file), "utf8"))?.name;
+			if (typeof name === "string" && name) return name;
+		} catch {
+			// next
+		}
 	}
+	return m.slug;
 }
 
 /** The plugins of the manifest whose source is a directory in the clone; others (github, url) are not mirrored. */
-function marketplacePlugins(m: Marketplace): Plugin[] {
+function marketplacePlugins(m: KeptPackage): Plugin[] {
 	const manifest = JSON.parse(readFileSync(path.join(m.repo, ".claude-plugin", "marketplace.json"), "utf8"));
 	const plugins: Plugin[] = [];
 	for (const entry of manifest.plugins ?? []) {
@@ -661,7 +704,7 @@ function isCurrent(m: Marketplace, commit: string): boolean {
  * into Pi — package.json and the folders of its extensions, skills, prompts, and themes (Pi's default folders without
  * a pi entry in package.json).
  */
-function reloadPaths(m: Marketplace): string[] {
+function reloadPaths(m: KeptPackage): string[] {
 	const paths = [".claude-plugin/marketplace.json", "package.json"];
 	try {
 		paths.push(...marketplacePlugins(m).map((plugin) => path.relative(m.repo, plugin.dir)));
@@ -693,7 +736,7 @@ function reloadPaths(m: Marketplace): string[] {
 }
 
 /** Whether what needs a reload differs between two revisions of a package; when in doubt, yes. */
-async function reloadNeeded(m: Marketplace, from: string | null, to: string | null): Promise<boolean> {
+async function reloadNeeded(m: KeptPackage, from: string | null, to: string | null): Promise<boolean> {
 	if (from === to) return false;
 	if (!from || !to) return true;
 	try {
@@ -710,7 +753,7 @@ function skillPaths(marketplaces: Marketplace[]): string[] {
 		.filter((dir) => existsSync(dir));
 }
 
-type UpdateResult = { m: Marketplace; from: string | null; to: string | null } | { m: Marketplace; error: string };
+type UpdateResult = { m: KeptPackage; from: string | null; to: string | null } | { m: KeptPackage; error: string };
 
 /**
  * The update in flight, shared by the session runtimes of this process: /reload loads this file afresh, and a session
@@ -720,13 +763,13 @@ const shared = globalThis as typeof globalThis & Record<symbol, Promise<UpdateRe
 const UPDATE = Symbol.for("pi.claude-code-plugins.update");
 
 /**
- * Updates every git and npm marketplace package with `pi update` and rebuilds the mirrors that changed, one failing not
- * holding up the others; concurrent callers in this process share a run, and another Pi process updating meanwhile
- * makes this one wait and skip it (null).
+ * Updates every git and npm marketplace package and the package of this extension with `pi update` and rebuilds the
+ * mirrors that changed, one failing not holding up the others; concurrent callers in this process share a run, and
+ * another Pi process updating meanwhile makes this one wait and skip it (null).
  */
-function update(marketplaces: Marketplace[]): Promise<UpdateResult[] | null> {
+function update(marketplaces: Marketplace[], own: KeptPackage | null): Promise<UpdateResult[] | null> {
 	shared[UPDATE] ??= (async () => {
-		const updatable = marketplaces.filter((m) => m.updatable);
+		const updatable = [...marketplaces, ...(own ? [own] : [])].filter((m) => m.updatable);
 		if (updatable.length === 0) return [];
 		const release = await takeLock();
 		if (!release) return null;
@@ -737,7 +780,7 @@ function update(marketplaces: Marketplace[]): Promise<UpdateResult[] | null> {
 					const from = await revision(m);
 					await piUpdate(m.source);
 					const to = await revision(m);
-					if (to && !isCurrent(m, to)) generate(m, to);
+					if (to && isMarketplace(m) && !isCurrent(m, to)) generate(m, to);
 					results.push({ m, from, to });
 				} catch (error) {
 					results.push({ m, error: error instanceof Error ? error.message.split("\n")[0] : String(error) });
@@ -791,6 +834,7 @@ export default function (pi: ExtensionAPI) {
 		}
 		return;
 	}
+	const own = ownPackage(packages, marketplaces);
 
 	// Before any session_start, at the start and at /reload alike, since claude-code-hooks.ts runs the SessionStart
 	// hooks there: mirrors rebuilt where the package changed, then linked. A git or npm package's mirror is rebuilt when
@@ -812,6 +856,7 @@ export default function (pi: ExtensionAPI) {
 		}
 		loaded.set(m.repo, current);
 	}
+	if (own?.updatable) loaded.set(own.repo, revisionSync(own));
 	if (generated || !process.env.PI_SUBAGENT_DEPTH) {
 		try {
 			linkPlugins(marketplaces);
@@ -884,7 +929,7 @@ export default function (pi: ExtensionAPI) {
 	/** Schedules a reload when a package now holds plugins or resources that differ from those this runtime loaded. */
 	async function checkPackages(): Promise<void> {
 		const changes: string[] = [];
-		for (const m of marketplaces) {
+		for (const m of [...marketplaces, ...(own ? [own] : [])]) {
 			if (!m.updatable || !loaded.has(m.repo)) continue;
 			const before = loaded.get(m.repo) ?? null;
 			const current = await revision(m);
@@ -908,18 +953,18 @@ export default function (pi: ExtensionAPI) {
 		// Only the start updates; a later session waits for an update still running, or finds one finished since its
 		// resources were loaded. The check waits for the resources and then for the next macrotask, so it never runs
 		// inside the start or reload that is still under way.
-		const updating = event.reason === "startup" ? update(marketplaces) : shared[UPDATE];
+		const updating = event.reason === "startup" ? update(marketplaces, own) : shared[UPDATE];
 		Promise.all([updating, discovered])
 			.then(([results]) => {
 				const failed = (results ?? []).filter((r): r is Extract<UpdateResult, { error: string }> => "error" in r);
 				if (failed.length > 0 && ctx?.hasUI) {
-					ctx.ui.notify(`Marketplace update failed: ${failed.map((r) => `${label(r.m)}: ${r.error}`).join("; ")}`, "warning");
+					ctx.ui.notify(`Package update failed: ${failed.map((r) => `${label(r.m)}: ${r.error}`).join("; ")}`, "warning");
 				}
 			})
 			.then(() => new Promise((resolve) => setTimeout(resolve, 0)))
 			.then(checkPackages)
 			.catch((error) => {
-				if (ctx?.hasUI) ctx.ui.notify(`Marketplace update failed: ${error instanceof Error ? error.message : error}`, "warning");
+				if (ctx?.hasUI) ctx.ui.notify(`Package update failed: ${error instanceof Error ? error.message : error}`, "warning");
 			});
 	});
 
@@ -938,15 +983,15 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand(COMMAND, {
-		description: "Update the Claude Code marketplace packages and reload their plugins",
+		description: "Update the Claude Code marketplace packages and the package of the extensions, and reload",
 		handler: async (args, command) => {
 			if (args === RELOAD_MARK) {
 				await command.reload();
 				return;
 			}
-			const results = await update(marketplaces);
+			const results = await update(marketplaces, own);
 			if (results === null || results.length === 0) {
-				command.ui.notify(results === null ? "Another Pi process has just updated the marketplace packages." : "No marketplace package to update: local folders load as they are.", "info");
+				command.ui.notify(results === null ? "Another Pi process has just updated the packages." : "No package to update: local folders load as they are.", "info");
 				stopWaiting();
 				await command.reload();
 				return;

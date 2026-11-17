@@ -1,0 +1,13 @@
+{
+  "name": "pi.dev-extensions",
+  "private": true,
+  "description": "Pi extensions that bring over what Claude Code does, installed as a Pi package (see README.md)",
+  "keywords": [
+    "pi-package"
+  ],
+  "pi": {
+    "extensions": [
+      "extensions"
+    ]
+  }
+}
