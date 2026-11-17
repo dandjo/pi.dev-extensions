@@ -177,6 +177,18 @@ function sessionFileOf(sessionId: string, agentId: string): string | undefined {
 }
 
 /** The transcript of a subagent session file as terminal lines for `width`, and how many user messages it holds. */
+/**
+ * A message to the agent as Pi draws the user's messages: a block in the user message colours across the width, one
+ * column and one line of padding. note, when given, follows inside the block, dimmed.
+ */
+function userBlock(text: string, width: number, theme: Theme, note?: string): string[] {
+	const inner = Math.max(1, width - 2);
+	const fill = (line: string) => theme.bg("userMessageBg", ` ${line}${" ".repeat(Math.max(0, inner - visibleWidth(line)))} `);
+	const body = text.split("\n").flatMap((line) => (line ? wrapTextWithAnsi(theme.fg("userMessageText", line), inner) : [""]));
+	if (note) body.push(theme.fg("dim", note));
+	return [fill(""), ...body.map(fill), fill("")];
+}
+
 function transcriptLines(file: string, width: number, theme: Theme): { lines: string[]; users: number } {
 	let text: string;
 	try {
@@ -200,9 +212,7 @@ function transcriptLines(file: string, width: number, theme: Theme): { lines: st
 		if (message.role === "user") {
 			users++;
 			const content = typeof message.content === "string" ? message.content : message.content.map((p: any) => (p.type === "text" ? p.text : "[image]")).join("\n");
-			lines.push(...wrap(theme.fg("accent", `❯ ${content.split("\n")[0]}`)));
-			for (const line of content.split("\n").slice(1)) lines.push(...wrap(`  ${line}`));
-			lines.push("");
+			lines.push(...userBlock(content, width, theme), "");
 		} else if (message.role === "assistant") {
 			for (const part of message.content ?? []) {
 				if (part.type === "text" && part.text?.trim()) {
@@ -724,8 +734,8 @@ export default function (pi: ExtensionAPI) {
 	function stateLine(current: Row, theme: Theme): string {
 		if (current.status === "running" && current.waiting === "instruction") return theme.fg("warning", "interrupted · waits for your instruction");
 		if (current.status === "running") return theme.fg("warning", `${current.waiting === "answer" ? "asks you" : "running"} · ${elapsed(Date.now() - current.startedAt)}`);
-		if (current.status === "completed") return theme.fg("success", `✔ completed · ${elapsed(current.durationMs ?? 0)}`);
-		return theme.fg("error", `${current.status === "aborted" ? "stopped" : "✘ failed"}${current.error ? ` · ${current.error.split("\n")[0]}` : ""}`);
+		if (current.status === "completed") return theme.fg("success", `✓ completed · ${elapsed(current.durationMs ?? 0)}`);
+		return theme.fg("error", `${current.status === "aborted" ? "stopped" : "✗ failed"}${current.error ? ` · ${current.error.split("\n")[0]}` : ""}`);
 	}
 
 	function usageLine(current: Row, theme: Theme): string {
@@ -793,8 +803,7 @@ export default function (pi: ExtensionAPI) {
 			if (unread.length) sent.set(this.row.agentId, unread);
 			else sent.delete(this.row.agentId);
 			const waiting = unread.flatMap((m) => [
-				...wrapTextWithAnsi(theme.fg("accent", `❯ ${m.text.trim()}`), inner).map((line) => ` ${line}`),
-				` ${theme.fg("dim", working ? "  not read yet: the agent reads it after its current step" : "  starting the agent…")}`,
+				...userBlock(m.text.trim(), inner, theme, working ? "not read yet: the agent reads it after its current step" : "starting the agent…").map((line) => ` ${line}`),
 				"",
 			]);
 			return ["", ...head.map((line) => truncateToWidth(` ${line}`, width, "…")), "", ...this.cache.lines, ...waiting];

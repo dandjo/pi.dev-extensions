@@ -626,8 +626,8 @@ export default function (pi: ExtensionAPI) {
 			await showText(ctx, `Memory · ${shortPath(memory.dir)}`, (_width, theme) => {
 				const providers = memory.all.map((r) =>
 					r.dir === memory.dir && r.provider === memory.provider
-						? `${theme.fg("success", "●")} ${r.provider}  ${shortPath(r.dir)}  ${theme.fg("muted", "(in use)")}`
-						: `${theme.fg("dim", "○")} ${r.provider}  ${r.dir ? shortPath(r.dir) : ""}  ${theme.fg("muted", r.unavailable ? `(${r.unavailable})` : "(fallback)")}`,
+						? `${theme.fg("success", "✓")} ${r.provider}  ${shortPath(r.dir)}  ${theme.fg("muted", "(in use)")}`
+						: `  ${r.provider}  ${r.dir ? shortPath(r.dir) : ""}  ${theme.fg("muted", r.unavailable ? `(${r.unavailable})` : "(fallback)")}`,
 				);
 				const head = [theme.fg("muted", `Providers in order of priority (${shortPath(CONFIG_FILE)}):`), ...providers, ""];
 				if (!memory.exists) return [...head, `No memory yet for this project (${describe(memory.provider)}). The first entry creates it.`];

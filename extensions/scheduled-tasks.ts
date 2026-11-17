@@ -580,7 +580,7 @@ export default function (pi: ExtensionAPI) {
 					list.forEach((task, i) => {
 						const focused = i === selected;
 						const schedule = truncateToWidth(scheduleOf(task), scheduleWidth, "…", true);
-						const row = `${focused ? "❯ " : "  "}${theme.fg("accent", task.id)}  ${clock(task.nextRun).padEnd(nextWidth)}  ${schedule}  ${theme.fg("muted", promptText(task).replace(/\s+/g, " "))}`;
+						const row = `${focused ? theme.fg("accent", "→ ") : "  "}${theme.fg("accent", task.id)}  ${clock(task.nextRun).padEnd(nextWidth)}  ${schedule}  ${theme.fg("muted", promptText(task).replace(/\s+/g, " "))}`;
 						const cut = truncateToWidth(row, inner, "…");
 						hits[lines.length] = i;
 						lines.push(focused ? theme.bg("selectedBg", cut + " ".repeat(Math.max(0, inner - visibleWidth(cut)))) : cut);
