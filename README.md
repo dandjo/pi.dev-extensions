@@ -1716,6 +1716,15 @@ since npm keeps a dependency at the version of `package-lock.json`.
   renamed (Windows, while Claude Code runs), `npm update` installs in place
   as before, and a request that starts Claude Code just then fails and can be
   repeated.
+- npm skips an optional package it cannot fetch without an error, and the
+  packages with Claude Code are optional. When the folder beside
+  `node_modules` lacks one that is installed now, nothing is moved and
+  nothing updated: the installed SDK stays, the notice names the package, and
+  the next start tries again. After an update, every one of these packages
+  installed before must still be there; a missing one is reported with the
+  command that installs it again (`npm install --legacy-peer-deps --no-audit
+  --no-fund` in `~/.pi/agent/npm`), since without it Claude Code may not
+  start.
 - Works with npm, Pi's default. With an `npmCommand` setting for pnpm or Bun,
   the extension does nothing.
 

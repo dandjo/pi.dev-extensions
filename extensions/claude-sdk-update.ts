@@ -26,6 +26,10 @@
  *   finds them in place and only settles the rest. Where the folders cannot be renamed (Windows, while Claude Code
  *   runs), `npm update` installs in place as before, and a request that starts Claude Code just then fails and can be
  *   repeated.
+ * - npm skips an optional package it cannot fetch without an error, and the platform packages with Claude Code are
+ *   optional. So when the folder beside node_modules lacks one that is installed now, nothing is moved and nothing
+ *   updated: the installed SDK stays, and the next start tries again. After an update, every platform package
+ *   installed before must still be there; a missing one is reported with the command that installs it again.
  * - Works with npm, Pi's default. With an `npmCommand` setting for pnpm or Bun, the extension does nothing.
  * - After an update, "claude-sdk-update:installed" on the event bus carries the new SDK's folder and versions
  *   ({ dir, version, claudeCode }), so claude-remote-control.ts can check its repairs against the new bundle at once.
@@ -105,6 +109,25 @@ function lockPackages(): Record<string, Record<string, unknown>> {
 		return {};
 	}
 }
+
+/**
+ * The platform packages with Claude Code installed beside the SDK at `location`, by their names in the SDK's scope
+ * (claude-agent-sdk-linux-x64, …).
+ */
+function platformPackages(location: string): string[] {
+	const own = path.basename(SDK);
+	try {
+		return readdirSync(path.dirname(path.join(ROOT, location)), { withFileTypes: true })
+			.filter((entry) => entry.isDirectory() && entry.name.startsWith(`${own}-`) && !RETIRED.test(entry.name))
+			.map((entry) => entry.name)
+			.sort();
+	} catch {
+		return [];
+	}
+}
+
+/** The stage lacks a platform package installed now: npm could not fetch it. */
+class IncompleteStage extends Error {}
 
 /** The SDK in the npm root, hoisted or below the package that needs it; null when no package there brings it. */
 function installedSdk(): Sdk | null {
@@ -223,6 +246,12 @@ async function installBeside(command: { command: string; args: string[] }, versi
 	writeFileSync(path.join(STAGE, "package.json"), "{}\n");
 	const stage = realpathSync(STAGE);
 	await npm(command, ["install", `${SDK}@${version}`, "--prefix", stage, "--legacy-peer-deps", "--no-audit", "--no-fund"], UPDATE_TIMEOUT_MS, stage);
+	const scope = path.join(stage, "node_modules", path.dirname(SDK));
+	const missing = platformPackages(location).filter((name) => !existsSync(path.join(scope, name)));
+	if (missing.length > 0) {
+		clearStage(location);
+		throw new IncompleteStage(`npm did not fetch ${missing.map((name) => `${path.dirname(SDK)}/${name}@${version}`).join(", ")}; the installed SDK stays, the next start tries again`);
+	}
 	try {
 		const staged: Record<string, Record<string, unknown>> = JSON.parse(readFileSync(path.join(stage, "package-lock.json"), "utf8"))?.packages ?? {};
 		const lockFile = path.join(ROOT, "package-lock.json");
@@ -285,11 +314,13 @@ async function check(onUpdate: (from: Sdk, to: string) => void): Promise<Result>
 	if (wanted === null || compare(wanted, installed.version) <= 0) return { kind: "current", installed, blocked };
 
 	if (!takeLock()) return { kind: "busy", installed };
+	const platform = platformPackages(installed.location);
 	try {
 		onUpdate(installed, wanted);
 		try {
 			await installBeside(command, wanted, installed.location);
-		} catch {
+		} catch (error) {
+			if (error instanceof IncompleteStage) throw error;
 			// The update below installs in place what could not be moved there, or reports why nothing can be installed.
 		}
 		await npm(command, ["update", SDK, "--prefix", realpathSync(ROOT), "--legacy-peer-deps", "--no-audit", "--no-fund"], UPDATE_TIMEOUT_MS);
@@ -299,6 +330,13 @@ async function check(onUpdate: (from: Sdk, to: string) => void): Promise<Result>
 	const after = installedSdk();
 	if (!after || compare(after.version, installed.version) <= 0) {
 		throw new Error(`npm update finished, but the SDK is still ${after?.version ?? "missing"}`);
+	}
+	const lost = platform.filter((name) => !platformPackages(after.location).includes(name));
+	if (lost.length > 0) {
+		throw new Error(
+			`npm removed ${lost.map((name) => `${path.dirname(SDK)}/${name}`).join(", ")}, so Claude Code may not start; ` +
+				`run npm install --legacy-peer-deps --no-audit --no-fund in ${ROOT}`,
+		);
 	}
 	return { kind: "updated", from: installed, to: after, blocked };
 }
