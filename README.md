@@ -1140,13 +1140,17 @@ through it, such as setup wizards, work unchanged.
   questions, Esc dismisses.
 - The highlighted option has the selection background, as in Claude Code,
   and an arrow (`→`) in front, as in Pi's own lists.
+- The dialog rings the terminal bell as it opens, so the terminal marks a
+  session that waits for an answer; tmux sets the bell flag of its window,
+  which `window-status-bell-style` can make blink in the tab.
+  `{"bell": false}` in `~/.pi/agent/ask-user-question.json` turns that off.
 - In fullscreen mode (`tuiMode`) the mouse works as well: the highlight follows
   the pointer and goes back to the option chosen with the keys when the pointer
   leaves the options; a key acts on the option highlighted, which then becomes
   the one chosen with the keys. A tab under the pointer gets a lighter
-  background than the open one, a click on an option picks it as Enter does (toggles it in a
-  multi-select), a click on a tab opens it, a click on the submit line of the
-  Submit tab submits, and the wheel moves the highlight. In the regular mode
+  background than the open one, a click on an option picks it as Enter does
+  (toggles it in a multi-select), a click on a tab opens it, a click on the
+  submit line of the Submit tab submits, and the wheel moves the highlight. In the regular mode
   the terminal keeps the mouse. Under tmux, zellij, or screen Pi asks the
   terminal only for button motion, so there the highlight does not follow a
   pointer that merely moves.
@@ -1154,9 +1158,8 @@ through it, such as setup wizards, work unchanged.
   call fails with a note to decide alone.
 - A subagent's questions open in the session that started it, in this same
   dialog, under a line that names the agent (see [subagents](#subagents)).
-  The subagent hands them over as one request; a session that does not take
-  such requests (one started before this change, or without this extension)
-  gets one select dialog per question instead.
+  The subagent hands them over as one request; a session without this
+  extension gets one select dialog per question instead.
 - With Remote Control active the questions can also be answered in the Claude
   app (see claude-remote-control). The first answer wins, from either place,
   and closes the other. Interrupting the run withdraws the questions.
