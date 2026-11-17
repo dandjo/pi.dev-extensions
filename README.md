@@ -803,6 +803,18 @@ out.
     running; `run` starts a pipeline for `ref` (default the default branch)
     with `variables`. With `wait: true` they wait for the job or pipeline
     afterwards.
+  - `stop_wait` ends the background wait `waitId`; the pipeline or job
+    itself goes on.
+- `background: true`, with `wait` or with `wait: true`, returns at once with
+  an id (`gp1`) and waits on its own, for at most `timeout` minutes (120
+  there). Your messages do not stop it. When the job or pipeline settles or
+  the time is up, a message brings the result into the conversation and
+  starts a turn when Pi is idle. `/gitlab-waits` lists the background waits
+  with their last state, `/gitlab-waits stop <id>` ends one. They end with the
+  session, `/reload` included.
+- A check that fails on the network, with a server error, or with 429 is
+  repeated, up to three in a row; a refusal (401, 403, 404) ends the wait at
+  once.
 - The project is `project` — `group/project`, its id, or a web URL of the
   project or of one of its pipelines, jobs, or merge requests — or else the
   project of the working directory's `origin` remote, on the instance that
