@@ -26,6 +26,8 @@
  *   along as form fields. Files go, like the token, only to the instance of the call.
  * - Requests go through the proxy Pi uses for its own HTTP (its httpProxy setting, applied as HTTPS_PROXY and
  *   HTTP_PROXY, and NO_PROXY): https through a CONNECT tunnel, as curl and undici do.
+ * - A second tool, gitlab_pipeline, shows, waits for, and drives CI pipelines and jobs in a few lines, with the same
+ *   instances, tokens, and rules; "pipelines": false in gitlab.json leaves it out. Its section below says more.
  */
 
 import { randomBytes } from "node:crypto";
@@ -49,7 +51,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 
 const CONFIG_FILE = path.join(getAgentDir(), "gitlab.json");
 const DEFAULT_TOKEN_ENV = "GITLAB_TOKEN";
@@ -103,8 +105,18 @@ type Instance = ConfiguredInstance & {
 
 const within = (pathname: string, prefix: string) => pathname === prefix || pathname.startsWith(`${prefix}/`);
 
+/**
+ * Whether a path names the GraphQL endpoint the way a REST path would, as /graphql or /api/v<n>/graphql of any version,
+ * with or without the base path. GitLab has no REST route of that name, so it can only mean the GraphQL endpoint.
+ */
+function graphqlAlias(instance: Instance, pathname: string): boolean {
+	const base = instance.graphql.slice(0, -"/api/graphql".length);
+	return /^(\/api\/v\d+)?\/graphql$/.test(base && within(pathname, base) ? pathname.slice(base.length) : pathname);
+}
+
 /** Whether a URL lies in the REST or GraphQL API of an instance. */
-const owns = (instance: Instance, url: URL) => within(url.pathname, instance.api) || url.pathname === instance.graphql;
+const owns = (instance: Instance, url: URL) =>
+	within(url.pathname, instance.api) || url.pathname === instance.graphql || graphqlAlias(instance, url.pathname);
 
 /** Appends a query parameter the way GitLab reads it: arrays as key[]=…, objects as key[sub]=…. */
 function appendParam(params: URLSearchParams, key: string, value: unknown): void {
@@ -124,10 +136,13 @@ function requestUrl(instance: Instance, target: string, query: Record<string, un
 	const trimmed = target.trim();
 	if (/^https?:\/\//i.test(trimmed)) {
 		url = new URL(trimmed);
+		if (url.origin === instance.origin && graphqlAlias(instance, url.pathname)) url.pathname = instance.graphql;
 	} else {
 		let p = trimmed.startsWith("/") ? trimmed : `/${trimmed}`;
 		const pathname = p.replace(/[?#].*$/, "");
-		if (!within(pathname, instance.api) && pathname !== instance.graphql) {
+		if (graphqlAlias(instance, pathname)) {
+			p = instance.graphql + p.slice(pathname.length);
+		} else if (!within(pathname, instance.api) && pathname !== instance.graphql) {
 			if (/^\/api\/graphql$/.test(pathname)) p = instance.graphql + p.slice("/api/graphql".length);
 			else p = instance.api + (/^\/api\/v4(?=$|[/?])/.test(p) ? p.slice("/api/v4".length) : p);
 		}
@@ -561,7 +576,7 @@ const BaseParams = {
 	method: Type.Optional(StringEnum(["GET", "POST", "PUT", "DELETE"] as const, { description: "HTTP method; default GET" })),
 	path: Type.String({
 		description:
-			"Path below /api/v4, e.g. /projects/42/issues/7, an href from an earlier response, or /api/graphql; may carry a query string",
+			"Path below /api/v4, e.g. /projects/42/issues/7, an href from an earlier response, or /api/graphql, the endpoint of the GraphQL API; may carry a query string",
 	}),
 	query: Type.Optional(
 		Type.Object({}, {
@@ -895,6 +910,290 @@ function forgetToken(instance: ConfiguredInstance): boolean {
 	return true;
 }
 
+/**
+ * The gitlab_pipeline tool: the CI pipelines and jobs of a project in a few lines, through the instances, tokens, and
+ * requests of the gitlab tool. A Python port of it for Claude Code carries the same logic: change them alike.
+ *
+ * - The project is project (its id, its full path, or the web URL of the project, a pipeline, a job, or a merge
+ *   request), else the one of the working directory's origin remote, on the instance that remote belongs to.
+ * - The pipeline is pipeline (its id, as in /-/pipelines/<id>), else the head pipeline of merge request mr, else the
+ *   pipeline of a job given by id, else the latest of ref, else the latest of the project. A job is named by its name
+ *   in that pipeline (the latest run of it) or by its id.
+ * - status: the pipeline and its jobs as a table (stage, job, status, time, runner, id), trigger jobs with their
+ *   downstream pipeline, and the manual jobs waiting to be played.
+ * - wait polls a job, or the pipeline, until it settles, without model requests: success, failed, canceled, skipped,
+ *   or held at a manual job. It stops early when the user sends a message, like the wait tool; a failed pipeline or
+ *   job comes with the end of the logs of its failed jobs.
+ * - log: the end of a job log, or the lines matching grep with their numbers, without colour codes, timestamps,
+ *   section markers, and the lines a carriage return overwrote.
+ * - play, retry, cancel, and run change state; with wait: true they wait for the job or pipeline afterwards.
+ */
+const CI_ACTIONS = ["status", "wait", "log", "play", "retry", "cancel", "run"] as const;
+type CiAction = (typeof CI_ACTIONS)[number];
+/** States of a job or pipeline that still change by themselves; manual waits for a person and counts as settled. */
+const CI_ACTIVE = new Set(["created", "waiting_for_resource", "preparing", "pending", "running", "scheduled", "waiting_for_callback"]);
+const CI_JOB_PAGES = 5;
+const CI_LOG_LINES = 60;
+const CI_MAX_LOG_LINES = 500;
+const CI_TAIL_LINES = 15;
+const CI_TAIL_JOBS = 3;
+const CI_LINE_CHARS = 400;
+const CI_INTERVAL_S = 15;
+const CI_TIMEOUT_MIN = 30;
+const CI_MAX_TIMEOUT_MIN = 180;
+/** What GitLab's timestamped job logs put before each line: the time, the stream, and "+" (append) or a space. */
+const CI_LOG_PREFIX = /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?Z [0-9a-f]{2}[OE][+ ]?/;
+/** The start and end markers of a collapsible section in a job log. */
+const CI_SECTION = /section_(?:start|end):\d+:[^\s\r\x1b]+/g;
+
+/** The project of a call and what its web URL named. */
+type CiTarget = { instance: Instance; project: string; pipeline?: number; job?: number; mr?: number };
+
+const ciText = (value: Json | undefined): string =>
+	value === null || value === undefined ? "" : typeof value === "object" ? JSON.stringify(value) : String(value);
+
+/** GitLab's error message as text: a string, a list, or a map from field to messages ({"base": ["…"]}). */
+function ciMessage(value: Json | undefined): string {
+	if (Array.isArray(value)) return value.map(ciMessage).join("; ");
+	if (isObject(value)) {
+		return Object.entries(value)
+			.map(([key, inner]) => (key === "base" ? ciMessage(inner) : `${key}: ${ciMessage(inner)}`))
+			.join("; ");
+	}
+	return ciText(value);
+}
+
+function ciObject(value: Json, what: string): JsonObject {
+	if (!isObject(value)) throw new Error(`GitLab answered with something other than ${what}`);
+	return value;
+}
+
+function ciOneLine(text: string, max: number): string {
+	const line = text.replace(/\s+/g, " ").trim();
+	return line.length > max ? `${line.slice(0, max - 1)}…` : line;
+}
+
+function ciDuration(seconds: number | undefined): string {
+	if (seconds === undefined || !Number.isFinite(seconds)) return "";
+	const s = Math.max(0, Math.round(seconds));
+	if (s < 60) return `${s}s`;
+	const m = Math.floor(s / 60);
+	if (m < 60) return `${m}m ${String(s % 60).padStart(2, "0")}s`;
+	return `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, "0")}m`;
+}
+
+/** A time of GitLab's as local YYYY-MM-DD HH:MM. */
+function ciTime(value: Json | undefined): string {
+	const date = new Date(ciText(value));
+	if (Number.isNaN(date.getTime())) return ciText(value);
+	const pad = (n: number) => String(n).padStart(2, "0");
+	return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+/** The working directory's origin remote as host, path, and scheme (empty for scp syntax); undefined without one. */
+function ciOriginRemote(cwd: string): { host: string; path: string; scheme: string } | undefined {
+	const result = spawnSync("git", ["remote", "get-url", "origin"], { cwd, encoding: "utf8", timeout: 10_000, windowsHide: true });
+	const remote = result.status === 0 ? result.stdout.trim() : "";
+	if (!remote) return undefined;
+	const scp = /^(?:[^@/]+@)?([^:/]+):(?!\/\/)(.+)$/.exec(remote);
+	if (scp && !remote.includes("://")) return { host: scp[1].toLowerCase(), path: scp[2], scheme: "" };
+	try {
+		const url = new URL(remote);
+		return { host: url.hostname.toLowerCase(), path: decodeURIComponent(url.pathname), scheme: url.protocol.replace(/:$/, "") };
+	} catch {
+		return undefined;
+	}
+}
+
+const ciHostname = (instance: Instance) => new URL(instance.origin).hostname.toLowerCase();
+
+/** The instance and the URL-encoded project of a call: project, a web URL in it, or the origin remote of cwd. */
+function ciTarget(instances: Instance[], host: string | undefined, project: string | undefined, cwd: string): CiTarget {
+	const names = instances.map((instance) => instance.name).join(", ");
+	const given = project?.trim() ?? "";
+	const named = host?.trim() ? pickInstance(instances, host, "", () => true, CONFIG_FILE) : undefined;
+	if (/^https?:\/\//i.test(given)) {
+		const url = new URL(given);
+		const instance =
+			named ?? instances.find((candidate) => url.origin === candidate.origin && within(url.pathname, candidate.basePath));
+		if (!instance || url.origin !== instance.origin) throw new Error(`${given} is not on a configured instance (${names})`);
+		const rest = decodeURIComponent(url.pathname.slice(instance.basePath.length)).replace(/^\/+|\/+$/g, "");
+		const [path, page = ""] = rest.split("/-/", 2);
+		const item = /^(pipelines|jobs|merge_requests)\/(\d+)/.exec(page);
+		const name = path.replace(/\.git$/, "");
+		if (!name) throw new Error(`${given} names no project`);
+		const id = item ? Number(item[2]) : undefined;
+		return {
+			instance,
+			project: encodeURIComponent(name),
+			pipeline: item?.[1] === "pipelines" ? id : undefined,
+			job: item?.[1] === "jobs" ? id : undefined,
+			mr: item?.[1] === "merge_requests" ? id : undefined,
+		};
+	}
+	if (given) {
+		const name = given.replace(/^\/+|\/+$/g, "");
+		return { instance: named ?? instances[0], project: /^\d+$/.test(name) ? name : encodeURIComponent(name) };
+	}
+	const remote = ciOriginRemote(cwd);
+	if (!remote) throw new Error("the working directory has no git origin remote: give project (group/project, its id, or a web URL)");
+	const instance = named ?? instances.find((candidate) => ciHostname(candidate) === remote.host);
+	if (!instance || ciHostname(instance) !== remote.host) {
+		throw new Error(
+			`origin (${remote.host || "no host"}) is not a project of ${instance ? instance.base : `a configured instance (${names})`}: give project`,
+		);
+	}
+	let path = remote.path;
+	if (instance.basePath && /^https?$/.test(remote.scheme) && within(path.replace(/\/+$/, ""), instance.basePath)) {
+		path = path.slice(instance.basePath.length);
+	}
+	path = path.replace(/^\/+|\/+$/g, "").replace(/\.git$/, "");
+	if (!path) throw new Error("origin names no project path: give project");
+	return { instance, project: encodeURIComponent(path) };
+}
+
+/** The lines of a job log as a terminal shows them, without timestamps, section markers, and colour codes. */
+function ciLogLines(text: string): string[] {
+	const out: string[] = [];
+	for (const raw of text.replace(ANSI_ESCAPE, "").split("\n")) {
+		let line = raw.replace(CI_LOG_PREFIX, "");
+		const marker = line.includes("section_start:") || line.includes("section_end:");
+		line = line.replace(CI_SECTION, "").replace(/\r+$/, "");
+		line = line.slice(line.lastIndexOf("\r") + 1).trimEnd();
+		if (marker && !line.trim()) continue;
+		out.push(line.length > CI_LINE_CHARS ? `${line.slice(0, CI_LINE_CHARS - 1)}…` : line);
+	}
+	while (out.length > 0 && !out[out.length - 1].trim()) out.pop();
+	return out;
+}
+
+function ciJobRow(job: JsonObject): string[] {
+	const status = ciText(job.status);
+	const started = Date.parse(ciText(job.started_at));
+	const seconds =
+		typeof job.duration === "number"
+			? job.duration
+			: status === "running" && !Number.isNaN(started)
+				? (Date.now() - started) / 1000
+				: undefined;
+	const runner = isObject(job.runner) ? ciText(job.runner.description) || `#${ciText(job.runner.id)}` : "";
+	const allowed = job.allow_failure === true && status === "failed" ? " (allowed)" : "";
+	return [ciText(job.stage), ciText(job.name), status + allowed, ciDuration(seconds), runner, ciText(job.id)];
+}
+
+function ciBridgeRow(bridge: JsonObject): string[] {
+	const down = isObject(bridge.downstream_pipeline) ? bridge.downstream_pipeline : undefined;
+	const target = down ? `→ pipeline ${ciText(down.id)} ${ciText(down.status)}` : "→ no pipeline yet";
+	return [ciText(bridge.stage), ciText(bridge.name), ciText(bridge.status), "", target, `bridge ${ciText(bridge.id)}`];
+}
+
+/** Jobs and bridges in stage order (the order a stage first appears in), each stage in the order of creation. */
+function ciRows(jobs: JsonObject[], bridges: JsonObject[]): string[][] {
+	const all = [
+		...jobs.map((job) => ({ id: Number(job.id), stage: ciText(job.stage), row: ciJobRow(job) })),
+		...bridges.map((bridge) => ({ id: Number(bridge.id), stage: ciText(bridge.stage), row: ciBridgeRow(bridge) })),
+	].sort((a, b) => a.id - b.id);
+	const rank = new Map<string, number>();
+	for (const item of all) if (!rank.has(item.stage)) rank.set(item.stage, rank.size);
+	return all.sort((a, b) => (rank.get(a.stage) ?? 0) - (rank.get(b.stage) ?? 0) || a.id - b.id).map((item) => item.row);
+}
+
+function ciTable(rows: string[][]): string {
+	const all = [["stage", "job", "status", "time", "runner", "id"], ...rows];
+	const widths = all[0].map((_, i) => Math.max(...all.map((row) => row[i].length)));
+	return all.map((row) => row.map((cell, i) => (i === row.length - 1 ? cell : cell.padEnd(widths[i]))).join("  ").trimEnd()).join("\n");
+}
+
+function ciPipelineHead(pipeline: JsonObject): string {
+	const ref = ciText(pipeline.ref);
+	const mr = /^refs\/merge-requests\/(\d+)\//.exec(ref);
+	const where = mr ? `merge request !${mr[1]}` : pipeline.tag === true ? `tag ${ref}` : `branch ${ref}`;
+	const user = isObject(pipeline.user) ? ciText(pipeline.user.username) : "";
+	const parts = [
+		`Pipeline ${ciText(pipeline.id)}${pipeline.iid === undefined ? "" : ` (#${ciText(pipeline.iid)})`}`,
+		where,
+		ciText(pipeline.sha).slice(0, 8),
+		ciText(pipeline.status),
+		ciDuration(typeof pipeline.duration === "number" ? pipeline.duration : undefined),
+		`${ciText(pipeline.source)}${user ? ` by ${user}` : ""}, ${ciTime(pipeline.created_at)}`,
+	];
+	return `${parts.filter(Boolean).join(" · ")}\n${ciText(pipeline.web_url)}`;
+}
+
+function ciJobHead(job: JsonObject): string {
+	const [, name, status, time, runner] = ciJobRow(job);
+	const parts = [
+		`Job ${ciText(job.id)} ${name}`,
+		status + (job.failure_reason ? ` (${ciText(job.failure_reason)})` : ""),
+		time,
+		runner ? `runner ${runner}` : "",
+		isObject(job.pipeline) ? `pipeline ${ciText(job.pipeline.id)}` : "",
+		ciText(job.ref),
+	];
+	return `${parts.filter(Boolean).join(" · ")}\n${ciText(job.web_url)}`;
+}
+
+/** CI/CD variables as GitLab takes them, {key, value}. */
+function ciVariables(variables: Record<string, unknown> | undefined): Array<{ key: string; value: string }> {
+	return Object.entries(variables ?? {}).map(([key, value]) => {
+		if (!/^[A-Za-z0-9_]+$/.test(key)) throw new Error(`variable ${key}: a key takes letters, digits, and _ only`);
+		return { key, value: typeof value === "string" ? value : JSON.stringify(value) };
+	});
+}
+
+/** Whether gitlab.json leaves gitlab_pipeline in: everything but "pipelines": false. */
+function ciToolWanted(): boolean {
+	try {
+		const config = JSON.parse(readFileSync(CONFIG_FILE, "utf8")) as unknown;
+		return !(isObject(config as Json) && (config as JsonObject).pipelines === false);
+	} catch {
+		return true;
+	}
+}
+
+const CiParams = {
+	action: StringEnum(CI_ACTIONS, {
+		description:
+			"status: the pipeline and its jobs; wait: until a job or the pipeline settles; log: the end of a job log; play: start a manual job; retry: a job, or the failed jobs of the pipeline; cancel: a job or the pipeline; run: a new pipeline for ref",
+	}),
+	project: Type.Optional(
+		Type.String({
+			description:
+				"group/project, its id, or a web URL of the project or of one of its pipelines, jobs, or merge requests; default the project of the working directory's origin remote",
+		}),
+	),
+	pipeline: Type.Optional(Type.Integer({ description: "Pipeline id, as in /-/pipelines/<id>; default the latest of ref, or of the project" })),
+	ref: Type.Optional(
+		Type.String({ description: "Branch or tag: its latest pipeline; for run, the ref to run (default: the default branch)" }),
+	),
+	mr: Type.Optional(Type.Integer({ description: "Merge request iid: its head pipeline" })),
+	job: Type.Optional(
+		Type.Union([Type.String(), Type.Integer()], {
+			description: "A job: its name in the pipeline (e.g. docker-deploy:prd) or its id. Without it, wait, retry, and cancel act on the pipeline",
+		}),
+	),
+	variables: Type.Optional(
+		Type.Object({}, {
+			additionalProperties: Type.String(),
+			description: "CI/CD variables, key → value: for run, of the new pipeline; for play, of the manual job",
+		}),
+	),
+	wait: Type.Optional(Type.Boolean({ description: "play, retry, run: wait for the job or pipeline afterwards, as action wait does" })),
+	interval: Type.Optional(Type.Number({ description: `wait: seconds between checks (default ${CI_INTERVAL_S}, 5 to 300)` })),
+	timeout: Type.Optional(
+		Type.Number({ description: `wait: minutes before giving up (default ${CI_TIMEOUT_MIN}, at most ${CI_MAX_TIMEOUT_MIN})` }),
+	),
+	lines: Type.Optional(Type.Integer({ description: `log: lines from the end (default ${CI_LOG_LINES}, at most ${CI_MAX_LOG_LINES})` })),
+	grep: Type.Optional(
+		Type.String({ description: "log: only the lines matching this regular expression (case-insensitive), with their numbers" }),
+	),
+};
+
+function ciParameters(instances: Instance[]) {
+	const all = Type.Object({ host: Type.Optional(hostParameter(instances, "GitLab")), ...CiParams });
+	return instances.length > 1 ? all : (Type.Object(CiParams) as unknown as typeof all);
+}
+
 export default function (pi: ExtensionAPI) {
 	const loaded = loadInstances(CONFIG_FILE, DEFAULT_TOKEN_ENV, (basePath) => ({
 		api: `${basePath}/api/v4`,
@@ -935,7 +1234,8 @@ export default function (pi: ExtensionAPI) {
 			"{job_id}/trace (the job log), /projects/{id}/repository/tree, /projects/{id}/repository/files/{URL-encoded " +
 			"file path}/raw?ref=…, /projects/{id}/repository/branches, /projects/{id}/repository/compare, /groups/{id}/" +
 			"issues, /search, /user. Lists take per_page (up to 100) and page; a line above the body gives the page, " +
-			"the total, and the href of the next page. /api/graphql takes POST {\"query\": …, \"variables\": …}, for what " +
+			"the total, and the href of the next page. The endpoint of the GraphQL API is /api/graphql, not below /api/v4; " +
+			"it takes POST {\"query\": …, \"variables\": …}, for what " +
 			"REST lacks, such as setting an issue's iteration (issueSetIteration). REST JSON is folded: empty fields, " +
 			"avatar URLs, and the _links of list items are left out, a user inside another resource or a list reads " +
 			"\"Name (@username, id N)\", and a description in a list is cut; raw: true returns it unfolded. Tokens and " +
@@ -1043,6 +1343,348 @@ export default function (pi: ExtensionAPI) {
 					(host ? theme.fg("muted", `${host} `) : "") +
 					theme.fg("muted", `${args.method ?? "GET"} `) +
 					theme.fg("accent", args.path ?? ""),
+				0,
+				0,
+			);
+		},
+	});
+
+	if (!ciToolWanted()) return;
+	pi.registerTool({
+		name: "gitlab_pipeline",
+		label: "GitLab pipeline",
+		description:
+			"Show, wait for, and drive the CI pipelines and jobs of a GitLab project in a few lines, with the gitlab tool's " +
+			"instances and tokens. status: the pipeline and a table of its jobs (stage, job, status, time, runner, id), " +
+			"trigger jobs with their downstream pipeline, and the manual jobs waiting to be played. wait: checks a job, or " +
+			"the pipeline, every interval seconds without model requests until it settles (success, failed, canceled, " +
+			"skipped, or held at a manual job), at most timeout minutes, and stops early when the user sends a message; a " +
+			"failed pipeline or job comes with the end of the logs of its failed jobs. log: the end of a job log, or the " +
+			"lines matching grep, without colour codes and timestamps. play starts a manual job (with variables), retry runs " +
+			"a job again (without job: the failed jobs of the pipeline), cancel stops a job or the pipeline, run starts a " +
+			"pipeline for ref (with variables); with wait: true they wait afterwards. The project defaults to the one of " +
+			"the working directory's origin remote; the pipeline is pipeline (its id), the head pipeline of mr, or the " +
+			"latest of ref or of the project; a job is its name in that pipeline or its id.",
+		promptSnippet: "See, wait for, and drive GitLab CI pipelines and jobs: status, wait, log, play, retry, cancel, run",
+		promptGuidelines: [
+			"Use gitlab_pipeline for CI pipelines and jobs (their state, waiting for them, job logs, manual jobs, retries) instead of the gitlab tool or wait: it answers in a few lines and waits without model requests.",
+			"gitlab_pipeline: play, retry, cancel, and run only what the user asked for; a deploy job, to production above all, only on the user's word for that deploy.",
+			"gitlab_pipeline: without project it acts on the project of the working directory's origin remote; a web URL of a pipeline, job, or merge request in project names that one.",
+		],
+		parameters: ciParameters(instances),
+		annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
+
+		async execute(_id, params, signal, onUpdate, ctx) {
+			const action = params.action as CiAction;
+			const target = ciTarget(instances, params.host as string | undefined, params.project, ctx.cwd);
+			const { instance } = target;
+			const P = target.project;
+			const label = decodeURIComponent(P);
+			const details = { host: instance.name, project: label, action };
+			const token = await resolveToken(
+				instance,
+				CONFIG_FILE,
+				`Create a personal access token in ${instance.base} under User settings → Personal access tokens (scope api, or read_api to read only)`,
+				signal,
+			);
+			const mask = (text: string) => text.split(token).join(REDACTED);
+
+			const call = async (method: "GET" | "POST", path: string, query?: Record<string, unknown>, body?: unknown): Promise<string> => {
+				const url = requestUrl(instance, path, query);
+				const payload: Payload | undefined =
+					body === undefined ? undefined : { contentType: "application/json", data: JSON.stringify(body) };
+				const { response } = await send(instance, token, method, url, payload, signal);
+				const text = new TextDecoder().decode(await readLimited(response));
+				if (response.status < 400) return text;
+				const rerun = response.status === 401 && forgetToken(instance);
+				let message = text.trim();
+				try {
+					const parsed = JSON.parse(message) as Json;
+					if (isObject(parsed)) message = ciMessage(parsed.message ?? parsed.error ?? parsed.errors ?? parsed);
+				} catch {
+					// not JSON: the text itself
+				}
+				const hint = [STATUS_HINTS[response.status], rerun ? "Its token command runs again at the next call." : ""];
+				throw new Error(
+					mask(
+						[`${method} ${url.pathname}: HTTP ${response.status}`, ciOneLine(message, 300), ...hint].filter(Boolean).join(" — "),
+					),
+				);
+			};
+			const json = (text: string): Json => {
+				try {
+					return redact(JSON.parse(text) as Json);
+				} catch {
+					throw new Error(`GitLab answered with something other than JSON: ${ciOneLine(mask(text), 200)}`);
+				}
+			};
+			const get = async (path: string, query?: Record<string, unknown>) => json(await call("GET", path, query));
+			const post = async (path: string, body?: unknown) => json(await call("POST", path, undefined, body));
+
+			const jobsOf = async (pipeline: number): Promise<JsonObject[]> => {
+				const jobs: JsonObject[] = [];
+				for (let page = 1; page <= CI_JOB_PAGES; page++) {
+					const list = await get(`/projects/${P}/pipelines/${pipeline}/jobs`, { per_page: 100, page });
+					if (!Array.isArray(list)) break;
+					jobs.push(...list.filter(isObject));
+					if (list.length < 100) break;
+				}
+				return jobs;
+			};
+			// Trigger jobs only add to the table: without them (an older GitLab, a narrow token) it shows the jobs alone.
+			const bridgesOf = async (pipeline: number): Promise<JsonObject[]> => {
+				try {
+					const list = await get(`/projects/${P}/pipelines/${pipeline}/bridges`, { per_page: 100 });
+					return Array.isArray(list) ? list.filter(isObject) : [];
+				} catch {
+					return [];
+				}
+			};
+			const givenJob = params.job === undefined ? "" : String(params.job).trim();
+			const jobId = /^\d+$/.test(givenJob) ? Number(givenJob) : givenJob ? undefined : target.job;
+			const hasJob = givenJob !== "" || target.job !== undefined;
+			const pipelineOf = async (id: Json | undefined) => ciObject(await get(`/projects/${P}/pipelines/${ciText(id)}`), "a pipeline");
+
+			const findPipeline = async (): Promise<JsonObject> => {
+				const id = params.pipeline ?? target.pipeline;
+				if (id !== undefined) return pipelineOf(id);
+				const mr = params.mr ?? target.mr;
+				if (mr !== undefined) {
+					const request = ciObject(await get(`/projects/${P}/merge_requests/${mr}`), "a merge request");
+					const head = isObject(request.head_pipeline) ? request.head_pipeline.id : undefined;
+					if (head === undefined || head === null) throw new Error(`merge request !${mr} of ${label} has no pipeline`);
+					return pipelineOf(head);
+				}
+				if (jobId !== undefined && !params.ref) {
+					const job = ciObject(await get(`/projects/${P}/jobs/${jobId}`), "a job");
+					if (isObject(job.pipeline)) return pipelineOf(job.pipeline.id);
+				}
+				const list = await get(`/projects/${P}/pipelines`, { per_page: 1, ...(params.ref ? { ref: params.ref } : {}) });
+				const latest = Array.isArray(list) ? list.find(isObject) : undefined;
+				if (!latest) throw new Error(params.ref ? `${label} has no pipeline for ${params.ref}` : `${label} has no pipeline`);
+				return pipelineOf(latest.id);
+			};
+			const findJob = async (): Promise<JsonObject> => {
+				if (jobId !== undefined) return ciObject(await get(`/projects/${P}/jobs/${jobId}`), "a job");
+				if (!givenJob) throw new Error(`${action} needs job: its name in the pipeline or its id`);
+				const pipeline = await findPipeline();
+				const jobs = await jobsOf(Number(pipeline.id));
+				const matches = jobs.filter((job) => job.name === givenJob).sort((a, b) => Number(b.id) - Number(a.id));
+				if (matches.length > 0) return matches[0];
+				const bridges = await bridgesOf(Number(pipeline.id));
+				if (bridges.some((bridge) => bridge.name === givenJob)) {
+					throw new Error(`${givenJob} in pipeline ${ciText(pipeline.id)} is a trigger job; its downstream pipeline shows in status`);
+				}
+				const names = [...new Set(jobs.map((job) => ciText(job.name)))].join(", ") || "none";
+				throw new Error(`pipeline ${ciText(pipeline.id)} has no job ${givenJob}; its jobs: ${names}`);
+			};
+
+			const statusText = async (pipeline: JsonObject, jobs?: JsonObject[]): Promise<string> => {
+				const id = Number(pipeline.id);
+				const all = jobs ?? (await jobsOf(id));
+				const rows = ciRows(all, await bridgesOf(id));
+				const manual = all.filter((job) => job.status === "manual").map((job) => `${ciText(job.name)} (${ciText(job.id)})`);
+				return [
+					ciPipelineHead(pipeline),
+					rows.length > 0 ? ciTable(rows) : "No jobs (yet).",
+					...(manual.length > 0 ? [`Manual, waiting to be played: ${manual.join(", ")}`] : []),
+				].join("\n");
+			};
+			const tails = async (jobs: JsonObject[]): Promise<string> => {
+				const failed = jobs
+					.filter((job) => job.status === "failed")
+					.sort((a, b) => Number(a.id) - Number(b.id))
+					.slice(0, CI_TAIL_JOBS);
+				const parts: string[] = [];
+				for (const job of failed) {
+					const reason = job.failure_reason ? `, ${ciText(job.failure_reason)}` : "";
+					let lines: string;
+					try {
+						lines = ciLogLines(await call("GET", `/projects/${P}/jobs/${ciText(job.id)}/trace`)).slice(-CI_TAIL_LINES).join("\n");
+					} catch (error) {
+						lines = `(no log: ${error instanceof Error ? error.message : String(error)})`;
+					}
+					parts.push(`\nEnd of the log of ${ciText(job.name)} (job ${ciText(job.id)}${reason}):\n${lines}`);
+				}
+				return parts.join("\n");
+			};
+
+			const intervalMs = Math.min(Math.max(params.interval ?? CI_INTERVAL_S, 5), 300) * 1000;
+			const timeoutMs = Math.min(Math.max(params.timeout ?? CI_TIMEOUT_MIN, 0.5), CI_MAX_TIMEOUT_MIN) * 60_000;
+			type Polled<T> = { outcome: "settled" | "timeout" | "interrupted"; value: T; checks: number; elapsedMs: number };
+			const poll = async <T>(check: () => Promise<{ settled: boolean; progress: string; value: T }>): Promise<Polled<T>> => {
+				const started = Date.now();
+				for (let checks = 1; ; checks++) {
+					if (signal?.aborted) throw new Error("gitlab_pipeline: wait aborted");
+					const state = await check();
+					const elapsedMs = Date.now() - started;
+					const done = (outcome: Polled<T>["outcome"]) => ({ outcome, value: state.value, checks, elapsedMs });
+					if (state.settled) return done("settled");
+					if (elapsedMs >= timeoutMs) return done("timeout");
+					if (ctx.hasPendingMessages()) return done("interrupted");
+					const text = `${ciDuration(elapsedMs / 1000) || "0s"}, ${checks} checks: ${state.progress}`;
+					onUpdate?.({ content: [{ type: "text", text: mask(text) }], details });
+					const until = Date.now() + Math.min(intervalMs, timeoutMs - elapsedMs);
+					while (Date.now() < until && !signal?.aborted && !ctx.hasPendingMessages()) {
+						await new Promise((resolve) => setTimeout(resolve, Math.min(1000, until - Date.now())));
+					}
+				}
+			};
+			const lead = (polled: Polled<unknown>, what: string, status: string): string => {
+				const span = ciDuration(polled.elapsedMs / 1000) || "0s";
+				if (polled.outcome === "settled") {
+					return polled.checks === 1 ? `${what} is ${status}.` : `${what} is ${status}, after ${span} of waiting (${polled.checks} checks).`;
+				}
+				if (polled.outcome === "timeout") return `Gave up after ${span}: ${what} is still ${status}. Wait again to go on.`;
+				return `Stopped waiting after ${span} because the user sent a message: ${what} is still ${status}.`;
+			};
+			const waitPipeline = async (id: number): Promise<string> => {
+				const polled = await poll(async () => {
+					const pipeline = await pipelineOf(id);
+					const jobs = await jobsOf(id);
+					const busy = jobs
+						.filter((job) => CI_ACTIVE.has(ciText(job.status)) && job.status !== "created")
+						.map((job) => `${ciText(job.name)} ${ciText(job.status)}`);
+					const progress = `pipeline ${ciText(pipeline.status)}${busy.length > 0 ? `; ${busy.join(", ")}` : ""}`;
+					return { settled: !CI_ACTIVE.has(ciText(pipeline.status)), progress, value: { pipeline, jobs } };
+				});
+				const { pipeline, jobs } = polled.value;
+				const first = lead(polled, `Pipeline ${id}`, ciText(pipeline.status));
+				const tail = polled.outcome === "settled" ? await tails(jobs) : "";
+				return `${first}\n${await statusText(pipeline, jobs)}${tail}`;
+			};
+			const waitJob = async (id: number): Promise<string> => {
+				const polled = await poll(async () => {
+					const job = ciObject(await get(`/projects/${P}/jobs/${id}`), "a job");
+					const status = ciText(job.status);
+					return { settled: !CI_ACTIVE.has(status), progress: `${ciText(job.name)} ${status}`, value: job };
+				});
+				const job = polled.value;
+				const status = ciText(job.status);
+				let text = `${lead(polled, `Job ${ciText(job.name)} (${id})`, status)}\n${ciJobHead(job)}`;
+				if (status === "manual") text += "\nIt waits to be played (action play).";
+				if (polled.outcome === "settled" && status === "failed") text += await tails([job]);
+				return text;
+			};
+
+			let head: string;
+			let body = "";
+			let keepEnd = false;
+			switch (action) {
+				case "status":
+					head = await statusText(await findPipeline());
+					break;
+				case "wait":
+					head = hasJob ? await waitJob(Number((await findJob()).id)) : await waitPipeline(Number((await findPipeline()).id));
+					break;
+				case "log": {
+					const job = await findJob();
+					const lines = ciLogLines(await call("GET", `/projects/${P}/jobs/${ciText(job.id)}/trace`));
+					const count = Math.min(Math.max(params.lines ?? CI_LOG_LINES, 1), CI_MAX_LOG_LINES);
+					let what: string;
+					if (params.grep) {
+						let regex: RegExp;
+						try {
+							regex = new RegExp(params.grep, "i");
+						} catch (error) {
+							throw new Error(`grep is not a valid regular expression: ${(error as Error).message}`);
+						}
+						const hits = lines.flatMap((line, i) => (regex.test(line) ? [`${i + 1}: ${line}`] : []));
+						body = hits.slice(-count).join("\n");
+						const shown = hits.length > count ? `, the last ${count} shown` : "";
+						what = `${hits.length} of ${lines.length} lines match /${params.grep}/i${shown}`;
+					} else {
+						body = lines.slice(-count).join("\n");
+						what = lines.length > count ? `the last ${count} of ${lines.length} lines` : `all ${lines.length} lines`;
+					}
+					head = `${ciJobHead(job)}\nLog, ${what}:`;
+					keepEnd = true;
+					break;
+				}
+				case "play": {
+					const job = await findJob();
+					const status = ciText(job.status);
+					if (status !== "manual" && status !== "scheduled") {
+						const again = CI_ACTIVE.has(status) ? "" : "; retry runs a finished job again";
+						throw new Error(`job ${ciText(job.name)} (${ciText(job.id)}) is ${status}, not manual${again}`);
+					}
+					const attributes = ciVariables(params.variables as Record<string, unknown> | undefined);
+					const played = ciObject(
+						await post(`/projects/${P}/jobs/${ciText(job.id)}/play`, attributes.length > 0 ? { job_variables_attributes: attributes } : undefined),
+						"a job",
+					);
+					head = params.wait ? await waitJob(Number(played.id)) : `Played. ${ciJobHead(played)}`;
+					break;
+				}
+				case "retry": {
+					if (hasJob) {
+						const job = await findJob();
+						const retried = ciObject(await post(`/projects/${P}/jobs/${ciText(job.id)}/retry`), "a job");
+						head = params.wait
+							? await waitJob(Number(retried.id))
+							: `Retried job ${ciText(job.id)} as job ${ciText(retried.id)}. ${ciJobHead(retried)}`;
+					} else {
+						const pipeline = await findPipeline();
+						const retried = ciObject(await post(`/projects/${P}/pipelines/${ciText(pipeline.id)}/retry`), "a pipeline");
+						head = params.wait
+							? await waitPipeline(Number(retried.id))
+							: `Retried the failed and canceled jobs of pipeline ${ciText(pipeline.id)}.\n${await statusText(retried)}`;
+					}
+					break;
+				}
+				case "cancel": {
+					if (hasJob) {
+						const job = await findJob();
+						if (!CI_ACTIVE.has(ciText(job.status))) {
+							throw new Error(`job ${ciText(job.name)} (${ciText(job.id)}) is ${ciText(job.status)}: nothing to cancel`);
+						}
+						head = `Canceled. ${ciJobHead(ciObject(await post(`/projects/${P}/jobs/${ciText(job.id)}/cancel`), "a job"))}`;
+					} else {
+						const pipeline = await findPipeline();
+						if (!CI_ACTIVE.has(ciText(pipeline.status))) {
+							throw new Error(`pipeline ${ciText(pipeline.id)} is ${ciText(pipeline.status)}: nothing to cancel`);
+						}
+						const canceled = ciObject(await post(`/projects/${P}/pipelines/${ciText(pipeline.id)}/cancel`), "a pipeline");
+						head = `Canceled pipeline ${ciText(pipeline.id)}.\n${await statusText(canceled)}`;
+					}
+					break;
+				}
+				case "run": {
+					let ref = params.ref?.trim();
+					if (!ref) {
+						ref = ciText(ciObject(await get(`/projects/${P}`), "a project").default_branch);
+						if (!ref) throw new Error(`${label} has no default branch: give ref`);
+					}
+					const variables = ciVariables(params.variables as Record<string, unknown> | undefined).map((v) => ({
+						...v,
+						variable_type: "env_var",
+					}));
+					const created = ciObject(
+						await post(`/projects/${P}/pipeline`, { ref, ...(variables.length > 0 ? { variables } : {}) }),
+						"a pipeline",
+					);
+					head = params.wait ? await waitPipeline(Number(created.id)) : `Started a pipeline for ${ref}.\n${await statusText(created)}`;
+					break;
+				}
+				default:
+					throw new Error(`unknown action ${String(action)}`);
+			}
+			return { content: [{ type: "text", text: limited(mask(head), mask(body), keepEnd) }], details };
+		},
+
+		renderCall(args, theme) {
+			const host = args.host as string | undefined;
+			const which = [
+				args.project,
+				args.pipeline !== undefined ? `pipeline ${args.pipeline}` : args.mr !== undefined ? `!${args.mr}` : args.ref,
+				args.job !== undefined ? `job ${args.job}` : undefined,
+			].filter((part) => part !== undefined && part !== "");
+			return new Text(
+				theme.fg("toolTitle", theme.bold("gitlab_pipeline ")) +
+					(host ? theme.fg("muted", `${host} `) : "") +
+					theme.fg("muted", `${args.action ?? "?"}${which.length > 0 ? " " : ""}`) +
+					theme.fg("accent", which.join(" ")) +
+					(args.wait ? theme.fg("dim", " (wait)") : ""),
 				0,
 				0,
 			);

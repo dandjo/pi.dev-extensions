@@ -311,7 +311,7 @@ export default function (pi: ExtensionAPI) {
 		promptSnippet: "Wait for a pipeline, deploy, or service without polling (checks run without model requests)",
 		promptGuidelines: [
 			"wait: use it instead of sleep in bash whenever you wait for something to change (CI pipeline, deploy, container or service start, a file or URL appearing); one wait call replaces a poll per model request.",
-			"wait: for GitLab pipelines and jobs, poll the gitlab tool with wait (tool and args) instead of a shell command; never curl with a token.",
+			"wait: for GitLab pipelines and jobs, use gitlab_pipeline (action wait) where it is loaded, else poll the gitlab tool with wait (tool and args); never curl with a token.",
 		],
 		parameters: Type.Object({
 			command: Type.Optional(Type.String({ description: "Shell command to run for each check (bash, in the working directory)" })),
@@ -335,6 +335,10 @@ export default function (pi: ExtensionAPI) {
 			if (params.cancel) return { content: [{ type: "text", text: cancel(params.cancel) }], details: undefined };
 			if (!params.command === !params.tool) throw new Error("give either command or tool");
 			if (params.tool === "wait") throw new Error("wait cannot wait for itself");
+			const inner = (params.args ?? {}) as { action?: unknown; wait?: unknown };
+			if (params.tool === "gitlab_pipeline" && (inner.action === "wait" || inner.wait === true)) {
+				throw new Error("gitlab_pipeline waits by itself: call it directly with action wait (or wait: true) instead of through wait");
+			}
 			let regex: RegExp | undefined;
 			if (params.match !== undefined) {
 				try {

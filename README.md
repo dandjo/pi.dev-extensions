@@ -25,7 +25,7 @@ one file per extension.
 | `compact-tools.ts`         | Cuts each collapsed tool row to four lines; Ctrl+O shows all of it                        | —                                                                |
 | `web-tools.ts`             | Adds `web_fetch`: reads a page locally and lets a small model answer from it              | —                                                                |
 | `openproject.ts`           | Adds `openproject`: reads and changes OpenProject through its API v3, as you              | An OpenProject API token for each instance                       |
-| `gitlab.ts`                | Adds `gitlab`: reads and changes GitLab through its REST API v4 and GraphQL, as you       | A GitLab personal access token for each instance                 |
+| `gitlab.ts`                | Adds `gitlab` and `gitlab_pipeline`: GitLab through its API, as you, and its CI in brief  | A GitLab personal access token for each instance                 |
 | `clipboard.ts`             | Adds `clipboard`: the model reads and writes the clipboard, text and images               | Linux: `wl-clipboard` (Wayland) or `xclip`                       |
 | `memory.ts`                | Keeps a memory per project, shared with Claude Code's auto memory when it is there        | —                                                                |
 | `session-title.ts`         | Names each session after its first prompt and shows it in the terminal title              | —                                                                |
@@ -749,7 +749,10 @@ written with your permissions.
   up to 100 MB.
 - GraphQL is there for what REST lacks: an issue's iteration, for one, can
   only be set through `issueSetIteration`. A GraphQL answer with `errors`
-  counts as failed.
+  counts as failed. The tool description names `/api/graphql` as the
+  endpoint of the GraphQL API; `/graphql` and `/api/v<n>/graphql` of any
+  version lead there as well, as a path or a full URL: GitLab has no REST
+  route of that name, and models guess them.
 - Requests go through `node:https`, not `fetch`: `fetch` sends
   `Sec-Fetch-Mode: cors`, and GitLab answers that with 406 on downloads such
   as repository archives. They use the proxy Pi uses for its own requests:
@@ -766,6 +769,54 @@ written with your permissions.
   only what you asked for and to read a single issue or merge request before
   changing its description.
 - Git itself — clone, fetch, push — stays with `git`.
+
+### gitlab_pipeline
+
+A second tool for CI pipelines and jobs, with the same instances, tokens, and
+rules. The `gitlab` tool can do all of it, but each step costs a request:
+find the job among lists of 3 KB per job, poll with `wait` and a regular
+expression over folded JSON, read 13 KB of log for the last 20 lines, post
+the play and follow the new job id. `gitlab_pipeline` does each in one call
+and answers in a few lines. `"pipelines": false` in `gitlab.json` leaves it
+out.
+
+- `action` is one of:
+  - `status`: the pipeline (id, ref, commit, status, duration, who started
+    it) and a table of its jobs — stage, job, status, time, runner, id — in
+    stage order. A trigger job shows its downstream pipeline, a failed job
+    allowed to fail says so, and the manual jobs waiting to be played are
+    listed below.
+  - `wait`: checks a job, or the pipeline, every `interval` seconds (15)
+    until it settles — success, failed, canceled, skipped, or held at a
+    manual job — for at most `timeout` minutes (30, at most 180). The checks
+    cost no model requests, the tool row shows the state meanwhile, and a
+    message from you stops it early, as with `wait`. A failed pipeline or job
+    comes with the last 15 lines of the logs of its failed jobs (at most
+    three).
+  - `log`: the end of a job log (`lines`, 60, at most 500), or with `grep`
+    the lines matching a regular expression, case-insensitive, with their line
+    numbers. Colour codes, timestamps, section markers, and the progress a
+    carriage return overwrote are gone.
+  - `play` starts a manual job, with `variables` as its job variables;
+    `retry` runs a job again, or without `job` the failed and canceled jobs
+    of the pipeline; `cancel` stops a job or the pipeline that is still
+    running; `run` starts a pipeline for `ref` (default the default branch)
+    with `variables`. With `wait: true` they wait for the job or pipeline
+    afterwards.
+- The project is `project` — `group/project`, its id, or a web URL of the
+  project or of one of its pipelines, jobs, or merge requests — or else the
+  project of the working directory's `origin` remote, on the instance that
+  remote belongs to.
+- The pipeline is `pipeline` (its id, as in `/-/pipelines/<id>`), else the
+  head pipeline of merge request `mr`, else the pipeline of a job given by id,
+  else the latest of `ref`, else the latest of the project. A job is its name
+  in that pipeline (the latest run of it) or its id.
+- Every call answers with one or two lines on what it did and the state
+  after it. Errors say what to do instead: a job that is not manual cannot be
+  played, a finished pipeline cannot be canceled, a name the pipeline lacks
+  lists the names it has.
+- The guidelines tell the model to play, retry, cancel, and run only what you
+  asked for, and a deploy job only on your word for that deploy.
 
 ## clipboard
 
@@ -1726,8 +1777,10 @@ is a request that reads the whole context.
   conversation and starts a turn when Pi is idle. `/waits` lists the
   background waits, and `/waits cancel <id>` or the tool's `cancel` stops one.
   They end with the session, `/reload` included.
-- A GitLab pipeline goes through the `gitlab` tool, so the token stays with
-  it: `{tool: "gitlab", args: {path: "/projects/<id>/pipelines/<pipeline>"},
+- A GitLab pipeline or job is a case for
+  [`gitlab_pipeline`](#gitlab_pipeline) with `action: "wait"`. Without it, a
+  pipeline goes through the `gitlab` tool, so the token stays with it:
+  `{tool: "gitlab", args: {path: "/projects/<id>/pipelines/<pipeline>"},
   match: "\"status\": \"(success|failed|canceled)\""}`.
 - A bash call that sleeps 15 seconds or more right after another bash call
   that did is refused, with a pointer to `wait`; running it again goes
