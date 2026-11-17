@@ -19,6 +19,9 @@
  *   it. Claude Code's project settings count only once Pi trusts the project.
  * - A project without a memory gets the folder and an empty index when the first entry is written there.
  * - /memory shows the providers and the index in use; /memory edit opens the index in Pi's editor.
+ * - /memory lint checks the memory against its rules and the size it costs: index lines over 150 characters, an index
+ *   over 200 lines, links to missing files, topic files without an index line or frontmatter, and topic files over
+ *   8 KB, which cost that much every time they are read. At start, a notice counts what it finds.
  * - Subagents (PI_SUBAGENT_DEPTH) get no memory, as in Claude Code.
  */
 
@@ -31,12 +34,14 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Key, matchesKey, type TUI, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
 const INDEX = "MEMORY.md";
 const MAX_INDEX_LINES = 200;
+const MAX_LINE_CHARS = 150;
+const MAX_TOPIC_BYTES = 8 * 1024;
 const CONFIG_FILE = path.join(getAgentDir(), "memory.json");
 
 /** How the model keeps the memory, in Claude Code's format so that both can read and write the same files. */
@@ -287,6 +292,89 @@ async function showText(
 	);
 }
 
+interface Lint {
+	indexBytes: number;
+	indexLines: number;
+	longLines: { line: number; chars: number; text: string }[];
+	missing: string[];
+	unindexed: string[];
+	noFrontmatter: string[];
+	large: { file: string; bytes: number }[];
+}
+
+/** Checks a memory folder against the rules that come with its index and the size it costs. */
+function lint(dir: string): Lint {
+	const result: Lint = { indexBytes: 0, indexLines: 0, longLines: [], missing: [], unindexed: [], noFrontmatter: [], large: [] };
+	const indexFile = path.join(dir, INDEX);
+	const index = existsSync(indexFile) ? readFileSync(indexFile, "utf8") : "";
+	result.indexBytes = Buffer.byteLength(index);
+	const lines = index.split("\n").filter((l) => l.trim());
+	result.indexLines = lines.length;
+	const linked = new Set<string>();
+	lines.forEach((line, i) => {
+		const chars = Array.from(line).length;
+		if (chars > MAX_LINE_CHARS) result.longLines.push({ line: i + 1, chars, text: line });
+		for (const m of line.matchAll(/\]\(([^)\s]+\.md)\)/g)) {
+			linked.add(m[1]);
+			if (!existsSync(path.join(dir, m[1]))) result.missing.push(m[1]);
+		}
+	});
+	let files: string[] = [];
+	try {
+		files = readdirSync(dir).filter((f) => f.endsWith(".md") && f !== INDEX);
+	} catch {
+		// no folder yet
+	}
+	for (const file of files.sort()) {
+		const full = path.join(dir, file);
+		if (!linked.has(file)) result.unindexed.push(file);
+		const bytes = statSync(full).size;
+		if (bytes > MAX_TOPIC_BYTES) result.large.push({ file, bytes });
+		const head = readFileSync(full, "utf8").slice(0, 2000);
+		const front = head.startsWith("---") ? head.slice(3, head.indexOf("\n---", 3)) : "";
+		if (!/^name:/m.test(front) || !/^description:/m.test(front) || !/^\s*type:/m.test(front)) result.noFrontmatter.push(file);
+	}
+	result.large.sort((a, b) => b.bytes - a.bytes);
+	return result;
+}
+
+function lintSummary(l: Lint): string | undefined {
+	const n = (count: number, one: string, many = `${one}s`) => `${count} ${count === 1 ? one : many}`;
+	const parts = [
+		l.longLines.length && `${n(l.longLines.length, "index line")} over ${MAX_LINE_CHARS} characters`,
+		l.indexLines > MAX_INDEX_LINES && `an index of ${l.indexLines} lines (cut at ${MAX_INDEX_LINES})`,
+		l.missing.length && `${n(l.missing.length, "link")} to missing files`,
+		l.unindexed.length && `${n(l.unindexed.length, "topic file")} without an index line`,
+		l.noFrontmatter.length && `${n(l.noFrontmatter.length, "topic file")} without frontmatter`,
+		l.large.length && `${n(l.large.length, "topic file")} over ${MAX_TOPIC_BYTES / 1024} KB`,
+	].filter(Boolean);
+	return parts.length ? parts.join(", ") : undefined;
+}
+
+const kb = (bytes: number) => `${(bytes / 1024).toFixed(1)} KB`;
+
+function lintReport(l: Lint, theme: Theme): string[] {
+	const head = theme.fg("muted", `${INDEX}: ${l.indexLines} lines, ${kb(l.indexBytes)}, about ${Math.round(l.indexBytes / 3.5 / 1000)}k tokens in every request`);
+	const out = [head, ""];
+	const section = (title: string, rows: string[]) => {
+		if (rows.length) out.push(theme.fg("accent", title), ...rows.map((r) => `  ${r}`), "");
+	};
+	section(
+		`Index lines over ${MAX_LINE_CHARS} characters (${l.longLines.length})`,
+		l.longLines.map((x) => `${String(x.line).padStart(3)}: ${x.chars} · ${x.text.slice(0, 90)}…`),
+	);
+	if (l.indexLines > MAX_INDEX_LINES) section("Index too long", [`${l.indexLines} lines; the prompt gets the first ${MAX_INDEX_LINES}`]);
+	section(`Links to missing files (${l.missing.length})`, l.missing);
+	section(`Topic files without an index line (${l.unindexed.length})`, l.unindexed);
+	section(`Topic files without frontmatter (name, description, type) (${l.noFrontmatter.length})`, l.noFrontmatter);
+	section(
+		`Topic files over ${MAX_TOPIC_BYTES / 1024} KB (${l.large.length}): each read costs about as many tokens as the file has bytes / 3.5`,
+		l.large.map((x) => `${kb(x.bytes).padStart(8)}  ${x.file}`),
+	);
+	if (out.length === 2) out.push("Nothing to report.");
+	return out;
+}
+
 /** What the memory is, for the prompt and /memory: "Claude Code's auto memory" or the provider's name. */
 function describe(provider: string): string {
 	return provider === "claude" ? "shared with Claude Code" : provider === "pi" ? "Pi's own" : `provider ${provider}`;
@@ -307,7 +395,11 @@ export default function (pi: ExtensionAPI) {
 		if (problem) ctx.ui.notify(`memory: ${problem}; the defaults apply`, "warning");
 		const memory = memoryOf(ctx.cwd, trustedIn(ctx));
 		if (!memory) ctx.ui.notify("memory: no provider in memory.json is available", "warning");
-		else if (memory.exists) ctx.ui.notify(`Memory: ${shortPath(memory.dir)}`, "info");
+		else if (memory.exists) {
+			ctx.ui.notify(`Memory: ${shortPath(memory.dir)}`, "info");
+			const summary = lintSummary(lint(memory.dir));
+			if (summary) ctx.ui.notify(`memory: ${summary}; /memory lint lists them`, "warning");
+		}
 	});
 
 	pi.on("before_agent_start", (event, ctx) => {
@@ -351,8 +443,11 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("memory", {
-		description: "Show this project's memory and its providers; /memory edit opens the index in the editor",
-		getArgumentCompletions: (prefix) => (prefix !== "edit" && "edit".startsWith(prefix) ? [{ value: "edit", label: "edit" }] : null),
+		description: "Show this project's memory and its providers; /memory edit opens the index, /memory lint checks it",
+		getArgumentCompletions: (prefix) => {
+			const matches = ["edit", "lint"].filter((v) => v !== prefix && v.startsWith(prefix));
+			return matches.length ? matches.map((v) => ({ value: v, label: v })) : null;
+		},
 		handler: async (args, ctx) => {
 			const memory = memoryOf(ctx.cwd, trustedIn(ctx));
 			if (!memory) {
@@ -360,6 +455,11 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 			const index = path.join(memory.dir, INDEX);
+			if (args.trim() === "lint") {
+				const result = lint(memory.dir);
+				await showText(ctx, `Memory lint · ${shortPath(memory.dir)}`, (_width, theme) => lintReport(result, theme));
+				return;
+			}
 			if (args.trim() === "edit") {
 				const before = memory.exists ? readFileSync(index, "utf8") : "";
 				const after = await ctx.ui.editor(`Memory index · ${shortPath(index)}`, before);

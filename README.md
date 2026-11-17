@@ -842,8 +842,14 @@ out wrong.
   duplicating. The topic files are read on demand.
 - `/memory` shows the providers with the one in use and the index;
   `/memory edit` opens the index in Pi's editor.
-- At start, a notice names the memory in use. Subagents get no memory, as in
-  Claude Code.
+- `/memory lint` checks the memory against its rules and what it costs: index
+  lines over 150 characters, an index over 200 lines (the prompt gets the
+  first 200), links to missing files, topic files without an index line or
+  without frontmatter, and topic files over 8 KB. The index is in every
+  request, and a topic file costs its size each time it is read, so both pay
+  for being short.
+- At start, a notice names the memory in use, and a second one counts what
+  `/memory lint` would list. Subagents get no memory, as in Claude Code.
 - `memory.ts` replaces `claude-memory.ts`, which only read Claude Code's
   memory: delete a link or copy of `claude-memory.ts` left in
   `~/.pi/agent/extensions/` (Pi reports a broken link as a load error);
@@ -1613,11 +1619,12 @@ long tool inputs.
   going back with `/tree` to a point before a cut brings the full text back.
 - Every cut makes the provider write its prompt cache anew from the first
   changed message, so it cuts in batches: at the end of a turn, once at least
-  100k tokens can go. When the cache has expired anyway, after an hour without
-  a request (the lifetime of Claude Code's cache), it cuts whatever it can
-  before the first request, so the cache is rebuilt from the smaller context
-  only. That request carries the cuts itself; they are stored at the end of
-  its turn.
+  100k tokens can go. When the cache is cold anyway, it cuts whatever it can
+  before the first request, so the cache is built from the smaller context
+  only: after an hour without a request (the lifetime of Claude Code's cache),
+  and after a switch to another model with `/model` or Ctrl+P, whose cache
+  holds nothing of the conversation. That request carries the cuts itself;
+  they are stored at the end of its turn.
 - The system prompt gains a `context_gc` section that tells the model about
   the stubs: it should run the command or read the file again rather than
   guess. The section names the pass, so it changes with every cut. That makes

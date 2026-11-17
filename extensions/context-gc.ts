@@ -7,9 +7,10 @@
  *   context_edit entries, so the transcript, /tree, exports, and session totals stay complete, and navigating to a point
  *   before a cut brings the full text back.
  * - Every cut makes the provider write its prompt cache anew from the first changed message, so it cuts in batches:
- *   when at least 100k tokens can go, at the end of a turn. And when the cache has expired anyway, after an hour
- *   without a request, it cuts whatever it can before the first request, so the cache is rebuilt from the smaller
- *   context only. That request carries the cuts itself; they are stored at the end of its turn.
+ *   when at least 100k tokens can go, at the end of a turn. And when the cache is cold anyway, after an hour without
+ *   a request or after a switch to another model (/model, Ctrl+P), it cuts whatever it can before the first request,
+ *   so the cache is built from the smaller context only. That request carries the cuts itself; they are stored at
+ *   the end of its turn.
  * - The system prompt gains a section that tells the model about the stubs, with the number of the pass. A changed
  *   prompt makes pi-claude-subscription synthesize the conversation instead of resuming its own transcript at the
  *   last unchanged message, which would leave out every later response.
@@ -109,7 +110,7 @@ interface Plan {
 
 interface Pending extends Plan {
 	pass: number;
-	reason: "cold" | "manual";
+	reason: "cold" | "model" | "manual";
 }
 
 const messageKey = (m: Message) => `${m.role}:${m.role === "toolResult" ? m.toolCallId : m.timestamp}`;
@@ -285,12 +286,12 @@ function passes(ctx: ExtensionContext): { pass: number; tokens: number } {
 	return { pass, tokens };
 }
 
-/** When the last request of the branch started (assistant messages carry the start of their request). */
-function lastRequest(ctx: ExtensionContext): number | undefined {
+/** When the last request of the branch started (assistant messages carry the start of their request), and its model. */
+function lastRequest(ctx: ExtensionContext): { at: number; model: string } | undefined {
 	const branch = ctx.sessionManager.getBranch() as any[];
 	for (let i = branch.length - 1; i >= 0; i--) {
 		const m = branch[i].type === "message" ? branch[i].message : undefined;
-		if (m?.role === "assistant" && typeof m.timestamp === "number") return m.timestamp;
+		if (m?.role === "assistant" && typeof m.timestamp === "number") return { at: m.timestamp, model: `${m.provider}/${m.model}` };
 	}
 	return undefined;
 }
@@ -318,6 +319,8 @@ export default function (pi: ExtensionAPI) {
 	let pending: Pending | undefined;
 	let manual = false;
 	let warned = false;
+	/** Set by /model or Ctrl+P; the cache of the new model holds nothing of this conversation. */
+	let switched = false;
 
 	const settings = (ctx: ExtensionContext): Config => {
 		const { config, problem } = loadConfig();
@@ -336,6 +339,12 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_start", () => {
 		pending = undefined;
 		manual = false;
+		switched = false;
+	});
+
+	pi.on("model_select", (event) => {
+		const before = event.previousModel;
+		if (before && (before.provider !== event.model.provider || before.id !== event.model.id)) switched = true;
 	});
 
 	// Store the cuts a request carried, or cut a batch when enough has piled up.
@@ -361,14 +370,23 @@ export default function (pi: ExtensionAPI) {
 		const done = passes(ctx).pass;
 		if (!pending && config.enabled) {
 			const last = lastRequest(ctx);
-			const cold = last !== undefined && Date.now() - last >= config.coldMinutes * 60_000;
-			if (cold || manual) {
+			const current = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined;
+			// Switching back and forth before the next request is no switch.
+			const newModel = switched && last !== undefined && current !== undefined && last.model !== current;
+			switched = false;
+			const cold = last !== undefined && Date.now() - last.at >= config.coldMinutes * 60_000;
+			if (cold || newModel || manual) {
 				const p = plan(ctx.sessionManager.buildSessionProjection().entries as unknown as Entry[], config);
 				if (p.edits.length > 0 && p.tokens >= (manual ? 1 : config.coldMinTokens)) {
-					pending = { ...p, pass: done + 1, reason: manual ? "manual" : "cold" };
+					const next: Pending = { ...p, pass: done + 1, reason: manual ? "manual" : newModel ? "model" : "cold" };
+					pending = next;
 					if (ctx.hasUI) {
-						const why = manual ? "as /gc asked" : `the cache expired after ${Math.round((Date.now() - (last ?? 0)) / 60_000)} min`;
-						ctx.ui.notify(`context-gc: cut ${describe(p)} before this request, ${why} (pass ${pending.pass})`, "info");
+						const why = manual
+							? "as /gc asked"
+							: newModel
+								? `the cache of ${current} holds nothing of this conversation yet`
+								: `the cache expired after ${Math.round((Date.now() - (last?.at ?? 0)) / 60_000)} min`;
+						ctx.ui.notify(`context-gc: cut ${describe(p)} before this request, ${why} (pass ${next.pass})`, "info");
 					}
 				}
 				manual = false;
@@ -398,7 +416,7 @@ export default function (pi: ExtensionAPI) {
 			if (args.trim() === "status") {
 				const usage = ctx.getContextUsage();
 				const last = lastRequest(ctx);
-				const age = last === undefined ? "no request yet" : `last request ${Math.round((Date.now() - last) / 60_000)} min ago`;
+				const age = last === undefined ? "no request yet" : `last request ${Math.round((Date.now() - last.at) / 60_000)} min ago`;
 				ctx.ui.notify(
 					[
 						`context-gc ${config.enabled ? "on" : "off"}: ${done.pass} pass${done.pass === 1 ? "" : "es"} cut ~${fmtTokens(done.tokens)} tokens so far.`,
