@@ -1654,15 +1654,11 @@ long tool inputs.
   the stubs: it should run the command or read the file again rather than
   guess. Its text never changes, so the prompt cache keeps everything before
   the first cut.
-- `pi-claude-subscription` up to 0.2.4 is the exception: after a change in
-  older messages it resumes its own transcript at the last unchanged message
-  and leaves out every later response. For it the section appears with the
-  first cut and names the pass, so it changes with every cut, and the provider
-  synthesizes the conversation instead, which writes all of it to the cache
-  again. The fixes of its
-  [pull request #4](https://github.com/jkeskikangas/pi-claude-subscription/pull/4)
-  make that unnecessary; the extension looks for them in the installed
-  package, and `/gc status` says which way it works.
+- With `pi-claude-subscription` it needs the fixes of that provider's
+  [pull request #4](https://github.com/jkeskikangas/pi-claude-subscription/pull/4):
+  up to 0.2.4, after a change in older messages, the provider resumes its own
+  transcript at the last unchanged message and leaves out every later
+  response.
 - `/gc` cuts at the next request, regardless of the thresholds. `/gc status`
   shows the passes so far, the context, and what could go now. A notice names
   every cut.
@@ -1673,9 +1669,8 @@ long tool inputs.
 - Settings, all optional, in `~/.pi/agent/context-gc.json`: `enabled` (true),
   `keepRecent` (10 responses), `minResultChars` (4000), `minArgChars` (2000),
   `batchTokens` (100000), `coldMinutes` (60), `coldMinTokens` (5000),
-  `thinking`, `toolResults`, and `toolArgs` (true each), `keepTools`
-  (`["Agent", "AskUserQuestion"]`), and `forceRebuild` (`"auto"`; `true` or
-  `false` override the detection).
+  `thinking`, `toolResults`, and `toolArgs` (true each), and `keepTools`
+  (`["Agent", "AskUserQuestion"]`).
 
 ## wait
 
