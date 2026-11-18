@@ -13,8 +13,11 @@
  *   remote-control-state entry, not shown). Quitting Pi keeps the record; disconnecting, or a connection that ends
  *   while Pi runs, clears it.
  * - A connect Pi makes by itself tries again after RETRY_DELAYS_MS when it fails for a reason that may pass (no
- *   answer, a failed lookup or connection, HTTP 408, 429, 5xx); /rc typed by hand tries once. A failure names the step
- *   and the reason, read from Node's HTTP diagnostics channels (watchApiRequests), since the bridge returns none.
+ *   answer, a failed lookup or connection, HTTP 408, 429, 5xx), and once after a rejected login (HTTP 401): right
+ *   after a renewal the server can refuse the new token for a few seconds, as it did for several sessions that renewed
+ *   together after a reboot. A second rejection in a row ends it; /rc typed by hand tries once. A failure names the
+ *   step and the reason, read from Node's HTTP diagnostics channels (watchApiRequests), since the bridge returns none.
+ *   A remote session that was created but not usable is archived, and once more later when the server refuses that.
  * - Transport: the Claude Agent SDK's bridge module (@anthropic-ai/claude-agent-sdk/bridge, alpha), installed with
  *   pi-claude-subscription under ~/.pi/agent/npm. It creates the session (POST /v1/code/sessions), mints the worker
  *   credential (POST /v1/code/sessions/{id}/bridge) and runs the event stream, heartbeats and reconnects. This file
@@ -620,6 +623,12 @@ function watchApiRequests(onPath: (path: string) => boolean): { reason(): string
 
 /** A connect that failed for a reason that may pass: no answer, a failed lookup or connection, the server busy. */
 class PassingFailure extends Error {}
+
+/** A connect the server refused the login for (HTTP 401): a new token it does not know yet, or a login to renew. */
+class RejectedLogin extends Error {}
+
+/** How a connect that came after a rejected login names that failure in the session log. */
+const REJECTED_REASON = "the server rejected the claude.ai login (HTTP 401)";
 
 function readState(): { enabled?: boolean } {
 	try {
@@ -1848,6 +1857,18 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	const archiveSession = (sessionId: string, timeoutMs: number) => sessionRequest("POST", sessionId, "/archive", {}, timeoutMs);
+
+	/**
+	 * Archives a remote session connect() created but could not use, and once more after RETRY_DELAYS_MS[0] when the
+	 * server refuses or is not reached: the refusal that made it unusable can hit the archive too.
+	 */
+	function archiveUnused(sessionId: string): void {
+		void archiveSession(sessionId, HTTP_TIMEOUT_MS).then((status) => {
+			if (status !== null && status < 300) return;
+			const again = setTimeout(() => void archiveSession(sessionId, HTTP_TIMEOUT_MS), RETRY_DELAYS_MS[0]);
+			again.unref?.();
+		});
+	}
 	const updateTitle = (sessionId: string, title: string) => sessionRequest("PUT", sessionId, "", { title }, HTTP_TIMEOUT_MS);
 
 	/** The link the server names for the session (it carries an access key), else the one Claude Code builds itself. */
@@ -2700,8 +2721,14 @@ export default function (pi: ExtensionAPI) {
 		return (await readAccessToken()) ?? { reason: "none" };
 	}
 
-	/** passing: the server was not reached or failed for the moment, so a later try may succeed. */
-	async function fetchCredentials(module: BridgeModule, sessionId: string): Promise<RemoteCredentials | { error: string; terminal: boolean; passing?: boolean }> {
+	/**
+	 * passing: the server was not reached or failed for the moment, so a later try may succeed; rejected: it refused the
+	 * login (HTTP 401).
+	 */
+	async function fetchCredentials(
+		module: BridgeModule,
+		sessionId: string,
+	): Promise<RemoteCredentials | { error: string; terminal: boolean; passing?: boolean; rejected?: boolean }> {
 		const token = await accessToken();
 		if ("reason" in token) return { error: loginHint(token), terminal: false };
 		const watch = watchApiRequests((p) => p.endsWith(`/${sessionId}/bridge`));
@@ -2712,7 +2739,7 @@ export default function (pi: ExtensionAPI) {
 			watch.stop();
 		}
 		if (result && typeof result === "object" && typeof (result as Json).worker_jwt === "string") return result as RemoteCredentials;
-		if (module.isCredentialsRejection(result)) return { error: rejectedHint(), terminal: true };
+		if (module.isCredentialsRejection(result)) return { error: rejectedHint(), terminal: true, rejected: true };
 		if (module.isCredentialsFailure(result)) {
 			const r = result as Json;
 			const reason = r.reason === "untrusted_device"
@@ -3007,9 +3034,10 @@ export default function (pi: ExtensionAPI) {
 
 	/**
 	 * Connects. automatic: Pi connects by itself (at start, on reopening a connected session), so a failure that may pass
-	 * is tried again after RETRY_DELAYS_MS; attempt counts the tries so far, first is the first one's failure.
+	 * is tried again after RETRY_DELAYS_MS, a rejected login once; attempt counts the tries so far, first is the first
+	 * one's failure, rejected tells that the last one was a rejected login.
 	 */
-	async function connect(explicitName?: string, automatic?: { attempt: number; first?: string }): Promise<void> {
+	async function connect(explicitName?: string, automatic?: { attempt: number; first?: string; rejected?: boolean }): Promise<void> {
 		cancelRetry();
 		const context = ctx;
 		const s = shared();
@@ -3039,7 +3067,7 @@ export default function (pi: ExtensionAPI) {
 				watch.stop();
 			}
 			if (typeof created !== "string") {
-				if (module.isCredentialsRejection(created)) throw new Error(rejectedHint());
+				if (module.isCredentialsRejection(created)) throw new RejectedLogin(rejectedHint());
 				if (module.isCreateSessionFailure(created)) {
 					const r = created as Json;
 					const detail = typeof r.detail === "string" && r.detail ? `: ${r.detail}` : "";
@@ -3051,8 +3079,9 @@ export default function (pi: ExtensionAPI) {
 
 			const credentials = await fetchCredentials(module, sessionId);
 			if (!("worker_jwt" in credentials)) {
-				void archiveSession(sessionId, HTTP_TIMEOUT_MS);
-				throw credentials.passing ? new PassingFailure(credentials.error) : new Error(credentials.error);
+				archiveUnused(sessionId);
+				if (credentials.passing) throw new PassingFailure(credentials.error);
+				throw credentials.rejected ? new RejectedLogin(credentials.error) : new Error(credentials.error);
 			}
 			const credentialsAt = Date.now();
 
@@ -3098,9 +3127,12 @@ export default function (pi: ExtensionAPI) {
 		} catch (error) {
 			const text = errorText(error);
 			const attempt = automatic?.attempt ?? 0;
-			if (automatic && error instanceof PassingFailure && alive && attempt < RETRY_DELAYS_MS.length) {
+			const rejected = error instanceof RejectedLogin;
+			// A rejected login is tried again once: two in a row are a login that needs renewing.
+			const passing = error instanceof PassingFailure || (rejected && !automatic?.rejected);
+			if (automatic && passing && alive && attempt < RETRY_DELAYS_MS.length) {
 				const delay = RETRY_DELAYS_MS[attempt];
-				const next = { attempt: attempt + 1, first: automatic.first ?? text };
+				const next = { attempt: attempt + 1, first: automatic.first ?? (rejected ? REJECTED_REASON : text), rejected };
 				retry = setTimeout(() => {
 					retry = null;
 					void connect(explicitName, next);
