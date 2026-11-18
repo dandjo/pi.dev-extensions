@@ -1022,8 +1022,8 @@ background while the agent works.
 ## tmux-tab-activity
 
 While Pi or one of its subagents works, a block swings back and forth over the
-session's name in its tmux tab, one letter at a time, sixteen frames a second,
-so the tab bar shows which sessions are busy. The block has the colours of the
+session's name in its tmux tab, one letter at a time, from one end to the other
+in a second, whatever the name's length, so the tab bar shows which sessions are busy. The block has the colours of the
 active tab; on the active tab itself it runs as a gap, a letter in the tab
 colour through the tab's block.
 
@@ -1033,8 +1033,10 @@ colour through the tab's block.
   title with tmux style tokens that draw one letter like the active tab, in
   `window-status-current-style` (in reverse video while that style is tmux's
   default, which sets nothing), undimmed, and moves the block on by one letter
-  per frame; at either end it turns without a pause. The tokens take no room,
-  so the tab keeps its width.
+  per frame, at a frame rate that makes one swing take a second; at either end
+  it turns without a pause. A name longer than 26 letters would need more than
+  25 frames a second, so the block skips letters there instead. The tokens take
+  no room, so the tab keeps its width.
 - It pauses while an AskUserQuestion dialog waits, when the tab's bell takes
   over, and puts Pi's own title back when Pi settles and no subagent works.
 - A window with several panes shows the pane whose Pi works: the active
