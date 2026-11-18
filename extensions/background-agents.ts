@@ -105,6 +105,8 @@ const SESSIONS_ROOT = path.join(getAgentDir(), "subagents");
 const WIDGET_KEY = "background-agents";
 const STATUS_KEY = "background-agents";
 const MAX_VISIBLE_ROWS = 5;
+/** The panel's rows start where the editor's text and the status line do. */
+const INDENT = " ";
 const FINISHED_TTL_MS = 30_000;
 const TICK_MS = 1_000;
 const TRANSCRIPT_POLL_MS = 500;
@@ -488,8 +490,9 @@ export default function (pi: ExtensionAPI) {
 		// The selected row as Pi's own lists and the AskUserQuestion dialog mark theirs: an arrow, the accent colour, and
 		// the selection background across the width.
 		const pointer = (isSelected: boolean) => (isSelected ? theme.fg("accent", "→ ") : "  ");
+		const inner = Math.max(0, width - INDENT.length);
 		const line = (text: string, isSelected: boolean) => {
-			const cut = truncateToWidth(text, width, "…");
+			const cut = INDENT + truncateToWidth(text, inner, "…");
 			return isSelected ? theme.bg("selectedBg", cut + " ".repeat(Math.max(0, width - visibleWidth(cut)))) : cut;
 		};
 
@@ -499,7 +502,7 @@ export default function (pi: ExtensionAPI) {
 		let main = `${pointer(marked === 0)}${marked === 0 ? theme.fg("accent", mainName) : focused || !viewing ? mainName : theme.fg("dim", mainName)}`;
 		if (scroll > 0) {
 			const more = theme.fg("dim", `↑ ${scroll} more`);
-			main = `${truncateToWidth(main, Math.max(0, width - visibleWidth(more) - 1), "…")} ${more}`;
+			main = `${truncateToWidth(main, Math.max(0, inner - visibleWidth(more) - 1), "…")} ${more}`;
 		}
 		panelLines[lines.length] = 0;
 		lines.push(line(main, marked === 0));
@@ -512,7 +515,7 @@ export default function (pi: ExtensionAPI) {
 			const index = scroll + i + 1;
 			const isSelected = marked === index;
 			const name = truncateToWidth(label(entry), nameWidth, "…").padEnd(nameWidth);
-			const descWidth = Math.max(8, width - 2 - nameWidth - 3 - statusWidth - 2);
+			const descWidth = Math.max(8, inner - 2 - nameWidth - 3 - statusWidth - 2);
 			const desc = truncateToWidth((entry.kind === "agent" ? entry.row.description : entry.task.prompt) || "", descWidth, "…").padEnd(descWidth);
 			const status = statuses[i].padStart(statusWidth);
 			panelLines[lines.length] = index;
@@ -528,7 +531,7 @@ export default function (pi: ExtensionAPI) {
 			const state = entry.kind === "agent" ? statusColor(entry.row, status, theme, recede) : tone(status);
 			lines.push(line(`${pointer(false)}${shown ? theme.bold(name) : tone(name)} ${theme.fg("dim", "›")} ${tone(desc)}  ${state}`, false));
 		});
-		if (scroll + visible.length < total) lines.push(theme.fg("dim", `    ↓ ${total - scroll - visible.length} more`));
+		if (scroll + visible.length < total) lines.push(INDENT + theme.fg("dim", `    ↓ ${total - scroll - visible.length} more`));
 		// A rule under the panel: it stands between two rules like the editor, apart from the footer below.
 		lines.push(theme.fg("borderMuted", "─".repeat(Math.max(0, width))));
 		return lines;
