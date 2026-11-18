@@ -1509,7 +1509,8 @@ and you can work on from there while Pi keeps running on your machine.
   Control; the answer is kept in `~/.pi/agent/remote-control.json`. The
   session link and a QR code appear, the footer reads `⇄ /rc active`, and the
   link is noted in the transcript. `/rc` again opens the status panel with the
-  link and the QR code; `d` there disconnects, the local session goes on.
+  link and the QR code; its last line names the keys: `d` disconnects, the
+  local session goes on, and `Esc` keeps the connection.
   `pi --remote-control` connects at start, as does
   `"remoteControlAtStartup": true` in `~/.claude/settings.json` once Remote
   Control was enabled here.

@@ -1268,15 +1268,15 @@ function toClaudeResponse(
  * background-agents.ts, btw.ts, claude-code-hooks.ts, diff.ts, memory.ts, scheduled-tasks.ts, subagents.ts carry a copy of
  * this block, or of a part of it: change them alike.
  */
-/** Draws a rounded frame around `body`, with `title` in the top edge and `help` under it. */
+/** Draws a rounded frame around `body`, with `title` in the top edge and `help` (the keys) as its last line. */
 function frame(theme: Theme, width: number, title: string, body: string[], help: string): string[] {
 	const inner = Math.max(1, width - 4);
 	const border = (s: string) => theme.fg("border", s);
 	const head = truncateToWidth(` ${title} `, Math.max(1, width - 4), "…");
 	const lines = [border("╭─") + theme.fg("accent", head) + border(`${"─".repeat(Math.max(0, width - 3 - visibleWidth(head)))}╮`)];
-	for (const line of body) lines.push(`${border("│")} ${truncateToWidth(line, inner, "…", true)} ${border("│")}`);
+	// The keys go inside the frame: below it, an overlay has no background and the line blends into the transcript.
+	for (const line of [...body, "", help]) lines.push(`${border("│")} ${truncateToWidth(line, inner, "…", true)} ${border("│")}`);
 	lines.push(border(`╰${"─".repeat(Math.max(0, width - 2))}╯`));
-	lines.push(truncateToWidth(theme.fg("dim", ` ${help}`), width));
 	return lines;
 }
 
@@ -3026,7 +3026,9 @@ export default function (pi: ExtensionAPI) {
 						`${theme.fg("muted", "Title: ")}${truncateToWidth(c.title, Math.max(10, width - 12), "…")}`,
 						`${theme.fg("muted", "State: ")}${c.handle.isConnected() ? theme.fg("success", "connected") : theme.fg("warning", "reconnecting…")}`,
 					];
-					return frame(theme, width, "Remote Control", body, "d disconnect · Esc keep the connection");
+					const key = (name: string) => theme.fg("accent", theme.bold(name));
+					const help = `${key("d")} disconnect ${theme.fg("dim", "·")} ${key("Esc")} keep the connection`;
+					return frame(theme, width, "Remote Control", body, help);
 				},
 				handleInput(data: string): void {
 					if (data === "d" || data === "D") done("disconnect");
