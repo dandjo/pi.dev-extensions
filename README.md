@@ -1023,14 +1023,17 @@ background while the agent works.
 
 While Pi works, a block swings back and forth over the session's name in
 its tmux tab, one letter at a time, sixteen frames a second, so the tab bar
-shows which sessions are busy. It shows on every tab not drawn in reverse
-video itself; an active tab drawn as a block hides it.
+shows which sessions are busy. The block has the colours of the active
+tab; on the active tab itself it runs as a gap, a letter in the tab colour
+through the tab's block.
 
 - Pi shows the session in the terminal title, `π - <name> - <directory>`.
   During a run or a compaction the extension writes that title with tmux
-  style tokens that draw one letter in reverse video, undimmed, and moves the
-  block on by one letter per frame; at either end it turns without a pause.
-  The tokens take no room, so the tab keeps its width.
+  style tokens that draw one letter like the active tab, in
+  `window-status-current-style` (in reverse video while that style is tmux's
+  default, which sets nothing), undimmed, and moves the block on by one letter
+  per frame; at either end it turns without a pause. The tokens take no room,
+  so the tab keeps its width.
 - It pauses while an AskUserQuestion dialog waits, when the tab's bell takes
   over, and puts Pi's own title back when Pi settles.
 - tmux takes a title as the pane title at once, but names the window after it
@@ -1047,19 +1050,26 @@ video itself; an active tab drawn as a block hides it.
   # The tab: the session name from the active pane's title, block included,
   # while tmux names the window; a window renamed by hand keeps its name.
   set -g window-status-format ' #I #{?#{&&:#{automatic-rename},#{m:π - *,#{pane_title}}},#{s/^π - (.*) - .*$/\1/:pane_title},#W}'
-  set -g window-status-current-format ' #I #{?#{&&:#{automatic-rename},#{m:π - *,#{pane_title}}},#{s/^π - (.*) - .*$/\1/:pane_title},#W}'
+  # The active tab: the same, with the block turned into a gap (its token
+  # starts with nodim,).
+  set -g window-status-current-format ' #I #{s/[#][[]nodim,[^]]*[]]/#[noreverse]/:#{?#{&&:#{automatic-rename},#{m:π - *,#{pane_title}}},#{s/^π - (.*) - .*$/\1/:pane_title},#W}}'
   ```
 
-- It checks the setup when a run starts, and animates only while a tab format
-  shows the pane title (`pane_title` or `#T`) and `set-titles` does not hand
-  the pane title on to the outer terminal, whose title would show the tokens
-  as text. Outside tmux, in subagents, in print and RPC mode, and for a name
-  with a `#` it does nothing.
+  The gap needs an active tab drawn in reverse video, as a block; on one that
+  is not, `#[noreverse]` changes nothing and the block does not show there.
+
+- It checks the setup and reads the active tab's style when a run starts,
+  and animates only while a tab format shows the pane title (`pane_title` or
+  `#T`) and `set-titles` does not hand the pane title on to the outer
+  terminal, whose title would show the tokens as text. Outside tmux, in
+  subagents, in print and RPC mode, and for a name with a `#` it does
+  nothing.
 - Pi only writes its title, sixteen times a second while it works, and tmux
-  redraws its status line for each frame; no tmux command runs. Faster ways
-  through tmux commands were set aside: one process per frame costs more, and
-  a control-mode client counts as focused, so with `focus-events` on the
-  visible pane would get focus events that are not real.
+  redraws its status line for each frame; no tmux command runs per frame.
+  Faster ways through tmux commands were set aside: one process per frame
+  costs more, and a control-mode client counts as focused, so with
+  `focus-events` on the visible pane would get focus events that are not
+  real.
 - While a run goes on, tmux's tree view (prefix `s` or `w`) shows the tokens
   in the pane title as text, and tmux-resurrect saves the title as it is: a
   tab restored from such a save shows the saved frame until Pi starts there.

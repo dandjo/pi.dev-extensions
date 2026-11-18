@@ -4,12 +4,14 @@
  *
  * Pi shows the session in the terminal title, "π - <name> - <directory>", or "π - <directory>" while the session has
  * no name. During a run or a compaction this extension writes that title with tmux style tokens that draw one letter
- * in reverse video, undimmed (#[nodim,reverse]), and moves the block on by one letter per frame; at either end it
- * turns without a pause. It stops when Pi settles, pauses while an AskUserQuestion dialog waits (the tab's bell shows
- * then), and puts Pi's own title back. The tokens take no room, so the tab keeps its width.
+ * like the active tab, in window-status-current-style, undimmed (in reverse video while that style is tmux's default,
+ * which sets nothing), and moves the block on by one letter per frame; at either end it turns without a pause. It
+ * stops when Pi settles, pauses while an AskUserQuestion dialog waits (the tab's bell shows then), and puts Pi's own
+ * title back. The tokens take no room, so the tab keeps its width.
  *
- * The block shows on every tab that is not drawn in reverse video itself; a tab style with reverse (an active tab drawn
- * as a block, say) hides it.
+ * The block shows on the inactive tabs. The active tab, drawn in the same style, shows it only through its format:
+ * the setup below turns it into a gap there (#[noreverse]), a letter in the tab colour that runs through the tab's
+ * block, as long as the active tab is drawn in reverse video.
  *
  * tmux setup. tmux takes a title as the pane title at once, but names the window (#W) after it at most every 500 ms,
  * so the tab has to show the pane title itself. In ~/.tmux.conf or ~/.config/tmux/tmux.conf (tmux 3.2 or later):
@@ -20,13 +22,15 @@
  *   # The tab: the session name from the active pane's title, block included, while tmux names the window;
  *   # a window renamed by hand keeps its name (#W).
  *   set -g window-status-format ' #I #{?#{&&:#{automatic-rename},#{m:π - *,#{pane_title}}},#{s/^π - (.*) - .*$/\1/:pane_title},#W}'
- *   set -g window-status-current-format ' #I #{?#{&&:#{automatic-rename},#{m:π - *,#{pane_title}}},#{s/^π - (.*) - .*$/\1/:pane_title},#W}'
+ *   # The active tab: the same, with the block turned into a gap (its token starts with nodim,).
+ *   set -g window-status-current-format ' #I #{s/[#][[]nodim,[^]]*[]]/#[noreverse]/:#{?#{&&:#{automatic-rename},#{m:π - *,#{pane_title}}},#{s/^π - (.*) - .*$/\1/:pane_title},#W}}'
  *
- * Then `tmux source-file` the configuration, and /reload in running Pi sessions. The extension checks the setup when a
- * run starts: it animates only while window-status-format or window-status-current-format shows the pane title
- * (pane_title or #T), and not while set-titles hands the pane title on to the outer terminal, whose title would show
- * the tokens as text. Elsewhere it does nothing: outside tmux ($TMUX unset), in subagents and other modes than Pi's
- * terminal UI, and for a name with a #, which tmux would read as the start of a token.
+ * Then `tmux source-file` the configuration, and /reload in running Pi sessions. The extension checks the setup, and
+ * reads the active tab's style, when a run starts: it animates only while window-status-format or
+ * window-status-current-format shows the pane title (pane_title or #T), and not while set-titles hands the pane title
+ * on to the outer terminal, whose title would show the tokens as text. Elsewhere it does nothing: outside tmux ($TMUX
+ * unset), in subagents and other modes than Pi's terminal UI, and for a name with a #, which tmux would read as the
+ * start of a token.
  *
  * Side effects of the tokens in the pane title: tmux's tree view (prefix s or w) shows them as text while a run goes on,
  * and tmux-resurrect saves the title as it is; a restored tab shows the frame it saved until Pi starts there again.
@@ -40,7 +44,8 @@ const FRAME_MS = 1000 / 16;
 /** Pi's title starts with this; a Pi build with a name of its own (piConfig.name) is not covered. */
 const APP_TITLE = "π";
 const DARK = "#[default]";
-const BLOCK = "#[default]#[nodim,reverse]";
+/** The block's style while the active tab has none of its own. */
+const PLAIN_BLOCK = "nodim,reverse";
 /** ask-user-question.ts: a dialog opens and closes (answered, declined, or withdrawn), with its tool call id. */
 const QUESTIONS_OPEN = "ask-user-question:open";
 const QUESTIONS_CLOSE = "ask-user-question:close";
@@ -53,13 +58,33 @@ function tmuxOption(name: string): Promise<string> {
 
 const showsPaneTitle = (format: string) => /pane_title|#T/.test(format);
 
-/** Whether tmux shows the pane title in its tabs and keeps it out of the outer terminal's title. */
-async function tmuxShowsFrames(): Promise<boolean> {
-	const [inactive, current, setTitles, titlesString] = await Promise.all(
-		["window-status-format", "window-status-current-format", "set-titles", "set-titles-string"].map(tmuxOption),
-	);
-	if (!showsPaneTitle(inactive) && !showsPaneTitle(current)) return false;
-	return !(setTitles === "on" && showsPaneTitle(titlesString));
+/**
+ * The block's style: the active tab's, undimmed. A style that is empty, tmux's default, or more than plain attributes
+ * and colours (a format, say) gives the plain block. Either starts with "nodim,", which the active tab's format of the
+ * setup matches to turn the block into a gap.
+ */
+function blockStyle(currentStyle: string): string {
+	const style = currentStyle.trim();
+	if (!style || style === "default" || !/^[A-Za-z0-9_,=#-]+$/.test(style)) return PLAIN_BLOCK;
+	return `nodim,${style}`;
+}
+
+/**
+ * The block's token while tmux shows the pane title in its tabs and keeps it out of the outer terminal's title, else
+ * null.
+ */
+async function tmuxBlock(): Promise<string | null> {
+	const options = [
+		"window-status-format",
+		"window-status-current-format",
+		"set-titles",
+		"set-titles-string",
+		"window-status-current-style",
+	];
+	const [inactive, current, setTitles, titlesString, currentStyle] = await Promise.all(options.map(tmuxOption));
+	if (!showsPaneTitle(inactive) && !showsPaneTitle(current)) return null;
+	if (setTitles === "on" && showsPaneTitle(titlesString)) return null;
+	return `#[default]#[${blockStyle(currentStyle)}]`;
 }
 
 /** Pi's own title, as Pi builds it. */
@@ -68,12 +93,12 @@ function plainTitle(name: string | undefined, dir: string): string {
 }
 
 /** The title with the block on letter `at` of the part tmux shows in the tab; outside the letters, no block. */
-function frameTitle(name: string | undefined, dir: string, at: number): string {
+function frameTitle(name: string | undefined, dir: string, at: number, block: string): string {
 	const letters = [...(name ?? dir)];
 	if (letters.includes("#")) return plainTitle(name, dir);
 	const shown =
 		at >= 0 && at < letters.length
-			? `${DARK}${letters.slice(0, at).join("")}${BLOCK}${letters[at]}${DARK}${letters.slice(at + 1).join("")}`
+			? `${DARK}${letters.slice(0, at).join("")}${block}${letters[at]}${DARK}${letters.slice(at + 1).join("")}`
 			: `${DARK}${letters.join("")}`;
 	return name ? `${APP_TITLE} - ${shown} - ${dir}` : `${APP_TITLE} - ${shown}`;
 }
@@ -90,8 +115,9 @@ export default function (pi: ExtensionAPI) {
 	/** The letter the block is on, -1 before the first frame of a run, and the way it moves: 1 right, -1 left. */
 	let at = -1;
 	let step = 1;
-	/** The setup check of the current run, made once per run. */
-	let setup: Promise<boolean> | null = null;
+	/** The setup check of the current run, made once per run: the block's token, or null where tmux cannot show it. */
+	let setup: Promise<string | null> | null = null;
+	let block = "";
 	/** Counts the calls of update(), so one that waited for the setup check does nothing once a later one came. */
 	let generation = 0;
 
@@ -111,7 +137,7 @@ export default function (pi: ExtensionAPI) {
 			if (at + step > last || at + step < 0) step = -step;
 			at = Math.max(0, Math.min(last, at + step));
 		}
-		ctx.ui.setTitle(frameTitle(name, dir(ctx), at));
+		ctx.ui.setTitle(frameTitle(name, dir(ctx), at, block));
 	}
 
 	function stop(): void {
@@ -129,9 +155,10 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 		if (timer) return;
-		setup ??= tmuxShowsFrames();
-		const shows = await setup;
-		if (call !== generation || !shows || !ctx || !working() || timer) return;
+		setup ??= tmuxBlock();
+		const token = await setup;
+		if (call !== generation || !token || !ctx || !working() || timer) return;
+		block = token;
 		timer = setInterval(frame, FRAME_MS);
 		timer.unref?.();
 	}
