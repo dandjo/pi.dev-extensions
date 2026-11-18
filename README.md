@@ -1520,7 +1520,19 @@ and you can work on from there while Pi keeps running on your machine.
   reboot) brings Remote Control back with it. The session records this in an
   entry the transcript does not show. Quitting Pi keeps it; disconnecting with
   `d`, or a connection that ends while Pi runs, clears it. Each reconnect
-  opens a new remote session with a new link.
+  opens a new remote session with a new link. `/reload` connects such a
+  session too while it is not connected.
+- A connect Pi makes by itself (at start, on reopening, with the flag or the
+  setting) tries again when it fails for a reason that may pass: no answer, a
+  failed name lookup or connection, or the server busy or failing for the
+  moment (HTTP 408, 429, 5xx). It waits 5, 15, 30, and 60 seconds, and the
+  footer shows the time of the next try (`⇄ /rc retrying at …`); `/rc`
+  meanwhile connects at once. A failure that will not pass (login, plan,
+  policy) ends it at once, and `/rc` typed by hand tries once. A failure names
+  the step, creating the remote session or fetching its credentials, and the
+  reason, which the extension reads from Node's HTTP diagnostics channels,
+  since the bridge returns none. When a later try succeeds, the session log
+  notes the first failure.
 - The session title is the name given to `/rc`, else the session's name (the
   one [session-title](#session-title) generates follows a little later), else
   the last prompt, else `<hostname>-<adjective>-<noun>`. A rename on either

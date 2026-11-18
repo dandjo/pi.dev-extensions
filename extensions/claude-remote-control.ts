@@ -8,9 +8,13 @@
  *   footer. Run again while connected for the status panel, where the connection can be closed; the local session
  *   keeps running. `pi --remote-control` connects at start, as does remoteControlAtStartup: true in
  *   ~/.claude/settings.json once Remote Control was enabled here.
- * - A session that was connected when Pi closed connects again when it is opened (startup, /resume), once Remote
- *   Control was enabled here: the session records whether it is connected (a remote-control-state entry, not shown).
- *   Quitting Pi keeps the record; disconnecting, or a connection that ends while Pi runs, clears it.
+ * - A session that was connected when Pi closed connects again when it is opened (startup, /resume, and /reload while
+ *   not connected), once Remote Control was enabled here: the session records whether it is connected (a
+ *   remote-control-state entry, not shown). Quitting Pi keeps the record; disconnecting, or a connection that ends
+ *   while Pi runs, clears it.
+ * - A connect Pi makes by itself tries again after RETRY_DELAYS_MS when it fails for a reason that may pass (no
+ *   answer, a failed lookup or connection, HTTP 408, 429, 5xx); /rc typed by hand tries once. A failure names the step
+ *   and the reason, read from Node's HTTP diagnostics channels (watchApiRequests), since the bridge returns none.
  * - Transport: the Claude Agent SDK's bridge module (@anthropic-ai/claude-agent-sdk/bridge, alpha), installed with
  *   pi-claude-subscription under ~/.pi/agent/npm. It creates the session (POST /v1/code/sessions), mints the worker
  *   credential (POST /v1/code/sessions/{id}/bridge) and runs the event stream, heartbeats and reconnects. This file
@@ -107,6 +111,7 @@ import {
 import { Key, matchesKey, Text, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { createHash, randomUUID } from "node:crypto";
 import { execFile, execFileSync } from "node:child_process";
+import { subscribe, unsubscribe } from "node:diagnostics_channel";
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import * as os from "node:os";
@@ -121,6 +126,8 @@ const SHUTDOWN_TIMEOUT_MS = 1_500;
 /** Refresh the worker credential this long before it expires (Claude Code's token_refresh_buffer_ms). */
 const TOKEN_REFRESH_BUFFER_MS = 300_000;
 const RECOVERY_BACKOFF_MS = [2_000, 5_000, 10_000, 30_000, 60_000];
+/** A connect Pi makes by itself tries again after a failure that may pass, after these waits; then it gives up. */
+const RETRY_DELAYS_MS = [5_000, 15_000, 30_000, 60_000];
 /** A credential renewal that keeps failing this long is noted in the session log, with its reason. */
 const OFFLINE_NOTE_MS = 5 * 60_000;
 /** A running subagent's progress goes to the app at most this often. */
@@ -359,8 +366,8 @@ const OTHER_ACCOUNT_HINT =
 /** Added to LOGIN_HINT while claude-login.ts is not loaded: the login may only have run out. */
 const NO_RENEWAL_HINT = " A login that ran out while Pi idled is renewed by claude-login.ts, which is not loaded.";
 
-function clock(ms: number): string {
-	return new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+function clock(ms: number, seconds = false): string {
+	return new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", ...(seconds && { second: "2-digit" }) });
 }
 
 // --- SDK module -------------------------------------------------------------------------------------------------------
@@ -569,6 +576,46 @@ function shorten(text: string, max: number): string {
 function errorText(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
 }
+
+/**
+ * Why the bridge's last request to the Remote Control API on one path failed. The bridge returns null alike for a
+ * failed name lookup or connection, a timeout, and HTTP 408, 429, or 5xx, and keeps the reason in its own debug log;
+ * Node's HTTP diagnostics channels carry it (Node 22: http.client.request.error, http.client.response.finish).
+ * reason() is undefined when nothing failed or the channels said nothing.
+ */
+function watchApiRequests(onPath: (path: string) => boolean): { reason(): string | undefined; stop(): void } {
+	const host = new URL(API_BASE_URL).hostname;
+	let last: string | undefined;
+	const ours = (request: { host?: unknown; path?: unknown } | undefined) => request?.host === host && onPath(String(request.path ?? ""));
+	const onError = (message: unknown) => {
+		const { request, error } = message as { request?: { host?: unknown; path?: unknown }; error?: NodeJS.ErrnoException };
+		if (!ours(request)) return;
+		const code = error?.code ?? "";
+		if (code === "ENOTFOUND" || code === "EAI_AGAIN") last = `the name lookup of ${host} failed (${code})`;
+		else if (code === "ECONNABORTED" || code === "ETIMEDOUT") last = `no answer within ${HTTP_TIMEOUT_MS / 1000} s`;
+		else last = `the connection failed (${code || error?.message || "no reason given"})`;
+	};
+	const onResponse = (message: unknown) => {
+		const { request, response } = message as { request?: { host?: unknown; path?: unknown }; response?: { statusCode?: number } };
+		if (!ours(request)) return;
+		const status = response?.statusCode ?? 0;
+		if (status === 429) last = "the server is busy (HTTP 429)";
+		else if (status === 408 || status >= 500) last = `the server failed for the moment (HTTP ${status})`;
+		else last = undefined;
+	};
+	subscribe("http.client.request.error", onError);
+	subscribe("http.client.response.finish", onResponse);
+	return {
+		reason: () => last,
+		stop: () => {
+			unsubscribe("http.client.request.error", onError);
+			unsubscribe("http.client.response.finish", onResponse);
+		},
+	};
+}
+
+/** A connect that failed for a reason that may pass: no answer, a failed lookup or connection, the server busy. */
+class PassingFailure extends Error {}
 
 function readState(): { enabled?: boolean } {
 	try {
@@ -2612,10 +2659,17 @@ export default function (pi: ExtensionAPI) {
 		return (await readAccessToken()) ?? { reason: "none" };
 	}
 
-	async function fetchCredentials(module: BridgeModule, sessionId: string): Promise<RemoteCredentials | { error: string; terminal: boolean }> {
+	/** passing: the server was not reached or failed for the moment, so a later try may succeed. */
+	async function fetchCredentials(module: BridgeModule, sessionId: string): Promise<RemoteCredentials | { error: string; terminal: boolean; passing?: boolean }> {
 		const token = await accessToken();
 		if ("reason" in token) return { error: loginHint(token), terminal: false };
-		const result = await module.fetchRemoteCredentials(sessionId, API_BASE_URL, token.value, HTTP_TIMEOUT_MS);
+		const watch = watchApiRequests((p) => p.endsWith(`/${sessionId}/bridge`));
+		let result: unknown;
+		try {
+			result = await module.fetchRemoteCredentials(sessionId, API_BASE_URL, token.value, HTTP_TIMEOUT_MS);
+		} finally {
+			watch.stop();
+		}
 		if (result && typeof result === "object" && typeof (result as Json).worker_jwt === "string") return result as RemoteCredentials;
 		if (module.isCredentialsRejection(result)) return { error: rejectedHint(), terminal: true };
 		if (module.isCredentialsFailure(result)) {
@@ -2627,7 +2681,7 @@ export default function (pi: ExtensionAPI) {
 					: `the server refused the request (${r.reason}${r.status ? `, HTTP ${r.status}` : ""})`;
 			return { error: `Remote Control is not available: ${reason}.`, terminal: true };
 		}
-		return { error: "Could not reach the Remote Control server.", terminal: false };
+		return { error: `Could not fetch the session's credentials: ${watch.reason() ?? "the Remote Control server was not reached"}.`, terminal: false, passing: true };
 	}
 
 	function scheduleRefresh(c: Connection): void {
@@ -2883,7 +2937,12 @@ export default function (pi: ExtensionAPI) {
 
 	const adoptLate = (c: Connection) => adopt(c, "late");
 
-	async function connect(explicitName?: string): Promise<void> {
+	/**
+	 * Connects. automatic: Pi connects by itself (at start, on reopening a connected session), so a failure that may pass
+	 * is tried again after RETRY_DELAYS_MS; attempt counts the tries so far, first is the first one's failure.
+	 */
+	async function connect(explicitName?: string, automatic?: { attempt: number; first?: string }): Promise<void> {
+		cancelRetry();
 		const context = ctx;
 		const s = shared();
 		if (connection || s.connecting || !context) return;
@@ -2904,7 +2963,13 @@ export default function (pi: ExtensionAPI) {
 			const module = loaded.module;
 			const title = currentTitle(explicitName);
 
-			const created = await module.createCodeSession(API_BASE_URL, token.value, title, HTTP_TIMEOUT_MS, undefined, undefined, cwd, modelId);
+			const watch = watchApiRequests((p) => p === "/v1/code/sessions");
+			let created: unknown;
+			try {
+				created = await module.createCodeSession(API_BASE_URL, token.value, title, HTTP_TIMEOUT_MS, undefined, undefined, cwd, modelId);
+			} finally {
+				watch.stop();
+			}
 			if (typeof created !== "string") {
 				if (module.isCredentialsRejection(created)) throw new Error(rejectedHint());
 				if (module.isCreateSessionFailure(created)) {
@@ -2912,14 +2977,14 @@ export default function (pi: ExtensionAPI) {
 					const detail = typeof r.detail === "string" && r.detail ? `: ${r.detail}` : "";
 					throw new Error(`Session creation failed (server ${r.status}${detail}). Remote Control needs a Pro, Max, Team, or Enterprise claude.ai account with Remote Control allowed.`);
 				}
-				throw new Error("Could not reach the Remote Control server.");
+				throw new PassingFailure(`Could not create the remote session: ${watch.reason() ?? "the Remote Control server was not reached"}.`);
 			}
 			const sessionId = created;
 
 			const credentials = await fetchCredentials(module, sessionId);
 			if (!("worker_jwt" in credentials)) {
 				void archiveSession(sessionId, HTTP_TIMEOUT_MS);
-				throw new Error(credentials.error);
+				throw credentials.passing ? new PassingFailure(credentials.error) : new Error(credentials.error);
 			}
 			const credentialsAt = Date.now();
 
@@ -2953,6 +3018,7 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 			activate(c);
+			if (automatic?.first) note(`Remote Control connected at attempt ${automatic.attempt + 1}; the first failed: ${automatic.first}`);
 			note(`Remote Control active: ${c.url}`);
 			notify(`Remote Control active — ${c.url}`);
 			const missing = missingRepairs(patches);
@@ -2962,12 +3028,35 @@ export default function (pi: ExtensionAPI) {
 				notify(warning, "warning");
 			}
 		} catch (error) {
+			const text = errorText(error);
+			const attempt = automatic?.attempt ?? 0;
+			if (automatic && error instanceof PassingFailure && alive && attempt < RETRY_DELAYS_MS.length) {
+				const delay = RETRY_DELAYS_MS[attempt];
+				const next = { attempt: attempt + 1, first: automatic.first ?? text };
+				retry = setTimeout(() => {
+					retry = null;
+					void connect(explicitName, next);
+				}, delay);
+				retry.unref?.();
+				setStatus(`⇄ /rc retrying at ${clock(Date.now() + delay, true)}`);
+				return;
+			}
 			setStatus(undefined);
-			note(`Remote Control failed: ${errorText(error)}`);
-			notify(`Remote Control: ${errorText(error)}`, "error");
+			const tries = attempt > 0 ? ` after ${attempt + 1} attempts` : "";
+			note(`Remote Control failed${tries}: ${text}`);
+			notify(tries ? `Remote Control failed${tries}: ${text}` : `Remote Control: ${text}`, "error");
 		} finally {
 			s.connecting = false;
 		}
+	}
+
+	/** A pending automatic retry of connect(), dropped when /rc connects at once or the runtime ends. */
+	let retry: ReturnType<typeof setTimeout> | null = null;
+	function cancelRetry(): void {
+		if (!retry) return;
+		clearTimeout(retry);
+		retry = null;
+		setStatus(undefined);
 	}
 
 	/** opts.quit: Pi quits, so the session keeps its record and connects again when it is opened. */
@@ -3107,17 +3196,19 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 		if (!isClaudeModel(context.model)) return;
-		const reopened = (event.reason === "startup" || event.reason === "resume") && readState().enabled === true && sessionConnected(context);
+		// reload: a connect still to be retried, or a handover that did not happen, comes back with the session's record.
+		const reopened = (event.reason === "startup" || event.reason === "resume" || event.reason === "reload") && readState().enabled === true && sessionConnected(context);
 		if (event.reason !== "startup" && !reopened) return;
 		if (event.reason === "startup") {
 			const warning = bridgeCheck(claudeSdkDir());
 			if (warning) context.ui.notify(warning, "warning");
 		}
 		const wanted = reopened || pi.getFlag("remote-control") === true || (startupSetting() && readState().enabled === true);
-		if (wanted) setTimeout(() => void connect(), 500).unref?.();
+		if (wanted) setTimeout(() => void connect(undefined, { attempt: 0 }), 500).unref?.();
 	});
 
 	pi.on("session_shutdown", async (event) => {
+		cancelRetry();
 		const s = shared();
 		if (s.adopt === adoptLate) s.adopt = null;
 		const c = connection;
