@@ -8,6 +8,9 @@
  *   footer. Run again while connected for the status panel, where the connection can be closed; the local session
  *   keeps running. `pi --remote-control` connects at start, as does remoteControlAtStartup: true in
  *   ~/.claude/settings.json once Remote Control was enabled here.
+ * - A session that was connected when Pi closed connects again when it is opened (startup, /resume), once Remote
+ *   Control was enabled here: the session records whether it is connected (a remote-control-state entry, not shown).
+ *   Quitting Pi keeps the record; disconnecting, or a connection that ends while Pi runs, clears it.
  * - Transport: the Claude Agent SDK's bridge module (@anthropic-ai/claude-agent-sdk/bridge, alpha), installed with
  *   pi-claude-subscription under ~/.pi/agent/npm. It creates the session (POST /v1/code/sessions), mints the worker
  *   credential (POST /v1/code/sessions/{id}/bridge) and runs the event stream, heartbeats and reconnects. This file
@@ -45,7 +48,7 @@
  *   takes for an old Claude Code and refuses newer models for, and attachBridgeSession does not pass the effort
  *   handler, the context usage handler, the shared control answers (get_usage) or the initialize state on.
  *   loadBridge() imports a repaired copy
- *   (~/.cache/pi-remote-control); a repair the bundle has no shape for is left out, and /rc warns about it. The bundle
+ *   (~/.cache/pi-remote-control, written whole through a rename, since several Pi may connect at once); a repair the bundle has no shape for is left out, and /rc warns about it. The bundle
  *   is also checked without loading it (bridgeCheck): at Pi's start while a Claude model is active, and when
  *   claude-sdk-update.ts reports a new SDK ("claude-sdk-update:installed"); a bundle a repair no longer fits gets a
  *   warning once per process.
@@ -104,7 +107,7 @@ import {
 import { Key, matchesKey, Text, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { createHash, randomUUID } from "node:crypto";
 import { execFile, execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -153,6 +156,8 @@ const TERMINAL_COMMANDS = new Set([
 const APP_COMMAND_MARK = "\u0000app:";
 const STATUS_KEY = "remote-control";
 const ENTRY_TYPE = "remote-control";
+/** Whether the session is connected, so opening it again reconnects; not rendered. */
+const STATE_ENTRY = "remote-control-state";
 
 const ADJECTIVES = ["graceful", "quiet", "brisk", "sunny", "clever", "gentle", "bold", "calm", "swift", "bright", "merry", "steady"];
 const NOUNS = ["unicorn", "otter", "falcon", "maple", "harbor", "comet", "willow", "lantern", "meadow", "pebble", "heron", "ember"];
@@ -420,7 +425,16 @@ function writePatchedBridge(source: string): string {
 		if (old !== name && /^bridge-[0-9a-f]{16}\.mjs$/.test(old)) rmSync(path.join(BRIDGE_CACHE_DIR, old), { force: true });
 	}
 	const file = path.join(BRIDGE_CACHE_DIR, name);
-	writeFileSync(file, source, { mode: 0o600 });
+	try {
+		// The name is the content's hash: a file of the full size is this copy.
+		if (statSync(file).size === Buffer.byteLength(source)) return file;
+	} catch {
+		// not written yet
+	}
+	// Another Pi may import the file meanwhile: it must never see it empty or half written.
+	const temp = `${file}.${process.pid}.tmp`;
+	writeFileSync(temp, source, { mode: 0o600 });
+	renameSync(temp, file);
 	return file;
 }
 
@@ -487,6 +501,9 @@ function loadBridge(): Promise<LoadedBridge> {
 			// unpatched, then
 		}
 		const module = (await import(pathToFileURL(target).href)) as BridgeModule;
+		if (typeof module.createCodeSession !== "function" || typeof module.attachBridgeSession !== "function") {
+			throw new Error(`the bridge module ${target} is incomplete; restart Pi, then /remote-control again.`);
+		}
 		return { module, version, patches };
 	})().catch((error) => {
 		bridgePromise = null;
@@ -1712,6 +1729,17 @@ export default function (pi: ExtensionAPI) {
 	const note = (line: string) => {
 		if (alive) pi.appendEntry(ENTRY_TYPE, { line });
 	};
+	/** Whether the session was connected when it was last open: its last remote-control-state entry. */
+	const sessionConnected = (context: ExtensionContext): boolean => {
+		let connected = false;
+		for (const entry of context.sessionManager.getBranch()) {
+			if (entry.type === "custom" && entry.customType === STATE_ENTRY) connected = (entry.data as { connected?: boolean } | undefined)?.connected === true;
+		}
+		return connected;
+	};
+	const recordConnected = (connected: boolean) => {
+		if (alive && ctx && sessionConnected(ctx) !== connected) pi.appendEntry(STATE_ENTRY, { connected });
+	};
 
 	// --- HTTP calls the SDK module does not export -------------------------------------------------------------------
 
@@ -2786,6 +2814,7 @@ export default function (pi: ExtensionAPI) {
 		void usageSource()?.refresh().catch(() => {});
 		resendTasks(c);
 		setStatus("⇄ /rc active");
+		recordConnected(true);
 		const closed = c.pendingClose;
 		c.pendingClose = undefined;
 		if (closed) onClose(c, closed.code);
@@ -2941,10 +2970,13 @@ export default function (pi: ExtensionAPI) {
 		}
 	}
 
-	async function teardown(c: Connection, opts: { archive: boolean; message?: string; timeoutMs?: number }, level: "info" | "warning" | "error" = "info"): Promise<void> {
+	/** opts.quit: Pi quits, so the session keeps its record and connects again when it is opened. */
+	async function teardown(c: Connection, opts: { archive: boolean; message?: string; timeoutMs?: number; quit?: boolean }, level: "info" | "warning" | "error" = "info"): Promise<void> {
 		if (c.closing) return;
 		c.closing = true;
-		if (connection === c) connection = null;
+		const active = connection === c;
+		if (active) connection = null;
+		if (active && !opts.quit) recordConnected(false);
 		c.router = null;
 		c.pending = [];
 		if (c.refreshTimer) clearTimeout(c.refreshTimer);
@@ -3072,10 +3104,14 @@ export default function (pi: ExtensionAPI) {
 			adopt(parked.connection, event.reason);
 			return;
 		}
-		if (event.reason !== "startup" || !isClaudeModel(context.model)) return;
-		const warning = bridgeCheck(claudeSdkDir());
-		if (warning) context.ui.notify(warning, "warning");
-		const wanted = pi.getFlag("remote-control") === true || (startupSetting() && readState().enabled === true);
+		if (!isClaudeModel(context.model)) return;
+		const reopened = (event.reason === "startup" || event.reason === "resume") && readState().enabled === true && sessionConnected(context);
+		if (event.reason !== "startup" && !reopened) return;
+		if (event.reason === "startup") {
+			const warning = bridgeCheck(claudeSdkDir());
+			if (warning) context.ui.notify(warning, "warning");
+		}
+		const wanted = reopened || pi.getFlag("remote-control") === true || (startupSetting() && readState().enabled === true);
 		if (wanted) setTimeout(() => void connect(), 500).unref?.();
 	});
 
@@ -3083,7 +3119,7 @@ export default function (pi: ExtensionAPI) {
 		const s = shared();
 		if (s.adopt === adoptLate) s.adopt = null;
 		const c = connection;
-		if (c && event.reason === "quit") await teardown(c, { archive: true, timeoutMs: SHUTDOWN_TIMEOUT_MS });
+		if (c && event.reason === "quit") await teardown(c, { archive: true, timeoutMs: SHUTDOWN_TIMEOUT_MS, quit: true });
 		else if (c) park(c);
 		for (const off of unsubscribe) off();
 		questions.clear();

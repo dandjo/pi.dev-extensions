@@ -1513,6 +1513,13 @@ and you can work on from there while Pi keeps running on your machine.
   `pi --remote-control` connects at start, as does
   `"remoteControlAtStartup": true` in `~/.claude/settings.json` once Remote
   Control was enabled here.
+- A session that was connected when Pi closed connects again when you open
+  it, at start or with `/resume`, so a restart (or
+  [tmux-pi-resurrect](https://github.com/dandjo/tmux-pi-resurrect) after a
+  reboot) brings Remote Control back with it. The session records this in an
+  entry the transcript does not show. Quitting Pi keeps it; disconnecting with
+  `d`, or a connection that ends while Pi runs, clears it. Each reconnect
+  opens a new remote session with a new link.
 - The session title is the name given to `/rc`, else the session's name (the
   one [session-title](#session-title) generates follows a little later), else
   the last prompt, else `<hostname>-<adjective>-<noun>`. A rename on either
