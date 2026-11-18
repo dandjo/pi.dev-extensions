@@ -2865,6 +2865,11 @@ export default function (pi: ExtensionAPI) {
 
 	function onClose(c: Connection, code?: number): void {
 		if (c.closing || connection !== c) return;
+		// Here as well as in bridgeOptions: a handle older code attached reports its close straight to the router.
+		if (c.epochMove) {
+			c.heldClose ??= { code };
+			return;
+		}
 		switch (code) {
 			case 4090:
 				// The server's codes behind 4090: another worker took over, the epoch is stale, or the session is no longer active.
