@@ -1896,6 +1896,9 @@ is a request that reads the whole context.
   conversation and starts a turn when Pi is idle. `/waits` lists the
   background waits, and `/waits cancel <id>` or the tool's `cancel` stops one.
   They end with the session, `/reload` included.
+- The model is told to wait only for what has not happened yet. A check whose
+  condition should already hold, such as a container that just answered,
+  stays a single bash call.
 - A GitLab pipeline or job is a case for
   [`gitlab_pipeline`](#gitlab_pipeline) with `action: "wait"`. Without it, a
   pipeline goes through the `gitlab` tool, so the token stays with it:

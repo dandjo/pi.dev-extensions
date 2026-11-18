@@ -310,7 +310,8 @@ export default function (pi: ExtensionAPI) {
 			'{command: "curl -fsS https://example.com/health", until: "success", interval: 10}.',
 		promptSnippet: "Wait for a pipeline, deploy, or service without polling (checks run without model requests)",
 		promptGuidelines: [
-			"wait: use it instead of sleep in bash whenever you wait for something to change (CI pipeline, deploy, container or service start, a file or URL appearing); one wait call replaces a poll per model request.",
+			"wait: use it instead of sleep in bash when you wait for something that has not happened yet (CI pipeline, deploy, container or service start, a file or URL appearing); one wait call replaces a poll per model request.",
+			"wait: not for a single check: when the condition should already hold (a container that just answered, a reload that just ran), check it once with bash or the tool itself, and wait only if it does not hold yet.",
 			"wait: for GitLab pipelines and jobs, use gitlab_pipeline (action wait) where it is loaded, else poll the gitlab tool with wait (tool and args); never curl with a token.",
 		],
 		parameters: Type.Object({
