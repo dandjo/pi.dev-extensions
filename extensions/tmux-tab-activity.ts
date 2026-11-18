@@ -1,22 +1,23 @@
 /**
- * tmux tab activity: while Pi works, a light runs over the name in its tmux tab, one letter at a time, 16 frames a
- * second.
+ * tmux tab activity: while Pi works, a block swings back and forth over the name in its tmux tab, one letter at a
+ * time, 16 frames a second.
  *
  * Pi shows the session in the terminal title, "π - <name> - <directory>", or "π - <directory>" while the session has
- * no name. During a run or a compaction this extension writes that title with tmux style tokens that make one letter
- * bright and bold (#[nodim,bold]), and moves the light on by one letter per frame; between two passes the name stays
- * dark for two frames. It stops when Pi settles, pauses while an AskUserQuestion dialog waits (the tab's bell shows
+ * no name. During a run or a compaction this extension writes that title with tmux style tokens that draw one letter
+ * in reverse video, undimmed (#[nodim,reverse]), and moves the block on by one letter per frame; at either end it
+ * turns without a pause. It stops when Pi settles, pauses while an AskUserQuestion dialog waits (the tab's bell shows
  * then), and puts Pi's own title back. The tokens take no room, so the tab keeps its width.
  *
- * The light shows on inactive tabs, whose text tmux dims; the active tab is bold already, so it does not show there.
+ * The block shows on every tab that is not drawn in reverse video itself; a tab style with reverse (an active tab drawn
+ * as a block, say) hides it.
  *
  * tmux setup. tmux takes a title as the pane title at once, but names the window (#W) after it at most every 500 ms,
  * so the tab has to show the pane title itself. In ~/.tmux.conf or ~/.config/tmux/tmux.conf (tmux 3.2 or later):
  *
- *   # The window name: the session name from Pi's title without the light's tokens, else the command.
+ *   # The window name: the session name from Pi's title without the block's tokens, else the command.
  *   set -g automatic-rename on
  *   set -g automatic-rename-format '#{?#{m:π - *,#{pane_title}},#{s/#\[[^]]*\]//:#{s/^π - (.*) - .*$/\1/:pane_title}},#{pane_current_command}}'
- *   # The tab: the session name from the active pane's title, light included, while tmux names the window;
+ *   # The tab: the session name from the active pane's title, block included, while tmux names the window;
  *   # a window renamed by hand keeps its name (#W).
  *   set -g window-status-format ' #I #{?#{&&:#{automatic-rename},#{m:π - *,#{pane_title}}},#{s/^π - (.*) - .*$/\1/:pane_title},#W}'
  *   set -g window-status-current-format ' #I #{?#{&&:#{automatic-rename},#{m:π - *,#{pane_title}}},#{s/^π - (.*) - .*$/\1/:pane_title},#W}'
@@ -39,7 +40,7 @@ const FRAME_MS = 1000 / 16;
 /** Pi's title starts with this; a Pi build with a name of its own (piConfig.name) is not covered. */
 const APP_TITLE = "π";
 const DARK = "#[default]";
-const LIGHT = "#[default]#[nodim,bold]";
+const BLOCK = "#[default]#[nodim,reverse]";
 /** ask-user-question.ts: a dialog opens and closes (answered, declined, or withdrawn), with its tool call id. */
 const QUESTIONS_OPEN = "ask-user-question:open";
 const QUESTIONS_CLOSE = "ask-user-question:close";
@@ -66,13 +67,13 @@ function plainTitle(name: string | undefined, dir: string): string {
 	return name ? `${APP_TITLE} - ${name} - ${dir}` : `${APP_TITLE} - ${dir}`;
 }
 
-/** The title with the light on letter `at` of the part tmux shows in the tab; outside the letters, no light. */
+/** The title with the block on letter `at` of the part tmux shows in the tab; outside the letters, no block. */
 function frameTitle(name: string | undefined, dir: string, at: number): string {
 	const letters = [...(name ?? dir)];
 	if (letters.includes("#")) return plainTitle(name, dir);
 	const shown =
 		at >= 0 && at < letters.length
-			? `${DARK}${letters.slice(0, at).join("")}${LIGHT}${letters[at]}${DARK}${letters.slice(at + 1).join("")}`
+			? `${DARK}${letters.slice(0, at).join("")}${BLOCK}${letters[at]}${DARK}${letters.slice(at + 1).join("")}`
 			: `${DARK}${letters.join("")}`;
 	return name ? `${APP_TITLE} - ${shown} - ${dir}` : `${APP_TITLE} - ${shown}`;
 }
@@ -86,8 +87,9 @@ export default function (pi: ExtensionAPI) {
 	/** The AskUserQuestion dialogs open now, by tool call id. */
 	const asking = new Set<string>();
 	let timer: ReturnType<typeof setInterval> | null = null;
-	/** The letter the light is on; -1 and the length are the dark frames between passes. */
+	/** The letter the block is on, -1 before the first frame of a run, and the way it moves: 1 right, -1 left. */
 	let at = -1;
+	let step = 1;
 	/** The setup check of the current run, made once per run. */
 	let setup: Promise<boolean> | null = null;
 	/** Counts the calls of update(), so one that waited for the setup check does nothing once a later one came. */
@@ -99,8 +101,16 @@ export default function (pi: ExtensionAPI) {
 	function frame(): void {
 		if (!ctx) return;
 		const name = pi.getSessionName()?.trim() || undefined;
-		const letters = [...(name ?? dir(ctx))];
-		at = at >= letters.length ? -1 : at + 1;
+		const last = [...(name ?? dir(ctx))].length - 1;
+		if (at < 0) {
+			at = 0;
+			step = 1;
+		} else {
+			// A name that got shorter meanwhile (session-title names the session during its first run): from its end.
+			if (at > last) [at, step] = [last, -1];
+			if (at + step > last || at + step < 0) step = -step;
+			at = Math.max(0, Math.min(last, at + step));
+		}
 		ctx.ui.setTitle(frameTitle(name, dir(ctx), at));
 	}
 

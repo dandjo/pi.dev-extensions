@@ -26,7 +26,7 @@ names `extensions/`, which holds one file per extension.
 | `clipboard.ts`              | Adds `clipboard`: the model reads and writes the clipboard, text and images               | Linux: `wl-clipboard` (Wayland) or `xclip`                       |
 | `memory.ts`                 | Keeps a memory per project, shared with Claude Code's auto memory when it is there        | —                                                                |
 | `session-title.ts`          | Names each session after its first prompt and shows it in the terminal title              | —                                                                |
-| `tmux-tab-activity.ts`      | Runs a light over the session's name in its tmux tab while Pi works                       | tmux 3.2 or later, set up as its section describes               |
+| `tmux-tab-activity.ts`      | Swings a block over the session's name in its tmux tab while Pi works                     | tmux 3.2 or later, set up as its section describes               |
 | `session-socket.ts`         | Lets sessions message each other and your Claude Code sessions, as Claude Code does       | Linux or macOS                                                   |
 | `ask-user-question.ts`      | Adds `AskUserQuestion`, Claude Code's multiple-choice questions                           | —                                                                |
 | `subagents.ts`              | Adds the `Agent` tool: subagents in their own Pi process, on a tier or a model of choice  | —                                                                |
@@ -1021,16 +1021,16 @@ background while the agent works.
 
 ## tmux-tab-activity
 
-While Pi works, a light runs over the session's name in its tmux tab, one
-letter at a time, sixteen frames a second, so the tab bar shows which
-sessions are busy. It shows on the inactive tabs, whose text tmux dims; the
-active tab is bold already.
+While Pi works, a block swings back and forth over the session's name in
+its tmux tab, one letter at a time, sixteen frames a second, so the tab bar
+shows which sessions are busy. It shows on every tab not drawn in reverse
+video itself; an active tab drawn as a block hides it.
 
 - Pi shows the session in the terminal title, `π - <name> - <directory>`.
   During a run or a compaction the extension writes that title with tmux
-  style tokens that make one letter bright and bold, and moves the light on
-  by one letter per frame; between two passes the name stays dark for two
-  frames. The tokens take no room, so the tab keeps its width.
+  style tokens that draw one letter in reverse video, undimmed, and moves the
+  block on by one letter per frame; at either end it turns without a pause.
+  The tokens take no room, so the tab keeps its width.
 - It pauses while an AskUserQuestion dialog waits, when the tab's bell takes
   over, and puts Pi's own title back when Pi settles.
 - tmux takes a title as the pane title at once, but names the window after it
@@ -1040,11 +1040,11 @@ active tab is bold already.
   running sessions:
 
   ```conf
-  # The window name: the session name from Pi's title without the light's
+  # The window name: the session name from Pi's title without the block's
   # tokens, else the command.
   set -g automatic-rename on
   set -g automatic-rename-format '#{?#{m:π - *,#{pane_title}},#{s/#\[[^]]*\]//:#{s/^π - (.*) - .*$/\1/:pane_title}},#{pane_current_command}}'
-  # The tab: the session name from the active pane's title, light included,
+  # The tab: the session name from the active pane's title, block included,
   # while tmux names the window; a window renamed by hand keeps its name.
   set -g window-status-format ' #I #{?#{&&:#{automatic-rename},#{m:π - *,#{pane_title}}},#{s/^π - (.*) - .*$/\1/:pane_title},#W}'
   set -g window-status-current-format ' #I #{?#{&&:#{automatic-rename},#{m:π - *,#{pane_title}}},#{s/^π - (.*) - .*$/\1/:pane_title},#W}'
