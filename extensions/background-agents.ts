@@ -832,7 +832,9 @@ export default function (pi: ExtensionAPI) {
 		for (const v of data as SubagentView[]) {
 			seen.add(v.agentId);
 			const old = rows.get(v.agentId);
-			const finishedAt = v.status === "running" ? undefined : (old?.finishedAt ?? now);
+			// A finished agent this runtime did not see run (after /reload) ended when its run did.
+			const ended = v.durationMs !== undefined ? v.startedAt + v.durationMs : now;
+			const finishedAt = v.status === "running" ? undefined : (old?.finishedAt ?? Math.min(now, ended));
 			rows.set(v.agentId, { ...v, finishedAt });
 		}
 		// The agent shown keeps its row, so the panel and its main row stay reachable.

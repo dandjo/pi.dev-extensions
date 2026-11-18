@@ -38,6 +38,11 @@
  * - A subagent is Pi in RPC mode and stays alive after its report, for five minutes without work (three idle ones at
  *   most; PI_SUBAGENT_IDLE_MS sets another time, 0 none), so a resume or a message continues it at once; later it
  *   starts again from its session file.
+ * - /reload hands the subagents on to the next runtime of the session (park, adopt; HANDOVER_KEY on globalThis): the
+ *   processes, the runs in progress, and the finished runs. A background agent works on and stays listed, and its
+ *   report arrives after the reload; its output waits in the pipe meanwhile. A dialog of a subagent that is open at
+ *   the reload is cancelled. Processes no runtime takes over within HANDOVER_TIMEOUT_MS are ended. Quitting, /new,
+ *   /resume, and /fork end the subagents.
  * - The user can write to a subagent ("subagents:message"): while it works the message steers it, and its report
  *   says what the user told it; after its report the message starts it again, and the answer goes into the
  *   conversation without starting a turn. "subagents:interrupt" stops what it is doing and leaves it waiting for an
@@ -114,6 +119,10 @@ const RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 const MAX_REPORT_CHARS = 100_000;
 const MAX_STDERR = 64 * 1024;
 const UPDATE_INTERVAL_MS = 250;
+/** Where a runtime that /reload replaces leaves its subagents for the next one (Handover). */
+const HANDOVER_KEY = Symbol.for("pi.subagents.handover.v1");
+/** Parked subagents no runtime takes over within this time (the extension is gone after /reload) are ended. */
+const HANDOVER_TIMEOUT_MS = 60_000;
 /** The events of a watched subagent that go out as they come ("subagents:event"). */
 const LIVE_EVENTS = new Set([
 	"message_start",
@@ -260,6 +269,10 @@ interface Child {
 	nextId: number;
 	/** The id of the prompt command the current run started with: a rejection of it ends the run. */
 	promptId?: string;
+	/** Output after the last complete line, kept on the process so a handover (listen) loses none of it. */
+	buffer: string;
+	/** The process closed while no runtime listened to it (during a /reload), with its exit code. */
+	exit?: number | null;
 }
 
 /** What the process layer tells the extension. */
@@ -282,8 +295,24 @@ interface Running {
 	child: Child;
 	abort: AbortController;
 	background: boolean;
+	/** What the run's report notes besides its own, from the start of the Agent call. */
+	notes: string[];
 	/** Moves a foreground subagent to the background: its Agent call returns at once. */
 	detach?: () => void;
+}
+
+/**
+ * What a runtime that /reload replaces leaves for the next one of the same session: the subagent processes, their runs
+ * in progress, and the finished runs. The key's version changes with the shape of Child, Run, and this record; a
+ * runtime of another version leaves the record, and its timer ends the processes.
+ */
+interface Handover {
+	sessionId: string;
+	children: Child[];
+	runs: { agentId: string; background: boolean; notes: string[] }[];
+	finished: RunDetails[];
+	background: string[];
+	timer: NodeJS.Timeout;
 }
 
 /** What other extensions see of a subagent ("subagents:state" on the event bus). */
@@ -1077,26 +1106,54 @@ function spawnChild(meta: Meta, systemPromptFile: string, trusted: boolean, pare
 		lastUsed: Date.now(),
 		dialogs: new AbortController(),
 		nextId: 0,
+		buffer: "",
 	};
 	// A write to a process that just exited must not take this one down.
 	proc.stdin?.on("error", () => {});
-	let buffer = "";
 	proc.stdout?.setEncoding("utf8");
-	proc.stdout?.on("data", (chunk: string) => {
-		buffer += chunk;
-		let index = buffer.indexOf("\n");
-		while (index >= 0) {
-			record(child, buffer.slice(0, index).replace(/\r$/, ""), hooks);
-			buffer = buffer.slice(index + 1);
-			index = buffer.indexOf("\n");
-		}
-	});
+	listen(child, hooks);
+	return child;
+}
+
+/**
+ * Hands a process's output and its end to `hooks`, in place of the listeners it had. null parks it while /reload
+ * replaces the runtime: its output waits in the pipe (and with it the close, which follows the last output), and a
+ * close that comes anyway is kept in child.exit for the next listener.
+ */
+function listen(child: Child, hooks: ChildHooks | null): void {
+	const { proc } = child;
+	proc.stdout?.removeAllListeners("data");
+	proc.stderr?.removeAllListeners("data");
+	proc.removeAllListeners("error");
+	proc.removeAllListeners("close");
 	proc.stderr?.on("data", (chunk: Buffer) => {
 		if (child.stderr.length < MAX_STDERR) child.stderr += chunk.toString("utf8");
 	});
+	if (!hooks) {
+		proc.stdout?.pause();
+		proc.on("error", (error) => {
+			child.stderr += String(error);
+			child.exit ??= 1;
+		});
+		proc.on("close", (code: number | null) => {
+			child.exit ??= code;
+		});
+		return;
+	}
+	proc.stdout?.on("data", (chunk: string) => {
+		child.buffer += chunk;
+		let index = child.buffer.indexOf("\n");
+		while (index >= 0) {
+			const line = child.buffer.slice(0, index).replace(/\r$/, "");
+			child.buffer = child.buffer.slice(index + 1);
+			record(child, line, hooks);
+			index = child.buffer.indexOf("\n");
+		}
+	});
 	const closed = (code: number | null) => {
 		if (child.closed) return;
-		if (buffer.trim()) record(child, buffer, hooks);
+		if (child.buffer.trim()) record(child, child.buffer, hooks);
+		child.buffer = "";
 		child.closed = true;
 		if (child.idleTimer) clearTimeout(child.idleTimer);
 		child.idleTimer = null;
@@ -1109,7 +1166,11 @@ function spawnChild(meta: Meta, systemPromptFile: string, trusted: boolean, pare
 		closed(1);
 	});
 	proc.on("close", closed);
-	return child;
+	if (child.exit !== undefined) {
+		closed(child.exit);
+		return;
+	}
+	proc.stdout?.resume();
 }
 
 function quote(text: string, max = 400): string {
@@ -1383,6 +1444,8 @@ export default function (pi: ExtensionAPI) {
 	/** The subagent whose events go out as they come ("subagents:watch"), if any. */
 	let watching: string | null = null;
 	let currentCtx: ExtensionContext | null = null;
+	/** The session this runtime serves, from its session_start: a /reload hands its subagents on within it. */
+	let sessionId: string | undefined;
 	// After session_shutdown (quit, /new, /resume, /fork, /reload) this instance's `pi` is stale and throws on use,
 	// while an aborted child can still deliver output or a pending progress update: such late callbacks must not touch it.
 	let active = true;
@@ -1543,18 +1606,23 @@ export default function (pi: ExtensionAPI) {
 		notes: string[] = [],
 		onProgress?: (details: RunDetails) => void,
 	): Promise<RunResult> {
-		const agentId = child.meta.agentId;
 		const done = beginRun(child, origin, (details) => {
 			if (!active) return;
 			onProgress?.(details);
 			publish();
 		});
+		return follow(child, done, background, abort, notes);
+	}
+
+	/** Lists the run in progress on `child` as running until `done`, then as finished; the process rests or ends. */
+	function follow(child: Child, done: Promise<RunResult>, background: boolean, abort: AbortController, notes: string[]): Promise<RunResult> {
+		const agentId = child.meta.agentId;
 		const run = child.run!;
 		const stop = () => {
 			settle(child, "stopped");
 			end(child, true);
 		};
-		running.set(agentId, { details: run.details, run, child, abort, background });
+		running.set(agentId, { details: run.details, run, child, abort, background, notes });
 		// The same agent ran before: its earlier result gives way to this run.
 		finished = finished.filter((d) => d.agentId !== agentId);
 		if (background) backgroundIds.add(agentId);
@@ -1895,10 +1963,92 @@ export default function (pi: ExtensionAPI) {
 		});
 	}
 
-	pi.on("session_start", (_event, ctx) => {
+	/**
+	 * /reload: leaves the subagent processes, their runs, and the finished runs for the next runtime of this session,
+	 * which takes them over at its session_start. Until then the processes' output waits in the pipe.
+	 */
+	function park(sessionId: string): void {
+		const alive = [...children.values()].filter((child) => !child.closed && !child.ending);
+		for (const child of alive) {
+			if (child.idleTimer) clearTimeout(child.idleTimer);
+			child.idleTimer = null;
+			// Its open dialogs belong to the user interface that goes; the subagent gets them as cancelled.
+			child.dialogs.abort();
+			child.dialogs = new AbortController();
+			listen(child, null);
+		}
+		const runs = [...running.values()]
+			.filter((entry) => alive.includes(entry.child) && entry.child.run === entry.run)
+			.map((entry) => ({ agentId: entry.child.meta.agentId, background: entry.background, notes: entry.notes }));
+		const slot = globalThis as Record<symbol, unknown>;
+		dropHandover();
+		const handover: Handover = {
+			sessionId,
+			children: alive,
+			runs,
+			finished,
+			background: [...backgroundIds],
+			timer: setTimeout(() => {
+				if (slot[HANDOVER_KEY] === handover) dropHandover();
+			}, HANDOVER_TIMEOUT_MS),
+		};
+		handover.timer.unref?.();
+		slot[HANDOVER_KEY] = handover;
+		running.clear();
+		children.clear();
+	}
+
+	/** Ends the processes of a handover no runtime took over, and removes it. */
+	function dropHandover(): void {
+		const slot = globalThis as Record<symbol, unknown>;
+		const old = slot[HANDOVER_KEY] as Handover | undefined;
+		if (!old) return;
+		delete slot[HANDOVER_KEY];
+		clearTimeout(old.timer);
+		for (const child of old.children) shutdown(child, true);
+	}
+
+	/** Takes over what the runtime before this /reload left: the processes listen here again, their reports come here. */
+	function adopt(sessionId: string): void {
+		const slot = globalThis as Record<symbol, unknown>;
+		const handover = slot[HANDOVER_KEY] as Handover | undefined;
+		if (!handover) return;
+		if (handover.sessionId !== sessionId) {
+			dropHandover();
+			return;
+		}
+		delete slot[HANDOVER_KEY];
+		clearTimeout(handover.timer);
+		finished = handover.finished;
+		for (const id of handover.background) backgroundIds.add(id);
+		for (const child of handover.children) {
+			children.set(child.meta.agentId, child);
+			const run = child.run;
+			// A run nothing listed (none should be) is taken as a background one, so its report still comes.
+			const info = handover.runs.find((r) => r.agentId === child.meta.agentId) ?? { background: true, notes: [] };
+			if (run) {
+				// The run goes on here: its progress and its end come to this runtime, and its report into the conversation.
+				run.onProgress = () => {
+					if (active) publish();
+				};
+				const done = new Promise<RunResult>((resolve) => {
+					run.finish = resolve;
+				});
+				void follow(child, done, info.background, new AbortController(), info.notes).then((result) => deliver(result));
+			}
+			listen(child, hooks);
+			if (!child.run) rest(child);
+		}
+		publish();
+	}
+
+	pi.on("session_start", (event, ctx) => {
 		active = true;
 		currentCtx = ctx;
+		sessionId = ctx.sessionManager.getSessionId();
 		if (canSpawn()) register(ctx);
+		if (event.reason === "reload") adopt(sessionId);
+		else dropHandover();
 		if (DEPTH === 0) setTimeout(cleanup, 5_000).unref();
 	});
 
@@ -1907,12 +2057,15 @@ export default function (pi: ExtensionAPI) {
 		if (active && canSpawn() && offeredFamilies(ctx).join(",") !== offeredKey) register(ctx);
 	});
 
-	pi.on("session_shutdown", () => {
-		for (const entry of [...running.values()]) entry.abort.abort();
-		running.clear();
-		for (const child of [...children.values()]) shutdown(child, true);
-		children.clear();
-		publish();
+	pi.on("session_shutdown", (event) => {
+		if (event.reason === "reload" && sessionId) park(sessionId);
+		else {
+			for (const entry of [...running.values()]) entry.abort.abort();
+			running.clear();
+			for (const child of [...children.values()]) shutdown(child, true);
+			children.clear();
+			publish();
+		}
 		active = false;
 		currentCtx = null;
 	});
@@ -1930,7 +2083,7 @@ export default function (pi: ExtensionAPI) {
 			reportOpen.set(message, state);
 		}
 		const said = d.status !== "completed" ? d.status : d.origin === "user" ? "answered you" : d.origin === "self" ? "went on by itself" : d.status;
-		const body = d.output ?? d.error ?? "";
+		const body = d.output || d.error || "";
 		const head =
 			`${theme.fg("customMessageLabel", "\x1b[1m[agent]\x1b[22m")} ${theme.fg("customMessageText", `${d.type} — ${d.description}`)}` +
 			theme.fg(d.status === "completed" ? "dim" : "error", ` · ${said}`) +

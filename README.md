@@ -1319,6 +1319,11 @@ interrupt it, and answer its questions, and it stays alive after its report.
   ending first. A `resume` or a message then continues it at once; later it
   starts again from its session file. `PI_SUBAGENT_IDLE_MS` sets another time,
   and `0` ends the process with its report.
+- `/reload` keeps the subagents: the new runtime takes over their processes,
+  their runs, and the finished ones. A background agent works on, stays in the
+  panel, and its report arrives after the reload. A question a subagent has
+  open at that moment is cancelled. Quitting Pi, `/new`, `/resume`, and `/fork`
+  end the subagents.
 - You can write to a subagent (from its transcript in
   [background-agents](#background-agents)). While it works it reads the
   message after its current step, and its report tells the model, in Pi's
