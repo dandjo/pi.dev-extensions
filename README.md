@@ -1040,6 +1040,10 @@ through the tab's block.
   pane's while it works, else the first other pane's that works, else the
   active pane's. While another pane works, the tab shows that pane's name, so
   its width changes when that run starts and ends.
+- A window renamed by hand keeps its name, and the block runs over that name:
+  tmux puts it on the letter at the same share of the name's length as in the
+  session name, so it swings in the same time, skips letters of a longer name
+  and lingers on those of a shorter one, and the tab keeps its width.
 - tmux takes a title as the pane title at once, but names the window after it
   at most every 500 ms, so the tab has to show the pane title itself. Set up
   tmux 3.2 or later like this, in `~/.tmux.conf` or
@@ -1051,14 +1055,20 @@ through the tab's block.
   # tokens, else the command.
   set -g automatic-rename on
   set -g automatic-rename-format '#{?#{m:π - *,#{pane_title}},#{s/#\[[^]]*\]//:#{s/^π - (.*) - .*$/\1/:pane_title}},#{pane_current_command}}'
-  # The tab, while tmux names the window: the session name from a pane's
-  # title, block included; the active pane's while it works, else the first
-  # other pane's that works (␞ separates their names, the first stays), else
-  # the active pane's. A window renamed by hand keeps its name (#W).
+  # The tab: the session name from a pane's title, block included; the
+  # active pane's while it works, else the first other pane's that works (␞
+  # separates their names, the first stays), else the active pane's.
   %hidden PI_NAME='#{s/^π - (.*) - .*$/\1/:pane_title}'
   %hidden PI_BUSY='#{m:*[[]nodim*,#{pane_title}}'
   %hidden PI_OTHERS='#{s/␞.*$//:#{P:#{?#{m:*[[]nodim*,#{pane_title}},#{s/^π - (.*) - .*$/\1/:pane_title}␞,}}}'
-  %hidden PI_TAB="#{?#{automatic-rename},#{?$PI_BUSY,$PI_NAME,#{?$PI_OTHERS,$PI_OTHERS,#{?#{m:π - *,#{pane_title}},$PI_NAME,#W}}},#W}"
+  %hidden PI_LIVE="#{?$PI_BUSY,$PI_NAME,$PI_OTHERS}"
+  # A window renamed by hand keeps its name (#W); while a pane works, the
+  # block runs over it, on the letter at the same share of its length
+  # (PI_AT). The ␞ marks keep regsub's groups from being empty: tmux writes
+  # the digit of an empty \1 or \3 as text.
+  %hidden PI_AT="#{e|/:#{e|*:#{w:#{s/[#][[]nodim,.*$//:$PI_LIVE}},#{e|-:#{w:window_name},1}},#{?#{e|>:#{w:$PI_LIVE},1},#{e|-:#{w:$PI_LIVE},1},1}}"
+  %hidden PI_HAND="#{s/␞//:#{s/^(␞#{R:.,$PI_AT})(.)(.*␞)$/\\1#{s/^.*([#][[]nodim,[^]]*[]]).*$/\\1/:$PI_LIVE}\\2#[default]\\3/:#{l:␞}#{window_name}#{l:␞}}}"
+  %hidden PI_TAB="#{?$PI_LIVE,#{?#{automatic-rename},$PI_LIVE,$PI_HAND},#{?#{&&:#{automatic-rename},#{m:π - *,#{pane_title}}},$PI_NAME,#W}}"
   set -g window-status-format " #I $PI_TAB"
   # The active tab: the same, with the block turned into a gap (its token
   # starts with nodim,).
