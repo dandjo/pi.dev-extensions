@@ -13,17 +13,26 @@
  * the setup below turns it into a gap there (#[noreverse]), a letter in the tab colour that runs through the tab's
  * block, as long as the active tab is drawn in reverse video.
  *
+ * A window with several panes shows the pane whose Pi works: the active pane's while it works, else the first other
+ * pane's that works, else the active pane's. While another pane works, the tab shows that pane's name, so its width
+ * changes when that run starts and ends.
+ *
  * tmux setup. tmux takes a title as the pane title at once, but names the window (#W) after it at most every 500 ms,
  * so the tab has to show the pane title itself. In ~/.tmux.conf or ~/.config/tmux/tmux.conf (tmux 3.2 or later):
  *
  *   # The window name: the session name from Pi's title without the block's tokens, else the command.
  *   set -g automatic-rename on
  *   set -g automatic-rename-format '#{?#{m:π - *,#{pane_title}},#{s/#\[[^]]*\]//:#{s/^π - (.*) - .*$/\1/:pane_title}},#{pane_current_command}}'
- *   # The tab: the session name from the active pane's title, block included, while tmux names the window;
- *   # a window renamed by hand keeps its name (#W).
- *   set -g window-status-format ' #I #{?#{&&:#{automatic-rename},#{m:π - *,#{pane_title}}},#{s/^π - (.*) - .*$/\1/:pane_title},#W}'
+ *   # The tab, while tmux names the window: the session name from a pane's title, block included; the active pane's
+ *   # while it works, else the first other pane's that works (␞ separates their names, the first stays), else the
+ *   # active pane's. A window renamed by hand keeps its name (#W).
+ *   %hidden PI_NAME='#{s/^π - (.*) - .*$/\1/:pane_title}'
+ *   %hidden PI_BUSY='#{m:*[[]nodim*,#{pane_title}}'
+ *   %hidden PI_OTHERS='#{s/␞.*$//:#{P:#{?#{m:*[[]nodim*,#{pane_title}},#{s/^π - (.*) - .*$/\1/:pane_title}␞,}}}'
+ *   %hidden PI_TAB="#{?#{automatic-rename},#{?$PI_BUSY,$PI_NAME,#{?$PI_OTHERS,$PI_OTHERS,#{?#{m:π - *,#{pane_title}},$PI_NAME,#W}}},#W}"
+ *   set -g window-status-format " #I $PI_TAB"
  *   # The active tab: the same, with the block turned into a gap (its token starts with nodim,).
- *   set -g window-status-current-format ' #I #{s/[#][[]nodim,[^]]*[]]/#[noreverse]/:#{?#{&&:#{automatic-rename},#{m:π - *,#{pane_title}}},#{s/^π - (.*) - .*$/\1/:pane_title},#W}}'
+ *   set -g window-status-current-format " #I #{s/[#][[]nodim,[^]]*[]]/#[noreverse]/:$PI_TAB}"
  *
  * Then `tmux source-file` the configuration, and /reload in running Pi sessions. The extension checks the setup, and
  * reads the active tab's style, when a run starts: it animates only while window-status-format or
