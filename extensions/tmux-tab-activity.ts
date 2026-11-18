@@ -1,14 +1,16 @@
 /**
- * tmux tab activity: while Pi or one of its subagents works, a block swings back and forth over the name in its tmux
- * tab, one letter at a time, 20 frames a second, whatever the name's length.
+ * tmux tab activity: while Pi or one of its subagents works, a block swings back and forth over the number and name of
+ * its tmux tab, one character at a time, 20 frames a second, whatever the name's length.
  *
  * Pi shows the session in the terminal title, "π - <name> - <directory>", or "π - <directory>" while the session has
  * no name. During a run, a compaction, or while a subagent works (subagents.ts, "subagents:state" on the event bus; not
- * one that waits for an instruction or an answer), this extension writes that title with tmux style tokens that draw
- * one letter like the active tab, in window-status-current-style, undimmed (in reverse video while that style is
- * tmux's default, which sets nothing), and moves the block on by one letter per frame; at either end it turns without
- * a pause. It stops when Pi settles and no subagent works, pauses while an AskUserQuestion dialog waits (the tab's bell
- * shows then), and puts Pi's own title back. The tokens take no room, so the tab keeps its width.
+ * one that waits for an instruction or an answer), this extension writes it as "π - ␟ <name> - <directory>" (an unnamed
+ * session's directory as its name), where ␟ stands for the window number and the tab formats below put the number in
+ * its place. The title carries tmux style tokens that draw one character like the active tab, in
+ * window-status-current-style, undimmed (in reverse video while that style is tmux's default, which sets nothing), and
+ * the block moves on by one character per frame over the number, the space, and the name; at either end it turns
+ * without a pause. It stops when Pi settles and no subagent works, pauses while an AskUserQuestion dialog waits (the
+ * tab's bell shows then), and puts Pi's own title back. The tokens take no room, so the tab keeps its width.
  *
  * The block shows on the inactive tabs. The active tab, drawn in the same style, shows it only through its format:
  * the setup below turns it into a gap there (#[noreverse]), a letter in the tab colour that runs through the tab's
@@ -16,35 +18,38 @@
  *
  * A window with several panes shows the pane whose Pi works: the active pane's while it works, else the first other
  * pane's that works, else the active pane's. While another pane works, the tab shows that pane's name, so its width
- * changes when that run starts and ends. A window renamed by hand keeps its name, and the block runs over that name:
- * tmux puts it on the letter at the same share of the name's length as in the session name, so it swings in the same
- * time, skips letters of a longer name and lingers on those of a shorter one, and the tab keeps its width.
+ * changes when that run starts and ends. A window renamed by hand keeps its name, and the block runs over its number
+ * and that name: tmux puts it on the character at the same share of their length as in the title, so it swings in the
+ * same time, skips characters of a longer name and lingers on those of a shorter one, and the tab keeps its width.
  *
  * tmux setup. tmux takes a title as the pane title at once, but names the window (#W) after it at most every 500 ms,
  * so the tab has to show the pane title itself. In ~/.tmux.conf or ~/.config/tmux/tmux.conf (tmux 3.2 or later):
  *
- *   # The window name: the session name from Pi's title without the block's tokens, else the command.
+ *   # The window name: the session name from Pi's title without the block's tokens and the ␟ for the number, else
+ *   # the command.
  *   set -g automatic-rename on
- *   set -g automatic-rename-format '#{?#{m:π - *,#{pane_title}},#{s/#\[[^]]*\]//:#{s/^π - (.*) - .*$/\1/:pane_title}},#{pane_current_command}}'
- *   # The tab: the session name from a pane's title, block included; the active pane's while it works, else the
- *   # first other pane's that works (␞ separates their names, the first stays), else the active pane's.
+ *   set -g automatic-rename-format '#{?#{m:π - *,#{pane_title}},#{s/^␟ //:#{s/#\[[^]]*\]//:#{s/^π - (.*) - .*$/\1/:pane_title}}},#{pane_current_command}}'
+ *   # The tab: the number and session name from a pane's title, block included, the number in place of ␟; the
+ *   # active pane's while it works, else the first other pane's that works (␞ separates their names, the first
+ *   # stays), else the active pane's.
  *   %hidden PI_NAME='#{s/^π - (.*) - .*$/\1/:pane_title}'
  *   %hidden PI_BUSY='#{m:*[[]nodim*,#{pane_title}}'
  *   %hidden PI_OTHERS='#{s/␞.*$//:#{P:#{?#{m:*[[]nodim*,#{pane_title}},#{s/^π - (.*) - .*$/\1/:pane_title}␞,}}}'
  *   %hidden PI_LIVE="#{?$PI_BUSY,$PI_NAME,$PI_OTHERS}"
- *   # A window renamed by hand keeps its name (#W); while a pane works, the block runs over it, on the letter at the
- *   # same share of its length (PI_AT). The ␞ marks keep regsub's groups from being empty: tmux writes the digit of
- *   # an empty \1 or \3 as text.
- *   %hidden PI_AT="#{e|/:#{e|*:#{w:#{s/[#][[]nodim,.*$//:$PI_LIVE}},#{e|-:#{w:window_name},1}},#{?#{e|>:#{w:$PI_LIVE},1},#{e|-:#{w:$PI_LIVE},1},1}}"
- *   %hidden PI_HAND="#{s/␞//:#{s/^(␞#{R:.,$PI_AT})(.)(.*␞)$/\\1#{s/^.*([#][[]nodim,[^]]*[]]).*$/\\1/:$PI_LIVE}\\2#[default]\\3/:#{l:␞}#{window_name}#{l:␞}}}"
- *   %hidden PI_TAB="#{?$PI_LIVE,#{?#{automatic-rename},$PI_LIVE,$PI_HAND},#{?#{&&:#{automatic-rename},#{m:π - *,#{pane_title}}},$PI_NAME,#W}}"
- *   set -g window-status-format " #I $PI_TAB"
+ *   # A window renamed by hand keeps its name (#W); while a pane works, the block runs over its number and name, on
+ *   # the character at the same share of their length (PI_AT). The ␞ marks keep regsub's groups from being empty:
+ *   # tmux writes the digit of an empty \1 or \3 as text.
+ *   %hidden PI_AT="#{e|/:#{e|*:#{w:#{s/[#][[]nodim,.*$//:$PI_LIVE}},#{e|-:#{w:#I #{window_name}},1}},#{?#{e|>:#{w:$PI_LIVE},1},#{e|-:#{w:$PI_LIVE},1},1}}"
+ *   %hidden PI_HAND="#{s/␞//:#{s/^(␞#{R:.,$PI_AT})(.)(.*␞)$/\\1#{s/^.*([#][[]nodim,[^]]*[]]).*$/\\1/:$PI_LIVE}\\2#[default]\\3/:#{l:␞}#I #{window_name}#{l:␞}}}"
+ *   %hidden PI_TAB="#{?$PI_LIVE,#{?#{automatic-rename},#{s/␟/#I/:$PI_LIVE},$PI_HAND},#I #{?#{&&:#{automatic-rename},#{m:π - *,#{pane_title}}},$PI_NAME,#W}}"
+ *   set -g window-status-format " $PI_TAB"
  *   # The active tab: the same, with the block turned into a gap (its token starts with nodim,).
- *   set -g window-status-current-format " #I #{s/[#][[]nodim,[^]]*[]]/#[noreverse]/:$PI_TAB}"
+ *   set -g window-status-current-format " #{s/[#][[]nodim,[^]]*[]]/#[noreverse]/:$PI_TAB}"
  *
  * Then `tmux source-file` the configuration, and /reload in running Pi sessions. The extension checks the setup, and
  * reads the active tab's style, when a run starts: it animates only while window-status-format or
- * window-status-current-format shows the pane title (pane_title or #T), and not while set-titles hands the pane title
+ * window-status-current-format shows the pane title (pane_title or #T) and puts the number in place of ␟, and not
+ * while set-titles hands the pane title
  * on to the outer terminal, whose title would show the tokens as text. Elsewhere it does nothing: outside tmux ($TMUX
  * unset), in subagents and other modes than Pi's terminal UI, and for a name with a #, which tmux would read as the
  * start of a token.
@@ -62,6 +67,8 @@ const FRAME_MS = 1000 / 20;
 /** Pi's title starts with this; a Pi build with a name of its own (piConfig.name) is not covered. */
 const APP_TITLE = "π";
 const DARK = "#[default]";
+/** Stands for the window number in the title; the tab formats of the setup put #I in its place. */
+const NUMBER = "␟";
 /** The block's style while the active tab has none of its own. */
 const PLAIN_BLOCK = "nodim,reverse";
 /** subagents.ts: the subagents of this session, whenever something changes, and the request for that list. */
@@ -78,6 +85,7 @@ function tmuxOption(name: string): Promise<string> {
 }
 
 const showsPaneTitle = (format: string) => /pane_title|#T/.test(format);
+const takesNumber = (format: string) => showsPaneTitle(format) && format.includes(NUMBER);
 
 /**
  * The block's style: the active tab's, undimmed. A style that is empty, tmux's default, or more than plain attributes
@@ -103,7 +111,7 @@ async function tmuxBlock(): Promise<string | null> {
 		"window-status-current-style",
 	];
 	const [inactive, current, setTitles, titlesString, currentStyle] = await Promise.all(options.map(tmuxOption));
-	if (!showsPaneTitle(inactive) && !showsPaneTitle(current)) return null;
+	if (!takesNumber(inactive) && !takesNumber(current)) return null;
 	if (setTitles === "on" && showsPaneTitle(titlesString)) return null;
 	return `#[default]#[${blockStyle(currentStyle)}]`;
 }
@@ -113,15 +121,19 @@ function plainTitle(name: string | undefined, dir: string): string {
 	return name ? `${APP_TITLE} - ${name} - ${dir}` : `${APP_TITLE} - ${dir}`;
 }
 
-/** The title with the block on letter `at` of the part tmux shows in the tab; outside the letters, no block. */
+/**
+ * The title with the block on character `at` of the number, the space, and the name, the part tmux shows in the tab;
+ * outside them, no block. An unnamed session's directory stands in for the name.
+ */
 function frameTitle(name: string | undefined, dir: string, at: number, block: string): string {
-	const letters = [...(name ?? dir)];
-	if (letters.includes("#")) return plainTitle(name, dir);
+	const label = [...(name ?? dir)];
+	if (label.includes("#")) return plainTitle(name, dir);
+	const letters = [NUMBER, " ", ...label];
 	const shown =
 		at >= 0 && at < letters.length
 			? `${DARK}${letters.slice(0, at).join("")}${block}${letters[at]}${DARK}${letters.slice(at + 1).join("")}`
 			: `${DARK}${letters.join("")}`;
-	return name ? `${APP_TITLE} - ${shown} - ${dir}` : `${APP_TITLE} - ${shown}`;
+	return `${APP_TITLE} - ${shown} - ${dir}`;
 }
 
 export default function (pi: ExtensionAPI) {
@@ -150,7 +162,8 @@ export default function (pi: ExtensionAPI) {
 	function frame(): void {
 		if (!ctx) return;
 		const name = pi.getSessionName()?.trim() || undefined;
-		const last = [...(name ?? dir(ctx))].length - 1;
+		// The number and the space come first.
+		const last = [...(name ?? dir(ctx))].length + 1;
 		if (at < 0) {
 			at = 0;
 			step = 1;
