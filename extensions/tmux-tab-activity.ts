@@ -1,13 +1,14 @@
 /**
- * tmux tab activity: while Pi works, a block swings back and forth over the name in its tmux tab, one letter at a
- * time, 16 frames a second.
+ * tmux tab activity: while Pi or one of its subagents works, a block swings back and forth over the name in its tmux
+ * tab, one letter at a time, 16 frames a second.
  *
  * Pi shows the session in the terminal title, "π - <name> - <directory>", or "π - <directory>" while the session has
- * no name. During a run or a compaction this extension writes that title with tmux style tokens that draw one letter
- * like the active tab, in window-status-current-style, undimmed (in reverse video while that style is tmux's default,
- * which sets nothing), and moves the block on by one letter per frame; at either end it turns without a pause. It
- * stops when Pi settles, pauses while an AskUserQuestion dialog waits (the tab's bell shows then), and puts Pi's own
- * title back. The tokens take no room, so the tab keeps its width.
+ * no name. During a run, a compaction, or while a subagent works (subagents.ts, "subagents:state" on the event bus; not
+ * one that waits for an instruction or an answer), this extension writes that title with tmux style tokens that draw
+ * one letter like the active tab, in window-status-current-style, undimmed (in reverse video while that style is
+ * tmux's default, which sets nothing), and moves the block on by one letter per frame; at either end it turns without
+ * a pause. It stops when Pi settles and no subagent works, pauses while an AskUserQuestion dialog waits (the tab's bell
+ * shows then), and puts Pi's own title back. The tokens take no room, so the tab keeps its width.
  *
  * The block shows on the inactive tabs. The active tab, drawn in the same style, shows it only through its format:
  * the setup below turns it into a gap there (#[noreverse]), a letter in the tab colour that runs through the tab's
@@ -62,6 +63,9 @@ const APP_TITLE = "π";
 const DARK = "#[default]";
 /** The block's style while the active tab has none of its own. */
 const PLAIN_BLOCK = "nodim,reverse";
+/** subagents.ts: the subagents of this session, whenever something changes, and the request for that list. */
+const SUBAGENTS_STATE = "subagents:state";
+const SUBAGENTS_REQUEST = "subagents:request";
 /** ask-user-question.ts: a dialog opens and closes (answered, declined, or withdrawn), with its tool call id. */
 const QUESTIONS_OPEN = "ask-user-question:open";
 const QUESTIONS_CLOSE = "ask-user-question:close";
@@ -125,6 +129,8 @@ export default function (pi: ExtensionAPI) {
 	let ctx: ExtensionContext | null = null;
 	let running = false;
 	let compacting = false;
+	/** The subagents that work now: running, and not waiting for an instruction or an answer. */
+	let agents = 0;
 	/** The AskUserQuestion dialogs open now, by tool call id. */
 	const asking = new Set<string>();
 	let timer: ReturnType<typeof setInterval> | null = null;
@@ -137,7 +143,7 @@ export default function (pi: ExtensionAPI) {
 	/** Counts the calls of update(), so one that waited for the setup check does nothing once a later one came. */
 	let generation = 0;
 
-	const working = () => (running || compacting) && asking.size === 0;
+	const working = () => (running || compacting || agents > 0) && asking.size === 0;
 	const dir = (context: ExtensionContext) => path.basename(context.cwd);
 
 	function frame(): void {
@@ -190,14 +196,24 @@ export default function (pi: ExtensionAPI) {
 			asking.delete(typeof id === "string" ? id : "");
 			void update();
 		}),
+		pi.events.on(SUBAGENTS_STATE, (data) => {
+			const list = Array.isArray(data) ? (data as { status?: unknown; waiting?: unknown }[]) : [];
+			const now = list.filter((agent) => agent?.status === "running" && !agent.waiting).length;
+			// Work that starts while nothing moves checks the setup again, as a run of Pi's does.
+			if (agents === 0 && now > 0 && !timer) setup = null;
+			agents = now;
+			void update();
+		}),
 	];
 
 	pi.on("session_start", (_event, context) => {
 		ctx = context;
 		running = false;
 		compacting = false;
+		agents = 0;
 		asking.clear();
 		setup = null;
+		pi.events.emit(SUBAGENTS_REQUEST, undefined);
 	});
 
 	pi.on("agent_start", () => {

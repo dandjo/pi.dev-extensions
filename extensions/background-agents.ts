@@ -14,9 +14,15 @@
  * - Ctrl+B, while a foreground agent runs, moves it to the background, as in Claude Code: the agent selected in the
  *   panel, or else every foreground agent. Its Agent call returns at once, the conversation goes on, and the report
  *   arrives as a message when the agent finishes. Without a foreground agent, Ctrl+B stays the editor's cursor left.
- * - Opening an agent shows its transcript as it is written — the task, the assistant's text, its tool calls and
- *   results — in place of the conversation above the prompt, as Claude Code does; the panel shows the name of the
- *   agent shown in bold. The view follows the end while the agent works and scrolls like the conversation (wheel, PgUp PgDn).
+ * - Opening an agent shows its transcript in place of the conversation above the prompt, as Claude Code does; the
+ *   panel shows the name of the agent shown in bold. The view follows the end while the agent works and scrolls like
+ *   the conversation (wheel, PgUp PgDn).
+ * - The transcript is drawn as Pi draws the conversation, with Pi's own components (UserMessageComponent,
+ *   AssistantMessageComponent, ToolExecutionComponent) and the settings that shape them (hideThinkingBlock,
+ *   outputPad, codeBlockIndent, images). A tool call is drawn with the renderers Pi resolves for that tool in the
+ *   conversation (pi.registerToolRenderer: the resolution of each tool the conversation drew is kept, so other
+ *   extensions' renderers, compact-tools.ts included, apply too), else with Pi's own definition for its built-in
+ *   tools, else in Pi's plain form. Ctrl+O expands and collapses the view's tool calls, as it does the conversation's.
  * - While an agent is shown, the prompt writes to it (subagents:message): a working agent reads the message after
  *   its current step, a finished one starts again with it, and the message stands under the transcript until the
  *   agent has read it. Esc interrupts a working agent (subagents:interrupt), which then waits for an instruction;
@@ -26,8 +32,12 @@
  *   child of the transcript's ScrollView) and restores them, and the conversation's scroll position, on return and at
  *   session_shutdown. Pi keeps writing to its own containers meanwhile. When Pi's tree does not have that shape, the
  *   transcript opens in an overlay instead (↑↓ PgUp PgDn scroll, x stops the agent, Esc returns).
- * - The transcript is read from the agent's session file under ~/.pi/agent/subagents/<session id>/. The panel
- *   replaces the editor with a subclass of Pi's own, so another extension that replaces the editor wins over it.
+ * - The transcript is read from the agent's session file under ~/.pi/agent/subagents/<session id>/, on from where it
+ *   was read last, every TRANSCRIPT_POLL_MS. What the agent is writing right now comes from its events
+ *   (subagents:watch, then subagents:event): its text, thinking, and tool arguments as they stream, its tools' output
+ *   as it comes, until the file holds the message. Over RPC a message_update carries only the change, which is applied
+ *   to the message. The panel replaces the editor with a subclass of Pi's own, so another extension that replaces the
+ *   editor wins over it.
  * - Scheduled tasks (scheduled-tasks.ts, scheduled-tasks:state) are listed below the agents with their schedule and
  *   next run: Enter opens the task in its manager, x deletes it. The panel also exists while only tasks are scheduled.
  * - The mouse: the row under the pointer gets the selection marker, and when the pointer leaves the panel the marker
@@ -37,19 +47,31 @@
  *   prompt, and a click on "↓ to manage" in the status line (statusline:status-click) moves into the panel.
  */
 
+import type { AssistantMessage } from "@earendil-works/pi-ai";
 import {
+	AssistantMessageComponent,
+	createBashToolDefinition,
+	createEditToolDefinition,
+	createFindToolDefinition,
+	createGrepToolDefinition,
+	createLsToolDefinition,
+	createReadToolDefinition,
+	createWriteToolDefinition,
 	type ExtensionAPI,
 	type ExtensionContext,
 	CustomEditor,
 	getAgentDir,
 	getMarkdownTheme,
+	ToolExecutionComponent,
+	type ToolDefinition,
+	type ToolRenderers,
+	UserMessageComponent,
 	type KeybindingsManager,
 } from "@earendil-works/pi-coding-agent";
 import {
 	type Component,
 	isViewportTUI,
 	Key,
-	Markdown,
 	matchesKey,
 	type TUI,
 	type TuiMouseEvent,
@@ -58,8 +80,7 @@ import {
 	visibleWidth,
 	wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
-import * as os from "node:os";
+import { closeSync, openSync, readdirSync, readSync, statSync } from "node:fs";
 import * as path from "node:path";
 
 /**
@@ -111,7 +132,16 @@ const FINISHED_TTL_MS = 30_000;
 const TICK_MS = 1_000;
 const TRANSCRIPT_POLL_MS = 500;
 const MAX_NAME_WIDTH = 28;
-const RESULT_PREVIEW_LINES = 4;
+/** Pi's own tools, drawn with their definitions while Pi has not drawn a call of them in this session yet. */
+const BUILT_IN_TOOLS: Record<string, (cwd: string) => ToolDefinition<any, any, any>> = {
+	bash: createBashToolDefinition,
+	read: createReadToolDefinition,
+	edit: createEditToolDefinition,
+	write: createWriteToolDefinition,
+	grep: createGrepToolDefinition,
+	find: createFindToolDefinition,
+	ls: createLsToolDefinition,
+};
 /** How long a message the agent has not read yet stays under its transcript. */
 const SENT_TTL_MS = 10 * 60 * 1000;
 
@@ -142,30 +172,6 @@ function compact(n: number): string {
 	return `${(n / 1_000_000).toFixed(1)}m`;
 }
 
-function summarize(name: string, args: Record<string, unknown>): string {
-	const short = (value: unknown, max = 80) => {
-		const text = String(value ?? "").replace(/\s+/g, " ").trim();
-		return text.length > max ? `${text.slice(0, max - 1)}…` : text;
-	};
-	const home = (p: unknown) => String(p ?? "").replace(os.homedir(), "~");
-	switch (name) {
-		case "bash":
-			return `$ ${short(args.command)}`;
-		case "read":
-		case "write":
-		case "edit":
-			return `${name} ${home(args.path)}`;
-		case "grep":
-			return `grep /${short(args.pattern, 40)}/ ${home(args.path ?? ".")}`;
-		case "find":
-			return `find ${short(args.pattern, 40)} ${home(args.path ?? ".")}`;
-		case "Agent":
-			return `Agent ${args.subagent_type ?? "general-purpose"}: ${short(args.description, 50)}`;
-		default:
-			return `${name} ${short(JSON.stringify(args), 70)}`;
-	}
-}
-
 // --- Transcript -----------------------------------------------------------------------------------------------------------
 
 function sessionFileOf(sessionId: string, agentId: string): string | undefined {
@@ -178,7 +184,6 @@ function sessionFileOf(sessionId: string, agentId: string): string | undefined {
 	}
 }
 
-/** The transcript of a subagent session file as terminal lines for `width`, and how many user messages it holds. */
 /**
  * A message to the agent as Pi draws the user's messages: a block in the user message colours across the width, one
  * column and one line of padding. note, when given, follows inside the block, dimmed.
@@ -191,52 +196,403 @@ function userBlock(text: string, width: number, theme: Theme, note?: string): st
 	return [fill(""), ...body.map(fill), fill("")];
 }
 
-function transcriptLines(file: string, width: number, theme: Theme): { lines: string[]; users: number } {
-	let text: string;
-	try {
-		text = readFileSync(file, "utf8");
-	} catch {
-		return { lines: [theme.fg("dim", "The agent's session file is not there yet.")], users: 0 };
-	}
-	let users = 0;
-	const lines: string[] = [];
-	const wrap = (s: string) => (s ? wrapTextWithAnsi(s, width) : [""]);
-	for (const raw of text.split("\n")) {
-		if (!raw.trim()) continue;
-		let entry: any;
+/** The parts of Pi's settings the conversation is drawn with. */
+interface Look {
+	hideThinkingBlock: boolean;
+	outputPad: number;
+	showImages: boolean;
+	imageWidthCells?: number;
+	markdown: ReturnType<typeof getMarkdownTheme>;
+}
+
+/** What a transcript takes from the extension. */
+interface TranscriptHost {
+	tui: TUI;
+	cwd: string;
+	look: Look;
+	/** The renderers Pi draws calls of this tool with, as far as they are known. */
+	renderers(toolName: string): ToolRenderers | ToolDefinition<any, any, any> | undefined;
+}
+
+/** A message the subagent writes or wrote, with its tool calls, until the session file holds it. */
+interface Streaming {
+	component: AssistantMessageComponent;
+	message: AssistantMessage;
+	tools: ToolExecutionComponent[];
+	ended: boolean;
+	/** The arguments of the tool calls being written, as the text that came so far, by content index. */
+	raw: Map<number, string>;
+}
+
+/**
+ * The arguments of a tool call from the start of their JSON text, for the live view: what has come so far, with open
+ * strings, arrays, and objects closed, and an unfinished last member dropped; undefined when nothing parses yet.
+ */
+function partialJson(text: string): Record<string, unknown> | undefined {
+	const parse = (candidate: string) => {
 		try {
-			entry = JSON.parse(raw);
+			const value = JSON.parse(candidate);
+			return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : undefined;
 		} catch {
+			return undefined;
+		}
+	};
+	const closers: string[] = [];
+	let inString = false;
+	let escaped = false;
+	/** Where the last member at any depth ended: the text up to there parses once closed. */
+	let lastCut = -1;
+	let cutClosers: string[] = [];
+	for (let i = 0; i < text.length; i++) {
+		const c = text[i];
+		if (inString) {
+			if (escaped) escaped = false;
+			else if (c === "\\") escaped = true;
+			else if (c === '"') inString = false;
 			continue;
 		}
-		if (entry.type !== "message") continue;
-		const message = entry.message;
-		if (message.role === "user") {
-			users++;
-			const content = typeof message.content === "string" ? message.content : message.content.map((p: any) => (p.type === "text" ? p.text : "[image]")).join("\n");
-			lines.push(...userBlock(content, width, theme), "");
-		} else if (message.role === "assistant") {
-			for (const part of message.content ?? []) {
-				if (part.type === "text" && part.text?.trim()) {
-					lines.push(...new Markdown(part.text, 0, 0, getMarkdownTheme()).render(width));
-					lines.push("");
-				} else if (part.type === "thinking" && part.thinking) {
-					lines.push(theme.fg("dim", `· thinking (${compact(part.thinking.length)} chars)`));
-				} else if (part.type === "toolCall") {
-					lines.push(...wrap(theme.fg("muted", "→ ") + theme.fg("toolTitle", summarize(part.name, part.arguments ?? {}))));
-				}
-			}
-			if (message.stopReason === "error" && message.errorMessage) lines.push(...wrap(theme.fg("error", message.errorMessage)));
-		} else if (message.role === "toolResult") {
-			const body = (message.content ?? []).map((p: any) => (p.type === "text" ? p.text : "[image]")).join("\n");
-			const all = body.split("\n").filter((l: string) => l.trim());
-			const shown = all.slice(0, RESULT_PREVIEW_LINES);
-			for (const line of shown) lines.push(truncateToWidth(theme.fg(message.isError ? "error" : "dim", `  ${line}`), width, "…"));
-			if (all.length > shown.length) lines.push(theme.fg("dim", `  … ${all.length - shown.length} more lines`));
-			lines.push("");
+		if (c === '"') inString = true;
+		else if (c === "{") closers.push("}");
+		else if (c === "[") closers.push("]");
+		else if (c === "}" || c === "]") closers.pop();
+		else if (c === ",") {
+			lastCut = i;
+			cutClosers = [...closers];
 		}
 	}
-	return { lines: lines.length ? lines : [theme.fg("dim", "Nothing yet.")], users };
+	const close = (list: string[]) => [...list].reverse().join("");
+	// An escape the text breaks off in goes: a string closed after a lone backslash does not parse.
+	const open = inString && escaped ? text.slice(0, -1) : text;
+	return (
+		parse(text) ??
+		parse(open + (inString ? '"' : "") + close(closers)) ??
+		(lastCut >= 0 ? parse(text.slice(0, lastCut) + close(cutClosers)) : undefined)
+	);
+}
+
+/**
+ * A subagent's transcript drawn with Pi's own components, as the conversation is: the messages of its session file in
+ * their order, read on as the file grows, and after them what the subagent is writing right now, from its events
+ * ("subagents:event"), until the file holds it. Pi writes a message to the file right after its message_end event.
+ */
+class Transcript {
+	/** The components of the messages in the session file, in order. */
+	private readonly body: Component[] = [];
+	private readonly tail: Streaming[] = [];
+	/** The tool calls without a result in the session file yet, by tool call id. */
+	private readonly pending = new Map<string, ToolExecutionComponent>();
+	/** The timestamps of the assistant messages in the session file: a late event of one of them is dropped. */
+	private readonly filed = new Set<number>();
+	private file: string | undefined;
+	private offset = 0;
+	/** The start of a line the file does not end yet. */
+	private rest = Buffer.alloc(0);
+	private expanded = false;
+	/** The user messages in the session file. */
+	users = 0;
+
+	constructor(
+		private readonly locate: () => string | undefined,
+		private readonly host: TranscriptHost,
+	) {}
+
+	/** True once the session file exists. */
+	get started(): boolean {
+		return this.file !== undefined;
+	}
+
+	/** Reads what the session file gained since the last call; true when it gained a line. */
+	read(): boolean {
+		this.file ??= this.locate();
+		if (!this.file) return false;
+		let size: number;
+		try {
+			size = statSync(this.file).size;
+		} catch {
+			return false;
+		}
+		// A file written anew starts the transcript again.
+		if (size < this.offset) this.restart();
+		if (size === this.offset) return false;
+		const chunk = Buffer.alloc(size - this.offset);
+		let got = 0;
+		let fd: number | undefined;
+		try {
+			fd = openSync(this.file, "r");
+			got = readSync(fd, chunk, 0, chunk.length, this.offset);
+		} catch {
+			return false;
+		} finally {
+			if (fd !== undefined) closeSync(fd);
+		}
+		this.offset += got;
+		const data = Buffer.concat([this.rest, chunk.subarray(0, got)]);
+		let start = 0;
+		let lines = 0;
+		for (let end = data.indexOf(10); end >= 0; end = data.indexOf(10, start)) {
+			this.entry(data.subarray(start, end).toString("utf8"));
+			start = end + 1;
+			lines++;
+		}
+		this.rest = Buffer.from(data.subarray(start));
+		return lines > 0;
+	}
+
+	private restart(): void {
+		this.body.length = 0;
+		this.pending.clear();
+		this.filed.clear();
+		this.offset = 0;
+		this.rest = Buffer.alloc(0);
+		this.users = 0;
+	}
+
+	private entry(line: string): void {
+		if (!line.trim()) return;
+		let entry: any;
+		try {
+			entry = JSON.parse(line);
+		} catch {
+			return;
+		}
+		if (entry?.type !== "message" || !entry.message) return;
+		const message = entry.message;
+		if (message.role === "user") {
+			this.users++;
+			const text =
+				typeof message.content === "string"
+					? message.content
+					: (message.content ?? []).map((part: any) => (part.type === "text" ? part.text : "[image]")).join("\n");
+			this.body.push(new UserMessageComponent(text, this.host.look.markdown, this.host.look.outputPad));
+		} else if (message.role === "assistant") {
+			this.assistant(message as AssistantMessage);
+		} else if (message.role === "toolResult") {
+			const tool = this.pending.get(message.toolCallId);
+			if (!tool) return;
+			tool.updateResult(message);
+			this.pending.delete(message.toolCallId);
+		}
+	}
+
+	/** An assistant message of the session file: the one written live takes its place, with its tool calls. */
+	private assistant(message: AssistantMessage): void {
+		this.filed.add(message.timestamp);
+		let at = this.tail.findIndex((s) => s.message.timestamp === message.timestamp);
+		if (at < 0 && this.tail[0]?.ended) at = 0;
+		let component: AssistantMessageComponent;
+		if (at >= 0) {
+			component = this.tail[at].component;
+			component.updateContent(message, false);
+			this.tail.splice(0, at + 1);
+		} else {
+			component = new AssistantMessageComponent(message, this.host.look.hideThinkingBlock, this.host.look.markdown, undefined, this.host.look.outputPad);
+		}
+		this.body.push(component);
+		const failed = message.stopReason === "aborted" || message.stopReason === "error";
+		for (const part of message.content ?? []) {
+			if (part.type !== "toolCall") continue;
+			const tool = this.pending.get(part.id) ?? this.tool(part.name, part.id, part.arguments);
+			this.body.push(tool);
+			if (failed) {
+				const text = message.errorMessage || (message.stopReason === "aborted" ? "Operation aborted" : "Error");
+				tool.updateResult({ content: [{ type: "text", text }], isError: true });
+				this.pending.delete(part.id);
+			} else {
+				this.pending.set(part.id, tool);
+			}
+		}
+	}
+
+	private tool(name: string, id: string, args: unknown): ToolExecutionComponent {
+		const look = this.host.look;
+		const tool = new ToolExecutionComponent(
+			name,
+			id,
+			args,
+			{ showImages: look.showImages, imageWidthCells: look.imageWidthCells, outputPad: look.outputPad },
+			this.host.renderers(name),
+			this.host.tui,
+			this.host.cwd,
+		);
+		tool.setExpanded(this.expanded);
+		return tool;
+	}
+
+	/** The message being written: the last one of the tail that has not ended, or a new one for `message`. */
+	private streaming(message: AssistantMessage): Streaming {
+		const last = this.tail.at(-1);
+		if (last && !last.ended) return last;
+		const component = new AssistantMessageComponent(undefined, this.host.look.hideThinkingBlock, this.host.look.markdown, undefined, this.host.look.outputPad);
+		const streaming: Streaming = { component, message: { ...message, content: [...(message.content ?? [])] }, tools: [], ended: false, raw: new Map() };
+		this.tail.push(streaming);
+		return streaming;
+	}
+
+	/**
+	 * A change of the message being written, from the RPC stream: there message_update carries only what changed (the
+	 * docs' "Reconstruct streaming messages"), the deltas of its text, thinking, and tool call blocks. False when the
+	 * update changes nothing shown.
+	 */
+	private apply(streaming: Streaming, update: any): boolean {
+		const content = streaming.message.content as any[];
+		const at = update?.contentIndex;
+		if (typeof at !== "number") return false;
+		const block = content[at];
+		switch (update.type) {
+			case "text_start":
+				content[at] = { type: "text", text: "" };
+				return true;
+			case "text_delta":
+				if (block?.type !== "text") return false;
+				content[at] = { ...block, text: block.text + String(update.delta ?? "") };
+				return true;
+			case "text_end":
+				content[at] = { ...block, type: "text", text: String(update.content ?? block?.text ?? "") };
+				return true;
+			case "thinking_start":
+				content[at] = { type: "thinking", thinking: "" };
+				return true;
+			case "thinking_delta":
+				if (block?.type !== "thinking") return false;
+				content[at] = { ...block, thinking: block.thinking + String(update.delta ?? "") };
+				return true;
+			case "thinking_end":
+				content[at] = { ...block, type: "thinking", thinking: String(update.content ?? block?.thinking ?? "") };
+				return true;
+			case "toolcall_start":
+				content[at] = { type: "toolCall", id: String(update.id ?? ""), name: String(update.toolName ?? ""), arguments: {} };
+				streaming.raw.set(at, "");
+				return true;
+			case "toolcall_delta": {
+				if (block?.type !== "toolCall") return false;
+				const raw = (streaming.raw.get(at) ?? "") + String(update.delta ?? "");
+				streaming.raw.set(at, raw);
+				const args = partialJson(raw);
+				if (!args) return false;
+				content[at] = { ...block, arguments: args };
+				return true;
+			}
+			case "toolcall_end":
+				if (!update.toolCall) return false;
+				content[at] = update.toolCall;
+				streaming.raw.delete(at);
+				return true;
+			default:
+				return false;
+		}
+	}
+
+	/** The tool calls of the message being written: new ones get their component, known ones their arguments. */
+	private syncTools(streaming: Streaming): void {
+		for (const part of streaming.message.content ?? []) {
+			if (part.type !== "toolCall" || !part.id) continue;
+			const known = this.pending.get(part.id);
+			if (known) {
+				known.updateArgs(part.arguments);
+				continue;
+			}
+			const tool = this.tool(part.name, part.id, part.arguments);
+			streaming.tools.push(tool);
+			this.pending.set(part.id, tool);
+		}
+	}
+
+	/** An event of the subagent as it comes, handled as Pi handles its own; true when the transcript changed. */
+	event(event: any): boolean {
+		switch (event?.type) {
+			case "message_start": {
+				const message = event.message as AssistantMessage | undefined;
+				if (message?.role !== "assistant" || this.filed.has(message.timestamp)) return false;
+				const streaming = this.streaming(message);
+				streaming.component.updateContent(streaming.message, true);
+				this.syncTools(streaming);
+				return true;
+			}
+			case "message_update": {
+				const streaming = this.tail.at(-1);
+				if (!streaming || streaming.ended) return false;
+				// In process the event carries the whole message; over RPC only the change.
+				const whole = event.message as AssistantMessage | undefined;
+				if (whole?.role === "assistant") streaming.message = { ...whole, content: [...(whole.content ?? [])] };
+				else if (!this.apply(streaming, event.assistantMessageEvent)) return false;
+				if (event.usage) streaming.message.usage = event.usage;
+				streaming.component.updateContent(streaming.message, true);
+				this.syncTools(streaming);
+				return true;
+			}
+			case "message_end": {
+				const message = event.message as AssistantMessage | undefined;
+				if (message?.role !== "assistant" || this.filed.has(message.timestamp)) return false;
+				const streaming = this.streaming(message);
+				streaming.message = message;
+				streaming.ended = true;
+				streaming.component.updateContent(message, false);
+				if (message.stopReason === "aborted" || message.stopReason === "error") {
+					const text = message.errorMessage || (message.stopReason === "aborted" ? "Operation aborted" : "Error");
+					for (const tool of streaming.tools) tool.updateResult({ content: [{ type: "text", text }], isError: true });
+				} else {
+					for (const tool of streaming.tools) tool.setArgsComplete();
+				}
+				// The file holds the message by now, as a rule: it takes its place at once.
+				this.read();
+				return true;
+			}
+			case "tool_execution_start": {
+				if (event.parentToolCallId) return false;
+				let tool = this.pending.get(event.toolCallId);
+				if (!tool) {
+					tool = this.tool(event.toolName, event.toolCallId, event.args);
+					this.pending.set(event.toolCallId, tool);
+					const last = this.tail.at(-1);
+					if (last) last.tools.push(tool);
+					else this.body.push(tool);
+				}
+				tool.markExecutionStarted();
+				return true;
+			}
+			case "tool_execution_update": {
+				const tool = this.pending.get(event.toolCallId);
+				if (!tool) return false;
+				tool.updateResult({ ...event.partialResult, isError: false }, true);
+				return true;
+			}
+			case "tool_execution_end": {
+				const tool = this.pending.get(event.toolCallId);
+				if (!tool) return false;
+				tool.updateResult({ ...event.result, isError: event.isError, durationMs: event.durationMs });
+				return true;
+			}
+			case "agent_end": {
+				// A message cut off before its end does not reach the file: it goes, as in Pi's own view.
+				const cut = this.tail.filter((s) => !s.ended);
+				if (cut.length === 0) return false;
+				const tools = new Set(cut.flatMap((s) => s.tools));
+				for (const [id, tool] of this.pending) if (tools.has(tool)) this.pending.delete(id);
+				this.tail.splice(0, this.tail.length, ...this.tail.filter((s) => s.ended));
+				return true;
+			}
+			default:
+				return false;
+		}
+	}
+
+	private components(): Component[] {
+		return [...this.body, ...this.tail.flatMap((s) => [s.component, ...s.tools])];
+	}
+
+	/** Opens or closes the tool output, as ctrl+o does in the conversation. */
+	toggleExpanded(): void {
+		this.expanded = !this.expanded;
+		for (const component of this.components()) (component as { setExpanded?: (expanded: boolean) => void }).setExpanded?.(this.expanded);
+	}
+
+	render(width: number): string[] {
+		return this.components().flatMap((component) => component.render(width));
+	}
+
+	invalidate(): void {
+		for (const component of this.components()) component.invalidate();
+	}
 }
 
 // --- Extension -----------------------------------------------------------------------------------------------------------------
@@ -337,6 +693,19 @@ export default function (pi: ExtensionAPI) {
 	let ticker: NodeJS.Timeout | null = null;
 	/** What was written to an agent from its transcript and is not in its session file yet, by agentId. */
 	const sent = new Map<string, { text: string; after: number; at: number }[]>();
+	/**
+	 * The renderers Pi resolved for each tool it drew in this session, as the remaining resolvers and the tool give them.
+	 */
+	const resolved = new Map<string, () => ToolRenderers | undefined>();
+	/** The transcript shown now, which takes the events of its subagent as they come. */
+	let watched: { agentId: string; transcript: Transcript; tui: TUI } | null = null;
+
+	// Pi resolves a tool's renderers whenever it draws a call of it: the resolution is kept, so a subagent's calls of the
+	// tool are drawn as the conversation draws them.
+	pi.registerToolRenderer((toolName, next) => {
+		resolved.set(toolName, next);
+		return next();
+	});
 
 	const agentRows = (): Row[] => {
 		const now = Date.now();
@@ -655,6 +1024,11 @@ export default function (pi: ExtensionAPI) {
 
 		handleInput(data: string): void {
 			if (matchesKey(data, Key.ctrl("b")) && moveToBackground()) return;
+			if (swap && this.kb.matches(data, "app.tools.expand")) {
+				swap.component.transcript.toggleExpanded();
+				swap.tui.requestRender();
+				return;
+			}
 			if (selected >= 0 && panelKey(data, this.kb)) return;
 			if (swap && selected < 0 && matchesKey(data, Key.escape) && !this.isShowingAutocomplete()) {
 				escapeAgent(swap.agentId);
@@ -747,49 +1121,73 @@ export default function (pi: ExtensionAPI) {
 		return theme.fg("dim", `${compact(current.tokens)} tokens · ${current.toolCount} tool${current.toolCount === 1 ? "" : "s"} · ${current.model.split("/").at(-1)}`);
 	}
 
-	/** An agent's transcript in place of the conversation: a header, then what its session file holds so far. */
+	/** A transcript of the agent in `row`, drawn with Pi's settings for `tui`. */
+	function transcriptFor(row: Row, sessionId: string, tui: TUI): Transcript {
+		const settings = pi.getSettings();
+		const markdown = getMarkdownTheme();
+		const indent = settings.markdown?.codeBlockIndent;
+		const cwd = ctx?.cwd ?? process.cwd();
+		const builtIn = new Map<string, ToolDefinition<any, any, any>>();
+		return new Transcript(() => sessionFileOf(sessionId, row.agentId), {
+			tui,
+			cwd,
+			look: {
+				hideThinkingBlock: settings.hideThinkingBlock ?? false,
+				outputPad: settings.outputPad === 0 ? 0 : 1,
+				showImages: settings.terminal?.showImages ?? true,
+				imageWidthCells: settings.terminal?.imageWidthCells,
+				markdown: indent === undefined ? markdown : { ...markdown, codeBlockIndent: indent },
+			},
+			renderers: (name) => {
+				const next = resolved.get(name);
+				if (next) return next();
+				const make = BUILT_IN_TOOLS[name];
+				if (!make) return undefined;
+				if (!builtIn.has(name)) builtIn.set(name, make(cwd));
+				return builtIn.get(name);
+			},
+		});
+	}
+
+	/** The first key bound to `keybinding`, for a help line. */
+	function keyOf(keybindings: KeybindingsManager, keybinding: Parameters<KeybindingsManager["getKeys"]>[0]): string {
+		return keybindings.getKeys(keybinding)[0] ?? "ctrl+o";
+	}
+
+	/** Takes the events of the agent a transcript shows as they come (subagents:watch); null ends that. */
+	function watch(next: { agentId: string; transcript: Transcript; tui: TUI } | null): void {
+		watched = next;
+		pi.events.emit("subagents:watch", next?.agentId ?? null);
+	}
+
+	/** The transcript's lines for `width`, or what stands there, after `pad`, while it has none. */
+	function transcriptBody(transcript: Transcript, width: number, theme: Theme, pad = ""): string[] {
+		if (!transcript.started) return [pad + theme.fg("dim", "The agent has not started writing yet.")];
+		const lines = transcript.render(width);
+		return lines.length ? lines : [pad + theme.fg("dim", "Nothing yet.")];
+	}
+
+	/** An agent's transcript in place of the conversation: a header, then its messages as the conversation draws them. */
 	class AgentView implements Component {
 		/** The width of the last render, which is the transcript's content width. */
 		width = 80;
-		private file: string | undefined;
-		private cache: { width: number; size: number; lines: string[]; users: number } | undefined;
 
 		/** The user messages in the session file at the last render. */
 		get users(): number {
-			return this.cache?.users ?? 0;
+			return this.transcript.users;
 		}
 
 		constructor(
 			readonly row: Row,
-			private readonly sessionId: string,
-		) {
-			this.file = sessionFileOf(sessionId, row.agentId);
-		}
-
-		private size(): number {
-			try {
-				return this.file ? statSync(this.file).size : -1;
-			} catch {
-				return -1;
-			}
-		}
-
-		/** True when the session file changed since the last render. */
-		changed(): boolean {
-			if (!this.file) this.file = sessionFileOf(this.sessionId, this.row.agentId);
-			return this.size() !== (this.cache?.size ?? -2);
-		}
+			readonly transcript: Transcript,
+		) {}
 
 		render(width: number): string[] {
 			this.width = width;
 			const theme = ctx?.ui.theme;
 			if (!theme) return [];
 			const inner = Math.max(1, width - 2);
-			const size = this.size();
-			if (!this.cache || this.cache.width !== inner || this.cache.size !== size) {
-				const body = this.file ? transcriptLines(this.file, inner, theme) : { lines: [theme.fg("dim", "The agent has not started writing yet.")], users: 0 };
-				this.cache = { width: inner, size, lines: body.lines.map((line) => ` ${line}`), users: body.users };
-			}
+			this.transcript.read();
 			const current = rows.get(this.row.agentId) ?? this.row;
 			const working = current.status === "running";
 			const help = !working
@@ -804,18 +1202,20 @@ export default function (pi: ExtensionAPI) {
 			];
 			// What the user wrote and the agent has not read: it reads a message after its current step.
 			const now = Date.now();
-			const unread = (sent.get(this.row.agentId) ?? []).filter((m) => this.cache!.users <= m.after && now - m.at < SENT_TTL_MS);
+			const users = this.transcript.users;
+			const unread = (sent.get(this.row.agentId) ?? []).filter((m) => users <= m.after && now - m.at < SENT_TTL_MS);
 			if (unread.length) sent.set(this.row.agentId, unread);
 			else sent.delete(this.row.agentId);
 			const waiting = unread.flatMap((m) => [
-				...userBlock(m.text.trim(), inner, theme, working ? "not read yet: the agent reads it after its current step" : "starting the agent…").map((line) => ` ${line}`),
 				"",
+				...userBlock(m.text.trim(), inner, theme, working ? "not read yet: the agent reads it after its current step" : "starting the agent…").map((line) => ` ${line}`),
 			]);
-			return ["", ...head.map((line) => truncateToWidth(` ${line}`, width, "…")), "", ...this.cache.lines, ...waiting];
+			const body = transcriptBody(this.transcript, width, theme, " ");
+			return ["", ...head.map((line) => truncateToWidth(` ${line}`, width, "…")), "", ...body, ...waiting];
 		}
 
 		invalidate(): void {
-			this.cache = undefined;
+			this.transcript.invalidate();
 		}
 	}
 
@@ -823,7 +1223,7 @@ export default function (pi: ExtensionAPI) {
 	function showAgent(row: Row): boolean {
 		const tui = editorTui ?? widgetTui;
 		if (!ctx || !tui) return false;
-		const component = new AgentView(row, ctx.sessionManager.getSessionId());
+		const component = new AgentView(row, transcriptFor(row, ctx.sessionManager.getSessionId(), tui));
 		if (swap) {
 			if (swap.agentId === row.agentId) return true;
 			swap.doc.children = [component];
@@ -849,9 +1249,10 @@ export default function (pi: ExtensionAPI) {
 		current.doc.mouseLayout = undefined;
 		if (current.timer) clearInterval(current.timer);
 		current.timer = setInterval(() => {
-			if (swap === current && current.component === component && component.changed()) tui.requestRender();
+			if (swap === current && current.component === component && component.transcript.read()) tui.requestRender();
 		}, TRANSCRIPT_POLL_MS);
 		current.timer.unref?.();
+		watch({ agentId: row.agentId, transcript: component.transcript, tui });
 		current.scroll?.scrollToEnd();
 		viewing = row.agentId;
 		refresh();
@@ -865,6 +1266,7 @@ export default function (pi: ExtensionAPI) {
 		if (!current) return;
 		swap = null;
 		if (current.timer) clearInterval(current.timer);
+		if (watched?.transcript === current.component.transcript) watch(null);
 		const added = current.doc.children.filter((child) => child !== current.component);
 		current.doc.children = [...current.saved, ...added];
 		current.doc.mouseLayout = undefined;
@@ -905,29 +1307,19 @@ export default function (pi: ExtensionAPI) {
 		refresh();
 		try {
 			await ctx.ui.custom<void>(
-				(tui, theme, _keybindings, done) => {
-					let file = sessionFileOf(sessionId, row.agentId);
+				(tui, theme, keybindings, done) => {
+					const transcript = transcriptFor(row, sessionId, tui);
+					watch({ agentId: row.agentId, transcript, tui });
 					let offset = 0;
 					let follow = true;
-					let cache: { width: number; lines: string[]; size: number } | undefined;
-					const size = () => {
-						try {
-							return file ? statSync(file).size : -1;
-						} catch {
-							return -1;
-						}
-					};
+					let lastWidth = 80;
 					const body = (width: number) => {
-						const now = size();
-						if (!cache || cache.width !== width || cache.size !== now) {
-							const inner = Math.max(1, width - 4);
-							cache = { width, size: now, lines: file ? transcriptLines(file, inner, theme).lines : [theme.fg("dim", "The agent has not started writing yet.")] };
-						}
-						return cache.lines;
+						lastWidth = width;
+						transcript.read();
+						return transcriptBody(transcript, Math.max(1, width - 4), theme);
 					};
 					const timer = setInterval(() => {
-						if (!file) file = sessionFileOf(sessionId, row.agentId);
-						if (size() !== (cache?.size ?? -2)) tui.requestRender();
+						if (transcript.read()) tui.requestRender();
 					}, TRANSCRIPT_POLL_MS);
 					return {
 						render(width: number): string[] {
@@ -947,7 +1339,7 @@ export default function (pi: ExtensionAPI) {
 								width,
 								`${current.type} › ${current.description || row.agentId}`,
 								[...head, ...viewport(lines, offset, rowsAvail)],
-								`↑↓ PgUp PgDn scroll · End follow · ${current.status === "running" ? "x stop · " : ""}${isForeground(current) ? "ctrl+b background · " : ""}Esc back${more}`,
+								`↑↓ PgUp PgDn scroll · End follow · ${keyOf(keybindings, "app.tools.expand")} tool output · ${current.status === "running" ? "x stop · " : ""}${isForeground(current) ? "ctrl+b background · " : ""}Esc back${more}`,
 							);
 						},
 						handleInput(data: string): void {
@@ -967,7 +1359,12 @@ export default function (pi: ExtensionAPI) {
 								if (isForeground(rows.get(row.agentId) ?? row)) pi.events.emit("subagents:background", row.agentId);
 								return;
 							}
-							const lines = body(cache?.width ?? 80);
+							if (keybindings.matches(data, "app.tools.expand")) {
+								transcript.toggleExpanded();
+								tui.requestRender();
+								return;
+							}
+							const lines = body(lastWidth);
 							const rowsAvail = Math.max(3, bodyRows(tui) - 2);
 							const next = scrollKey(data, offset, lines.length, rowsAvail);
 							if (next !== undefined) {
@@ -977,10 +1374,11 @@ export default function (pi: ExtensionAPI) {
 							}
 						},
 						invalidate(): void {
-							cache = undefined;
+							transcript.invalidate();
 						},
 						dispose(): void {
 							clearInterval(timer);
+							if (watched?.transcript === transcript) watch(null);
 						},
 					};
 				},
@@ -1042,6 +1440,12 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.events.on("subagents:state", onState);
+	pi.events.on("subagents:event", (data) => {
+		const { agentId, event } = (data ?? {}) as { agentId?: unknown; event?: unknown };
+		const current = watched;
+		if (!current || agentId !== current.agentId) return;
+		if (current.transcript.event(event)) current.tui.requestRender();
+	});
 	pi.events.on("scheduled-tasks:state", onScheduled);
 	pi.events.on("statusline:status-click", (data) => {
 		if ((data as { key?: unknown } | undefined)?.key === STATUS_KEY && selected < 0) focusPanel();

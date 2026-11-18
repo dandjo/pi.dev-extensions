@@ -26,7 +26,7 @@ names `extensions/`, which holds one file per extension.
 | `clipboard.ts`              | Adds `clipboard`: the model reads and writes the clipboard, text and images               | Linux: `wl-clipboard` (Wayland) or `xclip`                       |
 | `memory.ts`                 | Keeps a memory per project, shared with Claude Code's auto memory when it is there        | —                                                                |
 | `session-title.ts`          | Names each session after its first prompt and shows it in the terminal title              | —                                                                |
-| `tmux-tab-activity.ts`      | Swings a block over the session's name in its tmux tab while Pi works                     | tmux 3.2 or later, set up as its section describes               |
+| `tmux-tab-activity.ts`      | Swings a block over the session's name in its tmux tab while Pi or a subagent works       | tmux 3.2 or later, set up as its section describes               |
 | `session-socket.ts`         | Lets sessions message each other and your Claude Code sessions, as Claude Code does       | Linux or macOS                                                   |
 | `ask-user-question.ts`      | Adds `AskUserQuestion`, Claude Code's multiple-choice questions                           | —                                                                |
 | `subagents.ts`              | Adds the `Agent` tool: subagents in their own Pi process, on a tier or a model of choice  | —                                                                |
@@ -1021,21 +1021,22 @@ background while the agent works.
 
 ## tmux-tab-activity
 
-While Pi works, a block swings back and forth over the session's name in
-its tmux tab, one letter at a time, sixteen frames a second, so the tab bar
-shows which sessions are busy. The block has the colours of the active
-tab; on the active tab itself it runs as a gap, a letter in the tab colour
-through the tab's block.
+While Pi or one of its subagents works, a block swings back and forth over the
+session's name in its tmux tab, one letter at a time, sixteen frames a second,
+so the tab bar shows which sessions are busy. The block has the colours of the
+active tab; on the active tab itself it runs as a gap, a letter in the tab
+colour through the tab's block.
 
 - Pi shows the session in the terminal title, `π - <name> - <directory>`.
-  During a run or a compaction the extension writes that title with tmux
-  style tokens that draw one letter like the active tab, in
+  During a run, a compaction, or while a subagent works (one that waits for
+  your instruction or an answer does not count), the extension writes that
+  title with tmux style tokens that draw one letter like the active tab, in
   `window-status-current-style` (in reverse video while that style is tmux's
   default, which sets nothing), undimmed, and moves the block on by one letter
   per frame; at either end it turns without a pause. The tokens take no room,
   so the tab keeps its width.
 - It pauses while an AskUserQuestion dialog waits, when the tab's bell takes
-  over, and puts Pi's own title back when Pi settles.
+  over, and puts Pi's own title back when Pi settles and no subagent works.
 - A window with several panes shows the pane whose Pi works: the active
   pane's while it works, else the first other pane's that works, else the
   active pane's. While another pane works, the tab shows that pane's name, so
@@ -1305,6 +1306,14 @@ interrupt it, and answer its questions, and it stays alive after its report.
   with its history. `fork: true` starts a new one with a copy of the
   conversation so far, up to the turn that makes the call; a fork starts no
   fork of its own.
+- The `Agent` call looks like Pi's own tools: the call as its title, while
+  the agent works its latest two tool calls, afterwards the first line of
+  the report with Pi's note on the hidden lines (Ctrl+O shows the tool
+  calls and the whole report), and the figures last (tool calls, tokens,
+  time, model, agent ID), as `bash` ends with `Took …`. The colour of the
+  tool box shows the state. A background agent's report arrives as an
+  `[agent]` block, as Pi shows `[skill]` and `[compaction]`: its first line,
+  and the whole report on Ctrl+O or a click.
 - A subagent runs as Pi in RPC mode and stays alive after its report: five
   minutes without work, three idle ones at most, the one used longest ago
   ending first. A `resume` or a message then continues it at once; later it
@@ -1393,9 +1402,15 @@ Claude Code, the prompt writes to the agent shown, and Esc interrupts it.
   still knows as a dialog, also the finished ones the panel no longer shows.
 - An open agent replaces the conversation above the prompt, as in Claude
   Code; the prompt and the panel stay where they are. The view shows the
-  agent's type, task, state, tokens, and model, then its transcript as it is
-  written: the task, the assistant's text, each tool call as one line, and
-  the first lines of each result. It follows the end while the agent works
+  agent's type, task, state, tokens, and model, then its transcript, drawn
+  as Pi draws the conversation, with Pi's own components and your settings:
+  the messages, thinking as you have it shown, each tool call in its box as
+  the tool draws it (a diff for `edit`, the output of `bash` as it comes),
+  collapsed as in the conversation; Ctrl+O expands and collapses them. Text,
+  thinking, and tool arguments stream as the agent writes them. A tool of an
+  extension is drawn as in the conversation once the conversation has drawn
+  a call of it; until then it has Pi's plain form, its name and arguments.
+  The view follows the end while the agent works
   and scrolls like the conversation (wheel, PgUp PgDn), beside the
   [diff](#diff) panel too. The panel shows the name of the agent or of
   `main` in bold, whichever conversation is shown; ↓ Enter (`main`) shows the

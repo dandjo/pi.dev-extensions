@@ -46,6 +46,11 @@
  * - A subagent's dialogs (AskUserQuestion, a hook's confirmation) open in this session, titled with the agent, one
  *   at a time; without a user interface here they are declined. Its AskUserQuestion questions come as one request
  *   (QUESTIONS_RELAY) and are shown by ask-user-question.ts in the dialog this session's own questions get.
+ * - The Agent call is drawn like Pi's own tools: its call as the title, while it runs its latest two tool calls, then
+ *   the first line of its report with Pi's note on the lines that are hidden, and its figures last, as bash ends with
+ *   "Took …"; the colour of the tool box shows the state. A background agent's report arrives as an [agent] block, as
+ *   Pi draws [skill] and [compaction]. The tool's renderers are also registered through pi.registerToolRenderer, since
+ *   Pi redraws the conversation on /reload before session_start registers the tool again.
  * - Subagent sessions live in ~/.pi/agent/subagents/<parent session id>/ and are removed after 30 days.
  * - /agents lists the agent types and this session's subagents; /agents stop <id> stops a background one.
  *
@@ -57,7 +62,11 @@
  * running and recently finished ones whenever something changes, "subagents:request" asks for it, "subagents:stop"
  * with an agentId stops a running one, "subagents:interrupt" with an agentId interrupts it, "subagents:message" with
  * { agentId, text, images? } writes to it, and "subagents:background" with an agentId moves a running foreground one
- * to the background (background-agents.ts shows the panel below the prompt).
+ * to the background (background-agents.ts shows the panel below the prompt). "subagents:watch" with an agentId, or
+ * null to end it, asks for the events of that one subagent as they come: "subagents:event" then carries
+ * { agentId, event } for each of its message_start, message_update, message_end, tool_execution_start,
+ * tool_execution_update, tool_execution_end, and agent_end events, so its transcript can stream as the conversation
+ * does.
  *
  * Providers extend the Agent tool through the event bus as well, whatever the load order: an extension emits
  * "subagents:provider" with a SubagentsProvider at load and again on every "subagents:provider-request".
@@ -74,12 +83,16 @@ import {
 	getMarkdownTheme,
 	parseFrontmatter,
 	type Theme,
+	type ToolRenderers,
+	type ToolRenderResultOptions,
 } from "@earendil-works/pi-coding-agent";
 import {
+	Box,
 	Container,
 	Key,
 	Markdown,
 	matchesKey,
+	MouseRegion,
 	Spacer,
 	Text,
 	truncateToWidth,
@@ -87,7 +100,7 @@ import {
 	visibleWidth,
 	wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
-import { Type } from "typebox";
+import { type Static, Type } from "typebox";
 import { type ChildProcess, spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
@@ -101,6 +114,16 @@ const RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 const MAX_REPORT_CHARS = 100_000;
 const MAX_STDERR = 64 * 1024;
 const UPDATE_INTERVAL_MS = 250;
+/** The events of a watched subagent that go out as they come ("subagents:event"). */
+const LIVE_EVENTS = new Set([
+	"message_start",
+	"message_update",
+	"message_end",
+	"tool_execution_start",
+	"tool_execution_update",
+	"tool_execution_end",
+	"agent_end",
+]);
 /**
  * How long a subagent process stays alive without work: five minutes, or PI_SUBAGENT_IDLE_MS (0 ends the process
  * with its report; a resume or a message then starts it again from its session file).
@@ -249,6 +272,8 @@ interface ChildHooks {
 	rejected: (child: Child, error: string) => void;
 	/** The process has exited. */
 	closed: (child: Child) => void;
+	/** Any other event of the subagent, before the run looks at it. */
+	event: (child: Child, event: { type?: unknown }) => void;
 }
 
 interface Running {
@@ -745,6 +770,19 @@ function addUsage(total: Usage, usage: Partial<Usage> | undefined): void {
 	total.cost.total += usage.cost?.total ?? 0;
 }
 
+/**
+ * The first line of a Markdown report as plain text, for a collapsed preview: without heading, code, emphasis, and
+ * link marks.
+ */
+function previewLine(markdown: string): string {
+	const line = markdown.split("\n").find((l) => l.trim()) ?? "";
+	return line
+		.replace(/^\s*#+\s+/, "")
+		.replace(/`([^`]*)`/g, "$1")
+		.replace(/(\*\*|__)(.+?)\1/g, "$2")
+		.replace(/\[([^\]]*)\]\([^)]*\)/g, "$1");
+}
+
 function formatTokens(n: number): string {
 	if (n < 1000) return String(n);
 	if (n < 1_000_000) return `${(n / 1000).toFixed(n < 10_000 ? 1 : 0)}k`;
@@ -917,6 +955,7 @@ function record(child: Child, line: string, hooks: ChildHooks): void {
 		}
 		return;
 	}
+	hooks.event(child, event);
 	if (event.type === "agent_start" && !child.run && !child.ending) hooks.selfRun(child);
 	const run = child.run;
 	if (!run) return;
@@ -1188,6 +1227,8 @@ function agentParams(families: string[], canFork = !process.env.PI_SUBAGENT_FORK
 }
 
 type Params = ReturnType<typeof agentParams>;
+/** What Pi passes a tool's renderers last: the call's state and the key hints. */
+type RenderContext = Parameters<NonNullable<ToolRenderers["renderResult"]>>[3];
 
 /** Where custom agents are read from, for /agents: user directories and project directories relative to a project. */
 function agentDirHints(cwd: string): { user: string[]; project: string[] } {
@@ -1339,6 +1380,8 @@ export default function (pi: ExtensionAPI) {
 	/** The subagent processes that are alive, working or idle, by agentId. */
 	const children = new Map<string, Child>();
 	let finished: RunDetails[] = [];
+	/** The subagent whose events go out as they come ("subagents:watch"), if any. */
+	let watching: string | null = null;
 	let currentCtx: ExtensionContext | null = null;
 	// After session_shutdown (quit, /new, /resume, /fork, /reload) this instance's `pi` is stale and throws on use,
 	// while an aborted child can still deliver output or a pending progress update: such late callbacks must not touch it.
@@ -1482,6 +1525,10 @@ export default function (pi: ExtensionAPI) {
 		closed: (child) => {
 			if (children.get(child.meta.agentId) === child) children.delete(child.meta.agentId);
 		},
+		event: (child, event) => {
+			if (!active || watching !== child.meta.agentId || !LIVE_EVENTS.has(String(event.type))) return;
+			pi.events.emit("subagents:event", { agentId: child.meta.agentId, event });
+		},
 	};
 
 	/**
@@ -1554,6 +1601,9 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	pi.events.on("subagents:request", () => publish());
+	pi.events.on("subagents:watch", (agentId) => {
+		watching = typeof agentId === "string" ? agentId : null;
+	});
 	pi.events.on("subagents:stop", (agentId) => {
 		if (typeof agentId === "string") running.get(agentId)?.abort.abort();
 	});
@@ -1603,6 +1653,71 @@ export default function (pi: ExtensionAPI) {
 
 	/** The families the registered Agent tool offers. */
 	let offeredKey = "";
+
+	// The Agent tool's renderers. Pi rebuilds the conversation on /reload before session_start registers the tool: the
+	// resolver draws its calls there as well, as long as the tool is not registered.
+	const agentRenderers = {
+		renderCall(args: Static<Params>, theme: Theme) {
+			const type = args.subagent_type || "general-purpose";
+			let text = `${theme.fg("toolTitle", theme.bold("Agent "))}${theme.fg("accent", args.resume ? `resume ${args.resume}` : type)}`;
+			if (args.description) text += theme.fg("muted", ` — ${args.description}`);
+			if (args.run_in_background) text += theme.fg("dim", " (background)");
+			if (args.fork && !args.resume) text += theme.fg("dim", " (fork)");
+			if (args.model) text += theme.fg("dim", ` [${args.model}]`);
+			return new Text(text, 0, 0);
+		},
+
+		// Drawn like Pi's own tools: no state glyphs, the colour of the tool box shows the state; the output in the tool
+		// output colour, a cut preview with Pi's expand hint, and the figures last, as bash ends with "Took …".
+		renderResult(result: AgentToolResult<RunDetails>, { expanded, isPartial }: ToolRenderResultOptions, theme: Theme, context: RenderContext) {
+			const d = result.details;
+			if (!d?.agentId) {
+				const first = result.content[0];
+				return new Text(first?.type === "text" ? theme.fg("toolOutput", first.text) : "", 0, 0);
+			}
+			const figures = theme.fg(
+				"muted",
+				[
+					`${d.toolCount} tool call${d.toolCount === 1 ? "" : "s"}`,
+					d.tokens ? `${formatTokens(d.tokens)} tokens` : "",
+					d.durationMs ? `took ${formatDuration(d.durationMs)}` : "",
+					d.model.split("/").at(-1) ?? "",
+					d.agentId,
+				]
+					.filter(Boolean)
+					.join(" · "),
+			);
+			if (d.status === "background") return new Text(`${theme.fg("toolOutput", "Running in the background")}\n${figures}`, 0, 0);
+			const calls = (limit: number) => d.toolCalls.slice(-limit).map((c) => theme.fg(c.error ? "error" : "toolOutput", c.summary));
+			// Running: its latest two calls and the figures, so the row fits as compact-tools.ts cuts rows.
+			if (d.status === "running" || isPartial) return new Text([...calls(2), figures].join("\n"), 0, 0);
+			const error = d.error && d.status !== "completed" ? `${theme.fg("error", d.error)}\n` : "";
+			// Collapsed, the row keeps to the call and three lines, as compact-tools.ts cuts rows: the first line of the
+			// report (or the error), Pi's note on the lines that are hidden, and the figures.
+			if (!expanded) {
+				const lines = (d.output ?? "").split("\n").filter((line) => line.trim());
+				const first = error ? error.trimEnd() : theme.fg("toolOutput", previewLine(d.output ?? ""));
+				const hidden = error ? lines.length : lines.length - 1;
+				const shown = [first];
+				if (hidden > 0) {
+					shown.push(`${theme.fg("muted", `... (${hidden} more line${hidden === 1 ? "" : "s"},`)} ${context.keyHint("app.tools.expand", "to expand")}${theme.fg("muted", ")")}`);
+				}
+				return new Text([...shown, figures].join("\n"), 0, 0);
+			}
+			const box = new Container();
+			if (error) box.addChild(new Text(error.trimEnd(), 0, 0));
+			if (d.toolCalls.length > 0) {
+				box.addChild(new Text(calls(50).join("\n"), 0, 0));
+				box.addChild(new Spacer(1));
+			}
+			box.addChild(new Markdown(d.output ?? "", 0, 0, getMarkdownTheme(), { color: (text) => theme.fg("toolOutput", text) }));
+			box.addChild(new Spacer(1));
+			box.addChild(new Text(figures, 0, 0));
+			return box;
+		},
+	};
+	// The arguments of a call are those the tool gets, so the cast from the tool's typed renderers holds.
+	pi.registerToolRenderer((toolName, next) => next() ?? (toolName === "Agent" ? (agentRenderers as ToolRenderers) : undefined));
 
 	function register(ctx: ExtensionContext): void {
 		const agents = discoverAgents(ctx.cwd, ctx.isProjectTrusted());
@@ -1776,53 +1891,7 @@ export default function (pi: ExtensionAPI) {
 				return out;
 			},
 
-			renderCall(args, theme) {
-				const type = args.subagent_type || "general-purpose";
-				let text = `${theme.fg("toolTitle", theme.bold("Agent "))}${theme.fg("accent", args.resume ? `resume ${args.resume}` : type)}`;
-				if (args.description) text += theme.fg("muted", ` — ${args.description}`);
-				if (args.run_in_background) text += theme.fg("dim", " (background)");
-				if (args.fork && !args.resume) text += theme.fg("dim", " (fork)");
-				if (args.model) text += theme.fg("dim", ` [${args.model}]`);
-				return new Text(text, 0, 0);
-			},
-
-			renderResult(result, { expanded, isPartial }, theme) {
-				const d = result.details;
-				if (!d?.agentId) {
-					const first = result.content[0];
-					return new Text(first?.type === "text" ? first.text : "", 0, 0);
-				}
-				const icon =
-					d.status === "completed"
-						? theme.fg("success", "✓")
-						: d.status === "running" || isPartial
-							? theme.fg("warning", "⧗")
-							: d.status === "background"
-								? theme.fg("accent", "◆")
-								: theme.fg("error", "✗");
-				const stats = [
-					`${d.toolCount} tool call${d.toolCount === 1 ? "" : "s"}`,
-					d.tokens ? `${formatTokens(d.tokens)} tokens` : "",
-					d.durationMs ? formatDuration(d.durationMs) : "",
-					d.model.split("/").at(-1) ?? "",
-				].filter(Boolean);
-				const head = `${icon} ${theme.fg("accent", d.type)} ${theme.fg("dim", d.agentId)} ${theme.fg("muted", stats.join(" · "))}`;
-				if (d.status === "background") return new Text(`${head}\n${theme.fg("muted", "running in the background")}`, 0, 0);
-				const calls = (limit: number) =>
-					d.toolCalls.slice(-limit).map((c) => `${theme.fg("muted", "→ ")}${c.error ? theme.fg("error", c.summary) : theme.fg("toolOutput", c.summary)}`);
-				if (d.status === "running" || isPartial) return new Text([head, ...calls(5)].join("\n"), 0, 0);
-				const error = d.error && d.status !== "completed" ? theme.fg("error", `\n${d.error}`) : "";
-				if (!expanded) {
-					const preview = (d.output ?? "").split("\n").slice(0, 3).join("\n");
-					return new Text(`${head}${error}\n${theme.fg("toolOutput", preview)}\n${theme.fg("dim", "(Ctrl+O to expand)")}`, 0, 0);
-				}
-				const box = new Container();
-				box.addChild(new Text(`${head}${error}`, 0, 0));
-				box.addChild(new Text(calls(50).join("\n"), 0, 0));
-				box.addChild(new Spacer(1));
-				box.addChild(new Markdown(d.output ?? "", 0, 0, getMarkdownTheme()));
-				return box;
-			},
+			...agentRenderers,
 		});
 	}
 
@@ -1848,17 +1917,46 @@ export default function (pi: ExtensionAPI) {
 		currentCtx = null;
 	});
 
-	pi.registerMessageRenderer<RunDetails>("subagent", (message, { expanded }, theme) => {
+	// A report is drawn like Pi's own blocks (skill, compaction): a box in the custom message colours with the [agent]
+	// label first. A click opens or closes one report; ctrl+o rebuilds every message with its new state, which overrides
+	// the click.
+	const reportOpen = new WeakMap<object, { expanded: boolean; open: boolean }>();
+	pi.registerMessageRenderer<RunDetails>("subagent", (message, { expanded, outputPad, keyText }, theme) => {
 		const d = message.details;
 		if (!d) return undefined;
-		const icon = d.status === "completed" ? theme.fg("success", "◆") : theme.fg("error", "◆");
+		let state = reportOpen.get(message);
+		if (!state || state.expanded !== expanded) {
+			state = { expanded, open: expanded };
+			reportOpen.set(message, state);
+		}
 		const said = d.status !== "completed" ? d.status : d.origin === "user" ? "answered you" : d.origin === "self" ? "went on by itself" : d.status;
-		const head = `${icon} ${theme.fg("accent", `Agent ${d.type}`)} ${theme.fg("dim", d.agentId)} ${theme.fg("muted", `${said} — ${d.description}`)}`;
-		if (!expanded) return new Text(`${head}\n${theme.fg("dim", (d.output ?? d.error ?? "").split("\n")[0] ?? "")}`, 0, 0);
-		const box = new Container();
-		box.addChild(new Text(head, 0, 0));
-		box.addChild(new Markdown(d.output ?? d.error ?? "", 0, 0, getMarkdownTheme()));
-		return box;
+		const body = d.output ?? d.error ?? "";
+		const head =
+			`${theme.fg("customMessageLabel", "\x1b[1m[agent]\x1b[22m")} ${theme.fg("customMessageText", `${d.type} — ${d.description}`)}` +
+			theme.fg(d.status === "completed" ? "dim" : "error", ` · ${said}`) +
+			theme.fg("dim", ` · ${d.agentId}`);
+		const content = new Container();
+		const draw = (open: boolean) => {
+			content.clear();
+			content.addChild(new Text(head, 0, 0));
+			content.addChild(new Spacer(1));
+			if (open) {
+				content.addChild(new Markdown(body, 0, 0, getMarkdownTheme(), { color: (text) => theme.fg("customMessageText", text) }));
+			} else {
+				const first = previewLine(body);
+				content.addChild(new Text(`${theme.fg("customMessageText", first)}${theme.fg("dim", ` (${keyText("app.tools.expand")} to expand)`)}`, 0, 0));
+			}
+		};
+		draw(state.open);
+		const box = new Box(outputPad, 1, (text) => theme.bg("customMessageBg", text));
+		box.addChild(content);
+		const clicked = state;
+		return new MouseRegion(box, (event) => {
+			if (event.type !== "click" || event.button !== "left") return undefined;
+			clicked.open = !clicked.open;
+			draw(clicked.open);
+			return { handled: true };
+		});
 	});
 
 	if (DEPTH > 0) return;
