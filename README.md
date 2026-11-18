@@ -3,15 +3,15 @@
 Extensions for [Pi](https://pi.dev), the terminal coding agent, that bring
 over what Claude Code does: Pi runs Claude models on your Claude subscription,
 shows a status line with the subscription limits, searches and reads the web,
-keeps a memory per project as Claude Code does, titles every session, lets
-sessions message each other, runs Claude Code's hooks, brings over Claude
-Code's subagents, questions, side questions, goals, loops, scheduled prompts,
-diff view, agent panel, and Remote Control for the Claude app, reads and
-changes OpenProject and GitLab, reads and writes the clipboard, controls your
-Chrome, keeps requests alive through network trouble, keeps long
-conversations small, waits for pipelines and deploys without spending
-requests, keeps itself and the Claude Agent SDK current, and fixes how the
-provider resumes after edited history.
+keeps a memory per project as Claude Code does, titles every session and
+lights up its tmux tab while it works, lets sessions message each other, runs
+Claude Code's hooks, brings over Claude Code's subagents, questions, side
+questions, goals, loops, scheduled prompts, diff view, agent panel, and Remote
+Control for the Claude app, reads and changes OpenProject and GitLab, reads
+and writes the clipboard, controls your Chrome, keeps requests alive through
+network trouble, keeps long conversations small, waits for pipelines and
+deploys without spending requests, keeps itself and the Claude Agent SDK
+current, and fixes how the provider resumes after edited history.
 
 Install it as a Pi package (step 3 of the setup below): its `package.json`
 names `extensions/`, which holds one file per extension.
@@ -26,6 +26,7 @@ names `extensions/`, which holds one file per extension.
 | `clipboard.ts`              | Adds `clipboard`: the model reads and writes the clipboard, text and images               | Linux: `wl-clipboard` (Wayland) or `xclip`                       |
 | `memory.ts`                 | Keeps a memory per project, shared with Claude Code's auto memory when it is there        | —                                                                |
 | `session-title.ts`          | Names each session after its first prompt and shows it in the terminal title              | —                                                                |
+| `tmux-tab-activity.ts`      | Runs a light over the session's name in its tmux tab while Pi works                       | tmux 3.2 or later, set up as its section describes               |
 | `session-socket.ts`         | Lets sessions message each other and your Claude Code sessions, as Claude Code does       | Linux or macOS                                                   |
 | `ask-user-question.ts`      | Adds `AskUserQuestion`, Claude Code's multiple-choice questions                           | —                                                                |
 | `subagents.ts`              | Adds the `Agent` tool: subagents in their own Pi process, on a tier or a model of choice  | —                                                                |
@@ -92,7 +93,7 @@ What differs is the tool around the model.
   panels, and dialogs, see and change what goes to the model, and react to
   every step of a session. Claude Code offers hooks, skills, MCP servers, and
   a status line script; its interface and agent loop stay closed. All
-  twenty-nine extensions here are such files: the GitLab and OpenProject
+  thirty extensions here are such files: the GitLab and OpenProject
   tools, the plan limits in the status line, the diff panel, scheduled
   prompts, messages between sessions. Each can be read in one go, and a fix
   is a commit here, not a wait for the next Claude Code release.
@@ -126,7 +127,7 @@ Where Claude Code stays the better choice:
 ## Set up Pi
 
 Follow the steps in order — together they are the complete setup: Pi itself,
-the Claude subscription, all twenty-nine extensions, and the browser connection.
+the Claude subscription, all thirty extensions, and the browser connection.
 Every step except the Chrome switch in step 4 is a
 shell command, so an agent can carry them out as well.
 
@@ -193,7 +194,7 @@ Install this repository as a Pi package:
 pi install git:github.com/dandjo/pi.dev-extensions
 ```
 
-Pi clones it into `~/.pi/agent/git/` and loads all twenty-nine extensions from
+Pi clones it into `~/.pi/agent/git/` and loads all thirty extensions from
 there; `pi list` shows the package. [package-update](#package-update) brings
 new versions at every start, new and renamed extensions included, and reloads
 Pi once it is idle; `/update` fetches them at once. There is no build step
@@ -1017,6 +1018,51 @@ background while the agent works.
   mode skip them.
 - The prompt, cut at 4,000 characters, goes only to the provider of the
   current model.
+
+## tmux-tab-activity
+
+While Pi works, a light runs over the session's name in its tmux tab, one
+letter at a time, sixteen frames a second, so the tab bar shows which
+sessions are busy. It shows on the inactive tabs, whose text tmux dims; the
+active tab is bold already.
+
+- Pi shows the session in the terminal title, `π - <name> - <directory>`.
+  During a run or a compaction the extension writes that title with tmux
+  style tokens that make one letter bright and bold, and moves the light on
+  by one letter per frame; between two passes the name stays dark for two
+  frames. The tokens take no room, so the tab keeps its width.
+- It pauses while an AskUserQuestion dialog waits, when the tab's bell takes
+  over, and puts Pi's own title back when Pi settles.
+- tmux takes a title as the pane title at once, but names the window after it
+  at most every 500 ms, so the tab has to show the pane title itself. Set up
+  tmux 3.2 or later like this, in `~/.tmux.conf` or
+  `~/.config/tmux/tmux.conf`, then `tmux source-file` it and `/reload`
+  running sessions:
+
+  ```conf
+  # The window name: the session name from Pi's title without the light's
+  # tokens, else the command.
+  set -g automatic-rename on
+  set -g automatic-rename-format '#{?#{m:π - *,#{pane_title}},#{s/#\[[^]]*\]//:#{s/^π - (.*) - .*$/\1/:pane_title}},#{pane_current_command}}'
+  # The tab: the session name from the active pane's title, light included,
+  # while tmux names the window; a window renamed by hand keeps its name.
+  set -g window-status-format ' #I #{?#{&&:#{automatic-rename},#{m:π - *,#{pane_title}}},#{s/^π - (.*) - .*$/\1/:pane_title},#W}'
+  set -g window-status-current-format ' #I #{?#{&&:#{automatic-rename},#{m:π - *,#{pane_title}}},#{s/^π - (.*) - .*$/\1/:pane_title},#W}'
+  ```
+
+- It checks the setup when a run starts, and animates only while a tab format
+  shows the pane title (`pane_title` or `#T`) and `set-titles` does not hand
+  the pane title on to the outer terminal, whose title would show the tokens
+  as text. Outside tmux, in subagents, in print and RPC mode, and for a name
+  with a `#` it does nothing.
+- Pi only writes its title, sixteen times a second while it works, and tmux
+  redraws its status line for each frame; no tmux command runs. Faster ways
+  through tmux commands were set aside: one process per frame costs more, and
+  a control-mode client counts as focused, so with `focus-events` on the
+  visible pane would get focus events that are not real.
+- While a run goes on, tmux's tree view (prefix `s` or `w`) shows the tokens
+  in the pane title as text, and tmux-resurrect saves the title as it is: a
+  tab restored from such a save shows the saved frame until Pi starts there.
 
 ## session-socket
 
