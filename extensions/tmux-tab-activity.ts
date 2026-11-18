@@ -1,14 +1,13 @@
 /**
  * tmux tab activity: while Pi or one of its subagents works, a block swings back and forth over the name in its tmux
- * tab, one letter at a time, from one end to the other in a second, whatever the name's length.
+ * tab, one letter at a time, 20 frames a second, whatever the name's length.
  *
  * Pi shows the session in the terminal title, "π - <name> - <directory>", or "π - <directory>" while the session has
  * no name. During a run, a compaction, or while a subagent works (subagents.ts, "subagents:state" on the event bus; not
  * one that waits for an instruction or an answer), this extension writes that title with tmux style tokens that draw
  * one letter like the active tab, in window-status-current-style, undimmed (in reverse video while that style is
- * tmux's default, which sets nothing), and moves the block on by one letter per frame, at a frame rate that makes one
- * swing take a second; at either end it turns without a pause. A name longer than 26 letters would need more than 25
- * frames a second, so the block skips letters there instead. It stops when Pi settles and no subagent works, pauses while an AskUserQuestion dialog waits (the tab's bell
+ * tmux's default, which sets nothing), and moves the block on by one letter per frame; at either end it turns without
+ * a pause. It stops when Pi settles and no subagent works, pauses while an AskUserQuestion dialog waits (the tab's bell
  * shows then), and puts Pi's own title back. The tokens take no room, so the tab keeps its width.
  *
  * The block shows on the inactive tabs. The active tab, drawn in the same style, shows it only through its format:
@@ -58,10 +57,8 @@ import { execFile } from "node:child_process";
 import path from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
-/** One swing of the block, from one end of the name to the other, takes this long, whatever the name's length. */
-const SWING_MS = 1000;
-/** The shortest time between two frames; a name that would need less moves the block on by several letters a frame. */
-const MIN_FRAME_MS = 40;
+/** The block moves on by one letter per frame, at the same pace for every name. */
+const FRAME_MS = 1000 / 20;
 /** Pi's title starts with this; a Pi build with a name of its own (piConfig.name) is not covered. */
 const APP_TITLE = "π";
 const DARK = "#[default]";
@@ -111,13 +108,6 @@ async function tmuxBlock(): Promise<string | null> {
 	return `#[default]#[${blockStyle(currentStyle)}]`;
 }
 
-/** The letters the block moves on per frame, and the time between frames, so that `steps` letters take SWING_MS. */
-function pace(steps: number): { stride: number; delay: number } {
-	const letters = Math.max(1, steps);
-	const stride = Math.ceil((letters * MIN_FRAME_MS) / SWING_MS);
-	return { stride, delay: SWING_MS / Math.ceil(letters / stride) };
-}
-
 /** Pi's own title, as Pi builds it. */
 function plainTitle(name: string | undefined, dir: string): string {
 	return name ? `${APP_TITLE} - ${name} - ${dir}` : `${APP_TITLE} - ${dir}`;
@@ -144,7 +134,7 @@ export default function (pi: ExtensionAPI) {
 	let agents = 0;
 	/** The AskUserQuestion dialogs open now, by tool call id. */
 	const asking = new Set<string>();
-	let timer: ReturnType<typeof setTimeout> | null = null;
+	let timer: ReturnType<typeof setInterval> | null = null;
 	/** The letter the block is on, -1 before the first frame of a run, and the way it moves: 1 right, -1 left. */
 	let at = -1;
 	let step = 1;
@@ -157,32 +147,25 @@ export default function (pi: ExtensionAPI) {
 	const working = () => (running || compacting || agents > 0) && asking.size === 0;
 	const dir = (context: ExtensionContext) => path.basename(context.cwd);
 
-	/** Draws the next frame and schedules the one after it, at the pace of the name's length now. */
 	function frame(): void {
-		if (!ctx) {
-			timer = null;
-			return;
-		}
+		if (!ctx) return;
 		const name = pi.getSessionName()?.trim() || undefined;
 		const last = [...(name ?? dir(ctx))].length - 1;
-		const { stride, delay } = pace(last);
 		if (at < 0) {
 			at = 0;
 			step = 1;
 		} else {
 			// A name that got shorter meanwhile (session-title names the session during its first run): from its end.
 			if (at > last) [at, step] = [last, -1];
-			if ((step > 0 && at >= last) || (step < 0 && at <= 0)) step = -step;
-			at = Math.max(0, Math.min(last, at + step * stride));
+			if (at + step > last || at + step < 0) step = -step;
+			at = Math.max(0, Math.min(last, at + step));
 		}
 		ctx.ui.setTitle(frameTitle(name, dir(ctx), at, block));
-		timer = setTimeout(frame, delay);
-		timer.unref?.();
 	}
 
 	function stop(): void {
 		if (!timer) return;
-		clearTimeout(timer);
+		clearInterval(timer);
 		timer = null;
 		at = -1;
 		if (ctx) ctx.ui.setTitle(plainTitle(pi.getSessionName()?.trim() || undefined, dir(ctx)));
@@ -199,7 +182,8 @@ export default function (pi: ExtensionAPI) {
 		const token = await setup;
 		if (call !== generation || !token || !ctx || !working() || timer) return;
 		block = token;
-		frame();
+		timer = setInterval(frame, FRAME_MS);
+		timer.unref?.();
 	}
 
 	const unsubscribe = [
