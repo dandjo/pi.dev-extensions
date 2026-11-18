@@ -93,6 +93,10 @@
  *   session and link, a fresh worker credential, the read stream resumed after the last event the old one read.
  *   Without that, the bridge takes what the older code registered no callback for (an answer to a question, a usage
  *   request) and drops it.
+ * - Minting a worker credential (a renewal in recover, attaching anew in reattach) supersedes the transport it is to
+ *   replace: the server ends that transport with close 4090 at its next request, a heartbeat or the uploads of
+ *   activate(). Such a close is this extension's own doing, so it is held while the mint runs (beginEpochMove) and
+ *   dropped once the transport is replaced (endEpochMove); a 4090 at any other time ends the connection.
  * - While connected the transcript is stored on Anthropic's servers under the claude.ai data policy. Disconnecting or
  *   quitting archives the session there.
  */
@@ -1006,6 +1010,13 @@ interface Connection {
 	pending: Json[];
 	/** The transport closed while parked: the next owner handles it. */
 	pendingClose?: { code?: number };
+	/**
+	 * Set while this connection mints a new worker credential (recover, reattach): the token of the latest mint. The server
+	 * then supersedes the current transport, and a request it makes before it is replaced ends it with close 4090: this
+	 * connection's own doing, not another process. Such a close waits in heldClose until the latest mint settles it.
+	 */
+	epochMove?: object;
+	heldClose?: { code?: number };
 	/** Prompts that came from the app and are about to appear as Pi user messages: not sent back. */
 	inbound: string[];
 	/** The title the app set last, so its own rename is not sent back as a change. */
@@ -1075,10 +1086,40 @@ function bridgeOptions(c: Connection, credentials: RemoteCredentials, initialSeq
 		onStopTask: (taskId) => c.router?.stopTask(taskId) ?? Promise.reject(new Error(SWITCHING.error)),
 		onClose: (code) => {
 			if (c.closing) return;
-			if (c.router) c.router.close(code);
-			else c.pendingClose = { code };
+			if (c.epochMove) c.heldClose ??= { code };
+			else deliverClose(c, code);
 		},
 	};
+}
+
+/** A close of c's transport, to the runtime that owns c, else kept for the next owner. */
+function deliverClose(c: Connection, code?: number): void {
+	if (c.closing) return;
+	if (c.router) c.router.close(code);
+	else c.pendingClose = { code };
+}
+
+/** Starts a credential mint of c: until it ends, a close of c's transport is held (see Connection.epochMove). */
+function beginEpochMove(c: Connection): object {
+	const move = {};
+	c.epochMove = move;
+	return move;
+}
+
+/**
+ * Ends a credential mint of c. A later mint, which supersedes this one's credential too, settles what was held instead.
+ * replaced: the transport the mint superseded is gone, so a close it held is moot. Otherwise a mint that succeeded
+ * leaves a superseded transport, now or at its next request, and goes on as a plain close, so recovery rebuilds it;
+ * one that failed delivers a held close as it came.
+ */
+function endEpochMove(c: Connection, move: object, replaced: boolean, minted: boolean): void {
+	if (c.epochMove !== move) return;
+	c.epochMove = undefined;
+	const held = c.heldClose;
+	c.heldClose = undefined;
+	if (replaced || c.closing) return;
+	if (minted) deliverClose(c);
+	else if (held) deliverClose(c, held.code);
 }
 
 // A copy of BtwAsk from btw.ts, the event-bus contract between the two: change both alike.
@@ -2707,12 +2748,22 @@ export default function (pi: ExtensionAPI) {
 			const { module } = await loadBridge();
 			for (;;) {
 				if (!current()) return;
-				const result = await fetchCredentials(module, c.sessionId);
-				if (!current()) return;
+				const move = beginEpochMove(c);
+				const result = await fetchCredentials(module, c.sessionId).catch((error: unknown) => {
+					endEpochMove(c, move, false, false);
+					throw error;
+				});
+				if (!current()) {
+					endEpochMove(c, move, false, "worker_jwt" in result);
+					return;
+				}
 				if ("worker_jwt" in result) {
 					const mintedAt = Date.now();
 					try {
-						await c.handle.reconnectTransport({ ingressToken: result.worker_jwt, apiBaseUrl: result.api_base_url, epoch: result.worker_epoch });
+						// reconnectTransport closes the superseded transport before it awaits anything.
+						const reconnecting = c.handle.reconnectTransport({ ingressToken: result.worker_jwt, apiBaseUrl: result.api_base_url, epoch: result.worker_epoch });
+						endEpochMove(c, move, true, true);
+						await reconnecting;
 					} catch (error) {
 						if (current()) await teardown(c, { archive: false, message: `Remote Control disconnected: ${errorText(error)}. /remote-control reconnects.` }, "error");
 						return;
@@ -2729,6 +2780,8 @@ export default function (pi: ExtensionAPI) {
 					if (cause !== "refresh" || noted) notify("Remote Control reconnected.");
 					return;
 				}
+				endEpochMove(c, move, false, false);
+				if (!current()) return;
 				if (result.terminal) {
 					await teardown(c, { archive: false, message: `Remote Control disconnected: ${result.error}` }, "error");
 					return;
@@ -2760,10 +2813,14 @@ export default function (pi: ExtensionAPI) {
 		const token = {};
 		c.recovery = token;
 		const current = () => !c.closing && connection === c && c.recovery === token;
+		let move: object | undefined;
+		let minted = false;
 		try {
 			const loaded = await loadBridge();
 			if (!current()) return;
+			move = beginEpochMove(c);
 			const credentials = await fetchCredentials(loaded.module, c.sessionId);
+			minted = "worker_jwt" in credentials;
 			if (!current()) return;
 			if (!("worker_jwt" in credentials)) {
 				note(`Remote Control keeps the bridge of the older extension code (${credentials.error}); /remote-control reconnects with the current one.`);
@@ -2776,6 +2833,9 @@ export default function (pi: ExtensionAPI) {
 			} catch {
 				// already closed
 			}
+			// Closed on purpose, the old handle reports nothing more; what it reported since the mint was the mint's doing.
+			endEpochMove(c, move, true, true);
+			move = undefined;
 			c.version = version = loaded.version;
 			try {
 				c.handle = await loaded.module.attachBridgeSession(bridgeOptions(c, credentials, sequenceNum));
@@ -2798,6 +2858,8 @@ export default function (pi: ExtensionAPI) {
 			resendTasks(c);
 		} finally {
 			if (c.recovery === token) c.recovery = null;
+			// The old handle stays: a close it held now goes on, and recovery may follow, since this attempt is over.
+			if (move) endEpochMove(c, move, false, minted);
 		}
 	}
 
@@ -2805,7 +2867,8 @@ export default function (pi: ExtensionAPI) {
 		if (c.closing || connection !== c) return;
 		switch (code) {
 			case 4090:
-				void teardown(c, { archive: false, message: "Remote Control ended: another process took over this session." }, "warning");
+				// The server's codes behind 4090: another worker took over, the epoch is stale, or the session is no longer active.
+				void teardown(c, { archive: false, message: "Remote Control ended: the server gave this session to another connection or ended it (close 4090). /remote-control starts a new one." }, "warning");
 				return;
 			case 403:
 			case 404:

@@ -1617,9 +1617,13 @@ and you can work on from there while Pi keeps running on your machine.
   `.pi/npm`, or in npm's global root, wherever Pi put that package. It creates the
   session, mints a four-hour worker credential, and runs the event stream,
   heartbeats, and reconnects; the extension renews the credential five minutes
-  before it expires and reconnects on its own after an outage. If another
-  process takes the session over, or the server rejects it, the connection
-  ends with a notice.
+  before it expires and reconnects on its own after an outage. A new
+  credential supersedes the transport it replaces, and the server ends that
+  transport (close 4090) at its next request; while the extension mints one
+  (a renewal, or attaching the bridge anew after `/reload` with new code),
+  such a close is its own doing and does not end the connection. If another
+  process takes the session over, the session ended, or the server rejects
+  it, the connection ends with a notice.
 - `/new`, `/resume`, `/fork`, and `/reload` keep the connection: the link
   stays valid, and the app goes on with the next session in the same remote
   session, as Claude Code does after `/clear`. The remote session keeps its
