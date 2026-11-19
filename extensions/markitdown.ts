@@ -1800,7 +1800,8 @@ function chartMarkdown(chartSpace: El | undefined): string {
 			rows.push([categories[i] ?? "", ...values.map((v) => (i < v.length && v[i] !== undefined ? pythonFloat(Number(v[i])) : "None"))]);
 		}
 		const lines = rows.map((r) => `| ${r.join(" | ")} |`);
-		return md + [lines[0], `|${rows[0].map(() => "---").join("|")}|`, ...lines.slice(1)].join("\n");
+		// A line break after the table, unlike markitdown, whose next shape's text runs on in the table's last row.
+		return `${md}${[lines[0], `|${rows[0].map(() => "---").join("|")}|`, ...lines.slice(1)].join("\n")}\n`;
 	} catch {
 		return "\n\n[unsupported chart]\n\n";
 	}
