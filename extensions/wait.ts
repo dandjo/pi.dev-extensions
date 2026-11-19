@@ -11,8 +11,15 @@
  * - In the foreground the call returns when the condition holds, with the last output. It stops early when the user
  *   sends a message, so a long wait never shuts them out; Esc stops it. The tool row shows the checks so far.
  * - background: true (shell commands only) returns at once. When the condition holds or the wait gives up, a message
- *   brings the result into the conversation and starts a turn when Pi is idle. /waits lists the background waits;
- *   cancel: "<id>" or /waits cancel <id> stops one. Background waits end with the session (also on /reload).
+ *   brings the result into the conversation and starts a turn when Pi is idle. list: true and /waits list the
+ *   background waits, gitlab_pipeline's too; cancel: "<id>" or /waits cancel <id> stops one.
+ * - Background waits go on over /reload, and a result that comes while Pi reloads arrives once it has. Another session
+ *   (/new, /resume, /fork) ends them, as they belong to the conversation that started them; the next session names
+ *   them in a notice.
+ * - Other extensions see the background waits on the event bus: "background-waits:state" carries { tool, waits }
+ *   whenever they change and on "background-waits:request"; "background-waits:open" shows one in a notice and
+ *   "background-waits:cancel" stops one, each with { id }. background-agents.ts lists them in its panel below the
+ *   prompt, tmux-tab-activity.ts counts them as work, and gitlab.ts publishes gitlab_pipeline's the same way.
  * - A bash call that sleeps 15 seconds or more right after another bash call that did is refused with a pointer to
  *   wait. {"nudge": false} in ~/.pi/agent/wait.json turns that off.
  */
@@ -32,6 +39,12 @@ const RESULT_CHARS = 2000;
 const RESULT_LINES = 40;
 const NUDGE_SLEEP_S = 15;
 const NUDGE_WINDOW_MS = 10 * 60_000;
+/** The event-bus contract with gitlab.ts, background-agents.ts, and tmux-tab-activity.ts. */
+const STATE = "background-waits:state";
+const REQUEST = "background-waits:request";
+const OPEN = "background-waits:open";
+const CANCEL = "background-waits:cancel";
+const TOOL = "wait";
 
 type Until = "match" | "nomatch" | "success" | "failure" | "change";
 type Status = "met" | "timeout" | "interrupted" | "cancelled" | "aborted";
@@ -68,8 +81,54 @@ interface Background {
 	spec: Spec;
 	started: number;
 	checks: number;
+	/** The last line of the last check's output. */
+	last?: string;
 	abort: AbortController;
 }
+
+// A copy of BackgroundWaitView from wait.ts, the event-bus contract between wait.ts, gitlab.ts, background-agents.ts,
+// and tmux-tab-activity.ts: change all alike.
+/** A background wait as other extensions see it ("background-waits:state", { tool, waits } for each tool that waits). */
+interface BackgroundWaitView {
+	/** w1, gp1, …: what cancel and stop_wait take. */
+	id: string;
+	/** The tool that waits: wait, gitlab_pipeline. */
+	tool: string;
+	/** What is awaited. */
+	label: string;
+	/** When the wait ends, in words. */
+	until: string;
+	startedAt: number;
+	checks: number;
+	/** What the last check found, in one line. */
+	last?: string;
+	intervalMs: number;
+	/** When it gives up. */
+	deadline: number;
+}
+
+/** A result that came while no session runtime could take it, during a /reload. */
+interface Held {
+	content: string;
+	details: WaitDetails;
+}
+
+/**
+ * The background waits, shared by the session runtimes of this process: /reload loads this file afresh and replaces
+ * the runtime, and its pi and ctx throw once replaced. So a wait outlives the runtime that started it and reports to
+ * the one current when it ends.
+ */
+interface Shared {
+	/** The current runtime; ready once it is complete, after resources_discover. None during a reload. */
+	live?: { pi: ExtensionAPI; ctx: ExtensionContext; ready: boolean };
+	waits: Map<string, Background>;
+	counter: number;
+	held: Held[];
+	/** The waits a switch to another session ended, for a notice in that one. */
+	ended: string[];
+}
+const store = globalThis as typeof globalThis & Record<symbol, Shared | undefined>;
+const shared: Shared = (store[Symbol.for("pi.wait")] ??= { waits: new Map(), counter: 0, held: [], ended: [] });
 
 function loadNudge(): boolean {
 	try {
@@ -84,6 +143,11 @@ function formatDuration(ms: number): string {
 	if (s < 60) return `${s}s`;
 	const m = Math.floor(s / 60);
 	return m < 60 ? `${m}m ${s % 60}s` : `${Math.floor(m / 60)}h ${m % 60}m`;
+}
+
+function clock(ms: number): string {
+	const d = new Date(ms);
+	return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
 }
 
 function oneLine(text: string, max: number): string {
@@ -193,10 +257,86 @@ function resultText(spec: Spec, status: Status, checks: number, elapsedMs: numbe
 	return `${head}\nLast output${exit}:\n${tail(last.output)}`;
 }
 
+function view(entry: Background): BackgroundWaitView {
+	const { spec } = entry;
+	return {
+		id: entry.id,
+		tool: TOOL,
+		label: spec.label,
+		until: describeCondition(spec),
+		startedAt: entry.started,
+		checks: entry.checks,
+		last: entry.last,
+		intervalMs: spec.intervalMs,
+		deadline: entry.started + spec.timeoutMs,
+	};
+}
+
+/** Tells the other extensions about the background waits, through the runtime given or else the current one. */
+function publish(via: ExtensionAPI | undefined = shared.live?.pi): void {
+	try {
+		via?.events.emit(STATE, { tool: TOOL, waits: [...shared.waits.values()].map(view) });
+	} catch {
+		// A runtime replaced meanwhile; the next one asks at its start.
+	}
+}
+
+/** Brings a result into the conversation of the current runtime, or keeps it until there is one. */
+function deliver(held: Held): void {
+	const live = shared.live;
+	if (live?.ready) {
+		try {
+			live.pi.sendMessage(
+				{ customType: MESSAGE_TYPE, content: held.content, display: true, details: held.details },
+				{ triggerTurn: true, deliverAs: "followUp" },
+			);
+			return;
+		} catch {
+			// The runtime went away meanwhile: kept for the next one.
+		}
+	}
+	shared.held.push(held);
+}
+
+function cancel(id: string): string {
+	const entry = shared.waits.get(id);
+	if (!entry) return `No background wait ${id}${shared.waits.size ? `; running: ${[...shared.waits.keys()].join(", ")}` : ""}.`;
+	entry.abort.abort();
+	shared.waits.delete(id);
+	publish();
+	return `Cancelled background wait ${id} (${entry.spec.label}) after ${formatDuration(Date.now() - entry.started)}.`;
+}
+
+/** One line per background wait, of every tool that waits. */
+function listText(views: BackgroundWaitView[]): string {
+	if (views.length === 0) return "No background waits.";
+	const now = Date.now();
+	return views
+		.map((v) => {
+			const span = `${v.checks} check${v.checks === 1 ? "" : "s"} in ${formatDuration(now - v.startedAt)}, every ${formatDuration(v.intervalMs)}`;
+			return `${v.id}  ${v.label} (${v.tool}): until ${v.until}; ${span}, gives up at ${clock(v.deadline)}${v.last ? `; last: ${v.last}` : ""}`;
+		})
+		.join("\n");
+}
+
+/** The notice "background-waits:open" shows. */
+function detailText(entry: Background): string {
+	const v = view(entry);
+	const checks = `${v.checks} check${v.checks === 1 ? "" : "s"} every ${formatDuration(v.intervalMs)}`;
+	return [
+		`Background wait ${v.id}: ${v.label}`,
+		`Until ${v.until}`,
+		`Command: ${oneLine(entry.spec.command ?? "", 300)}`,
+		`Since ${clock(v.startedAt)} (${formatDuration(Date.now() - v.startedAt)}), ${checks}, gives up at ${clock(v.deadline)}`,
+		...(v.last ? [`Last output: ${v.last}`] : []),
+	].join("\n");
+}
+
 export default function (pi: ExtensionAPI) {
-	const background = new Map<string, Background>();
-	let counter = 0;
 	let lastSleepPoll: number | undefined;
+	/** The background waits of the other tools, as "background-waits:state" brings them. */
+	const others = new Map<string, BackgroundWaitView[]>();
+	const allViews = () => [...[...shared.waits.values()].map(view), ...[...others.values()].flat()];
 
 	/** Runs checks until the condition holds, the time is up, or the wait is stopped. */
 	async function loop(
@@ -236,39 +376,78 @@ export default function (pi: ExtensionAPI) {
 		}
 	}
 
+	// The loop runs on in the module that started it, and reports through `shared`, never through this runtime's pi.
 	function startBackground(spec: Spec, ctx: ExtensionContext): Background {
-		const id = `w${++counter}`;
+		const id = `w${++shared.counter}`;
 		const entry: Background = { id, spec, started: Date.now(), checks: 0, abort: new AbortController() };
-		background.set(id, entry);
+		shared.waits.set(id, entry);
+		publish();
 		const cwd = ctx.cwd;
 		const check = (signal: AbortSignal) => runCommand(spec.command as string, cwd, checkTimeout(spec), signal);
-		void loop(spec, check, entry.abort.signal, (checks) => {
+		void loop(spec, check, entry.abort.signal, (checks, _elapsedMs, last) => {
 			entry.checks = checks;
+			entry.last = oneLine(last.output.trim().split("\n").at(-1) ?? "", 200) || undefined;
+			publish();
 		}).then((r) => {
-			background.delete(id);
+			if (shared.waits.get(id) === entry) shared.waits.delete(id);
+			publish();
 			if (r.status === "aborted") return;
 			const details: WaitDetails = { id, label: spec.label, condition: describeCondition(spec), status: r.status, checks: r.checks, elapsedMs: r.elapsedMs };
-			pi.sendMessage(
-				{ customType: MESSAGE_TYPE, content: resultText(spec, r.status, r.checks, r.elapsedMs, r.last, id), display: true, details },
-				{ triggerTurn: true, deliverAs: "followUp" },
-			);
+			deliver({ content: resultText(spec, r.status, r.checks, r.elapsedMs, r.last, id), details });
 		});
 		return entry;
 	}
 
 	const checkTimeout = (spec: Spec) => Math.min(Math.max(spec.intervalMs, 60_000), 300_000);
 
-	function cancel(id: string): string {
-		const entry = background.get(id);
-		if (!entry) return `No background wait ${id}${background.size ? `; running: ${[...background.keys()].join(", ")}` : ""}.`;
-		entry.abort.abort();
-		background.delete(id);
-		return `Cancelled background wait ${id} (${entry.spec.label}) after ${formatDuration(Date.now() - entry.started)}.`;
-	}
+	pi.on("session_start", (_event, ctx) => {
+		shared.live = { pi, ctx, ready: false };
+		others.clear();
+		if (shared.ended.length > 0 && ctx.hasUI) {
+			ctx.ui.notify(`Background waits of the previous session ended with it: ${shared.ended.join(", ")}.`, "warning");
+		}
+		shared.ended = [];
+		// The other tools publish theirs, and this file's own handler publishes the waits that went on over a /reload.
+		pi.events.emit(REQUEST, undefined);
+	});
 
-	pi.on("session_shutdown", () => {
-		for (const entry of background.values()) entry.abort.abort();
-		background.clear();
+	// Pi emits resources_discover after session_start, at the start and at /reload alike; a message sent before could
+	// start a turn inside the reload. The results that came meanwhile go out then.
+	pi.on("resources_discover", () => {
+		setTimeout(() => {
+			const live = shared.live;
+			if (live?.pi !== pi) return;
+			live.ready = true;
+			for (const held of shared.held.splice(0)) deliver(held);
+		}, 0);
+	});
+
+	pi.on("session_shutdown", (event) => {
+		if (shared.live?.pi === pi) shared.live = undefined;
+		if (event.reason === "reload") return;
+		// Another session or the end of Pi: the waits belong to the conversation that started them.
+		const ended = [
+			...[...shared.waits.values()].map((entry) => `${entry.id} (${entry.spec.label})`),
+			...shared.held.map((held) => `${held.details.id} (${held.details.label}, its result unread)`),
+		];
+		for (const entry of shared.waits.values()) entry.abort.abort();
+		shared.waits.clear();
+		shared.held = [];
+		if (event.reason !== "quit") shared.ended.push(...ended);
+	});
+
+	pi.events.on(REQUEST, () => publish(pi));
+	pi.events.on(STATE, (data) => {
+		const { tool, waits } = (data ?? {}) as { tool?: unknown; waits?: unknown };
+		if (typeof tool === "string" && tool !== TOOL && Array.isArray(waits)) others.set(tool, waits as BackgroundWaitView[]);
+	});
+	pi.events.on(OPEN, (data) => {
+		const entry = shared.waits.get(String((data as { id?: unknown } | undefined)?.id));
+		if (entry) shared.live?.ctx.ui.notify(detailText(entry), "info");
+	});
+	pi.events.on(CANCEL, (data) => {
+		const id = String((data as { id?: unknown } | undefined)?.id);
+		if (shared.waits.has(id)) shared.live?.ctx.ui.notify(cancel(id), "info");
 	});
 
 	// Polling by sleeping in bash costs a model request per poll; point to wait from the second poll in a row.
@@ -304,7 +483,8 @@ export default function (pi: ExtensionAPI) {
 			'until: "match" (output matches the regex match; the default when match is given), "nomatch" (no longer matches), ' +
 			'"success" (exit 0, or the tool call succeeds; the default otherwise), "failure", or "change" (output differs from the first check). ' +
 			"Returns the last output. In the foreground it stops early when the user sends a message. " +
-			"background: true (shell commands only) returns at once and a message brings the result later; cancel: id stops a background wait. " +
+			"background: true (shell commands only) returns at once and a message brings the result later; it goes on over /reload. " +
+			"list: true lists the background waits (gitlab_pipeline's too), cancel: id stops one. " +
 			'Examples: {command: "docker service ps web --format {{.CurrentState}}", match: "^Running"}; ' +
 			'{tool: "gitlab", args: {path: "/projects/42/pipelines/1234"}, match: "\\"status\\": \\"(success|failed|canceled)\\""}; ' +
 			'{command: "curl -fsS https://example.com/health", until: "success", interval: 10}.',
@@ -329,11 +509,13 @@ export default function (pi: ExtensionAPI) {
 			label: Type.Optional(Type.String({ description: "Short description of what is awaited, shown to the user" })),
 			background: Type.Optional(Type.Boolean({ description: "Return at once and report by message later (command only)" })),
 			cancel: Type.Optional(Type.String({ description: "Id of a background wait to cancel (no other parameters)" })),
+			list: Type.Optional(Type.Boolean({ description: "List the background waits, gitlab_pipeline's too (no other parameters)" })),
 		}),
 		annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
 
 		async execute(_id, params, signal, onUpdate, ctx) {
 			if (params.cancel) return { content: [{ type: "text", text: cancel(params.cancel) }], details: undefined };
+			if (params.list) return { content: [{ type: "text", text: listText(allViews()) }], details: undefined };
 			if (!params.command === !params.tool) throw new Error("give either command or tool");
 			if (params.tool === "wait") throw new Error("wait cannot wait for itself");
 			const inner = (params.args ?? {}) as { action?: unknown; wait?: unknown };
@@ -409,6 +591,7 @@ export default function (pi: ExtensionAPI) {
 		renderCall(args, theme) {
 			let text = theme.fg("toolTitle", theme.bold("wait "));
 			if (args.cancel) return new Text(text + theme.fg("muted", `cancel ${args.cancel}`), 0, 0);
+			if (args.list) return new Text(text + theme.fg("muted", "list"), 0, 0);
 			const what = args.label || (args.command ? oneLine(String(args.command), 80) : `${args.tool ?? "?"}`);
 			text += theme.fg("accent", what);
 			const until = args.until ?? (args.match ? "match" : "success");
@@ -430,21 +613,14 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("waits", {
-		description: "List the background waits (/waits cancel <id> stops one)",
+		description: "List the background waits, gitlab_pipeline's too (/waits cancel <id> stops one of wait's)",
 		handler: async (args, ctx) => {
 			const [verb, id] = args.trim().split(/\s+/);
 			if (verb === "cancel" && id) {
 				ctx.ui.notify(cancel(id), "info");
 				return;
 			}
-			if (background.size === 0) {
-				ctx.ui.notify("No background waits.", "info");
-				return;
-			}
-			const rows = [...background.values()].map(
-				(b) => `${b.id}  ${b.spec.label}: ${describeCondition(b.spec)}, ${b.checks} checks, ${formatDuration(Date.now() - b.started)}`,
-			);
-			ctx.ui.notify(rows.join("\n"), "info");
+			ctx.ui.notify(listText(allViews()), "info");
 		},
 	});
 }

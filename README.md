@@ -28,7 +28,7 @@ names `extensions/`, which holds one file per extension.
 | `markitdown.ts`             | Adds `markitdown`: PDF, Office, EPUB, HTML, and CSV files as Markdown, through `read` too | `pdftotext` (Poppler) for PDF                                    |
 | `memory.ts`                 | Keeps a memory per project, shared with Claude Code's auto memory when it is there        | —                                                                |
 | `session-title.ts`          | Names each session after its first prompt and shows it in the terminal title              | —                                                                |
-| `tmux-tab-activity.ts`      | Swings a block over the number and name of its tmux tab while Pi or a subagent works      | tmux 3.2 or later, set up as its section describes               |
+| `tmux-tab-activity.ts`      | Swings a block over its tmux tab while Pi, a subagent, or a background wait works         | tmux 3.2 or later, set up as its section describes               |
 | `session-socket.ts`         | Lets sessions message each other and your Claude Code sessions, as Claude Code does       | Linux or macOS                                                   |
 | `ask-user-question.ts`      | Adds `AskUserQuestion`, Claude Code's multiple-choice questions                           | —                                                                |
 | `subagents.ts`              | Adds the `Agent` tool: subagents in their own Pi process, on a tier or a model of choice  | —                                                                |
@@ -893,13 +893,18 @@ out.
     afterwards.
   - `stop_wait` ends the background wait `waitId`; the pipeline or job
     itself goes on.
+  - `list` lists the background waits, those of [wait](#wait) too.
 - `background: true`, with `wait` or with `wait: true`, returns at once with
   an id (`gp1`) and waits on its own, for at most `timeout` minutes (120
   there). Your messages do not stop it. When the job or pipeline settles or
   the time is up, a message brings the result into the conversation and
   starts a turn when Pi is idle. `/gitlab-waits` lists the background waits
-  with their last state, `/gitlab-waits stop <id>` ends one. They end with the
-  session, `/reload` included.
+  with their last state, `/gitlab-waits stop <id>` ends one.
+- Background waits go on over `/reload`, and a result that comes while Pi
+  reloads arrives once it has. Another session (`/new`, `/resume`, `/fork`)
+  ends them, as they belong to the conversation that started them, and names
+  them in a notice. The [agent panel](#background-agents) lists them, and
+  [tmux-tab-activity](#tmux-tab-activity) counts them as work.
 - A check that fails on the network, with a server error, or with 429 is
   repeated, up to three in a row; a refusal (401, 403, 404) ends the wait at
   once.
@@ -1084,15 +1089,17 @@ background while the agent works.
 
 ## tmux-tab-activity
 
-While Pi or one of its subagents works, a block swings back and forth over the
-number and name of its tmux tab, one character at a time, twenty frames a
+While Pi or one of its subagents works, or a background wait runs, a block
+swings back and forth over the number and name of its tmux tab, one character at a time, twenty frames a
 second whatever the name's length, so the tab bar shows which sessions are
 busy. The block has the colours of the active tab; on the active tab itself it
 runs as a gap, a character in the tab colour through the tab's block.
 
 - Pi shows the session in the terminal title, `π - <name> - <directory>`.
-  During a run, a compaction, or while a subagent works (one that waits for
-  your instruction or an answer does not count), the extension writes it as
+  During a run, a compaction, while a subagent works (one that waits for your
+  instruction or an answer does not count), or while a background wait of
+  [wait](#wait) or [`gitlab_pipeline`](#gitlab_pipeline) runs, the extension
+  writes it as
   `π - ␟ <name> - <directory>` (an unnamed session's directory as its name),
   where `␟` stands for the window number and the tab formats below put the
   number in its place. The title carries tmux style tokens that draw one
@@ -1102,7 +1109,8 @@ runs as a gap, a character in the tab colour through the tab's block.
   and the name; at either end it turns without a pause. The tokens take no room,
   so the tab keeps its width.
 - It pauses while an AskUserQuestion dialog waits, when the tab's bell takes
-  over, and puts Pi's own title back when Pi settles and no subagent works.
+  over, and puts Pi's own title back when Pi settles, no subagent works, and
+  no background wait runs.
 - A window with several panes shows the pane whose Pi works: the active
   pane's while it works, else the first other pane's that works, else the
   active pane's. While another pane works, the tab shows that pane's name, so
@@ -1510,10 +1518,14 @@ Claude Code, the prompt writes to the agent shown, and Esc interrupts it.
   goes on, and the report arrives as a message when the agent finishes. While
   one runs, the footer adds `ctrl+b to run in background`; without a
   foreground agent, Ctrl+B stays the editor's cursor left.
-- Scheduled tasks ([scheduled-tasks](#scheduled-tasks)) are listed below the
-  agents, marked `↻`, with their prompt, schedule, and next run, and the panel
-  also appears while only tasks are scheduled. Enter opens the task in the
-  task manager, `x` deletes it.
+- Background waits ([wait](#wait), [`gitlab_pipeline`](#gitlab_pipeline))
+  are listed below the agents, marked `⧗` with the tool, with their id, what
+  they wait for, what the last check found, the time since they started, and
+  their checks. Enter shows one in a notice, `x` cancels it.
+- Scheduled tasks ([scheduled-tasks](#scheduled-tasks)) are listed below them,
+  marked `↻`, with their prompt, schedule, and next run. Enter opens the task
+  in the task manager, `x` deletes it. The panel also appears while only waits
+  or tasks are there.
 - In fullscreen mode the row under the pointer gets the arrow and the
   selection background, as in the `AskUserQuestion` dialog; when the pointer
   leaves the panel, the marker goes back to the row selected with the keys, or
@@ -2089,9 +2101,16 @@ is a request that reads the whole context.
   send a message, and Esc stops it.
 - `background: true`, for shell commands, returns at once. When the condition
   holds or the wait gives up, a message brings the result into the
-  conversation and starts a turn when Pi is idle. `/waits` lists the
-  background waits, and `/waits cancel <id>` or the tool's `cancel` stops one.
-  They end with the session, `/reload` included.
+  conversation and starts a turn when Pi is idle. `/waits` and the tool's
+  `list: true` list the background waits, those of
+  [`gitlab_pipeline`](#gitlab_pipeline) too; `/waits cancel <id>` or the
+  tool's `cancel` stops one.
+- Background waits go on over `/reload`, and a result that comes while Pi
+  reloads arrives once it has. Another session (`/new`, `/resume`, `/fork`)
+  ends them, as they belong to the conversation that started them, and names
+  them in a notice. The [agent panel](#background-agents) lists them, and
+  [tmux-tab-activity](#tmux-tab-activity) counts them as work; both learn of
+  them on the event bus (`background-waits:state`).
 - The model is told to wait only for what has not happened yet. A check whose
   condition should already hold, such as a container that just answered,
   stays a single bash call.

@@ -38,8 +38,10 @@
  *   as it comes, until the file holds the message. Over RPC a message_update carries only the change, which is applied
  *   to the message. The panel replaces the editor with a subclass of Pi's own, so another extension that replaces the
  *   editor wins over it.
- * - Scheduled tasks (scheduled-tasks.ts, scheduled-tasks:state) are listed below the agents with their schedule and
- *   next run: Enter opens the task in its manager, x deletes it. The panel also exists while only tasks are scheduled.
+ * - Background waits (wait.ts and gitlab.ts, background-waits:state) are listed below the agents with what they wait
+ *   for, the time since they started, and their checks: Enter shows one in a notice, x cancels it.
+ * - Scheduled tasks (scheduled-tasks.ts, scheduled-tasks:state) are listed below them with their schedule and next
+ *   run: Enter opens the task in its manager, x deletes it. The panel also exists while only waits or tasks are there.
  * - The mouse: the row under the pointer gets the selection marker, and when the pointer leaves the panel the marker
  *   goes back to the row selected with the keys (none while the prompt has the focus); Pi reports no leaving, so the
  *   TUI's mouse moves are observed (observeMouseMoves). A key that acts on a row (↑↓, Enter, x) acts on the one with
@@ -151,8 +153,8 @@ interface Row extends SubagentView {
 	finishedAt?: number;
 }
 
-/** A row of the panel below `main`: a background agent or a scheduled task. */
-type Entry = { kind: "agent"; row: Row } | { kind: "scheduled"; task: ScheduledTaskView };
+/** A row of the panel below `main`: a background agent, a background wait, or a scheduled task. */
+type Entry = { kind: "agent"; row: Row } | { kind: "wait"; wait: BackgroundWaitView } | { kind: "scheduled"; task: ScheduledTaskView };
 
 // --- Formatting ---------------------------------------------------------------------------------------------------------
 
@@ -653,6 +655,27 @@ interface ScheduledTaskView {
 	prompt: string;
 }
 
+// A copy of BackgroundWaitView from wait.ts, the event-bus contract between wait.ts, gitlab.ts, background-agents.ts,
+// and tmux-tab-activity.ts: change all alike.
+/** A background wait as other extensions see it ("background-waits:state", { tool, waits } for each tool that waits). */
+interface BackgroundWaitView {
+	/** w1, gp1, …: what cancel and stop_wait take. */
+	id: string;
+	/** The tool that waits: wait, gitlab_pipeline. */
+	tool: string;
+	/** What is awaited. */
+	label: string;
+	/** When the wait ends, in words. */
+	until: string;
+	startedAt: number;
+	checks: number;
+	/** What the last check found, in one line. */
+	last?: string;
+	intervalMs: number;
+	/** When it gives up. */
+	deadline: number;
+}
+
 // A copy of SubagentView from subagents.ts, the event-bus contract between the two: change both alike.
 /** What other extensions see of a subagent ("subagents:state" on the event bus). */
 interface SubagentView {
@@ -678,7 +701,9 @@ export default function (pi: ExtensionAPI) {
 	let ctx: ExtensionContext | null = null;
 	const rows = new Map<string, Row>();
 	let scheduled: ScheduledTaskView[] = [];
-	/** -1: the prompt has the focus; 0: the main row; 1..n: the entries (agents, then scheduled tasks). */
+	/** The background waits of each tool that waits. */
+	const waits = new Map<string, BackgroundWaitView[]>();
+	/** -1: the prompt has the focus; 0: the main row; 1..n: the entries (agents, then waits, then scheduled tasks). */
 	let selected = -1;
 	/** The selection index of each line of the last panel render, for the mouse. */
 	let panelLines: (number | undefined)[] = [];
@@ -715,6 +740,10 @@ export default function (pi: ExtensionAPI) {
 
 	const entries = (): Entry[] => [
 		...agentRows().map((row) => ({ kind: "agent" as const, row })),
+		...[...waits.values()]
+			.flat()
+			.sort((a, b) => a.startedAt - b.startedAt)
+			.map((wait) => ({ kind: "wait" as const, wait })),
 		...scheduled.map((task) => ({ kind: "scheduled" as const, task })),
 	];
 
@@ -791,6 +820,7 @@ export default function (pi: ExtensionAPI) {
 		if (selected === 0) return viewing ? "↑/↓ to select · Enter to view main" : "↑/↓ to select · Enter to return";
 		const entry = list[selected - 1];
 		if (entry?.kind === "scheduled") return "Enter to view · x to delete";
+		if (entry?.kind === "wait") return "Enter for details · x to cancel";
 		const running = list.filter((e) => e.kind === "agent" && e.row.status === "running").length;
 		const stopAll = running > 1 ? " · x on each to stop" : "";
 		const view = entry?.row.agentId === viewing ? "" : "Enter to view · ";
@@ -818,10 +848,18 @@ export default function (pi: ExtensionAPI) {
 		refresh();
 	}
 
-	/** Enter or a click on an entry: an agent's transcript, or the scheduled task in its manager. */
+	function onWaits(data: unknown): void {
+		const { tool, waits: list } = (data ?? {}) as { tool?: unknown; waits?: unknown };
+		if (typeof tool !== "string" || !Array.isArray(list)) return;
+		waits.set(tool, list as BackgroundWaitView[]);
+		refresh();
+	}
+
+	/** Enter or a click on an entry: an agent's transcript, a wait in a notice, or the scheduled task in its manager. */
 	function openEntry(entry: Entry | undefined): void {
 		if (!entry) return;
 		if (entry.kind === "agent") void openAgent(entry.row);
+		else if (entry.kind === "wait") pi.events.emit("background-waits:open", { id: entry.wait.id });
 		else pi.events.emit("scheduled-tasks:open", { id: entry.task.id });
 	}
 
@@ -878,16 +916,32 @@ export default function (pi: ExtensionAPI) {
 		panelLines[lines.length] = 0;
 		lines.push(line(main, marked === 0));
 
-		const label = (entry: Entry) => (entry.kind === "agent" ? entry.row.type : entry.task.kind === "loop wakeup" ? "↻ loop" : "↻ scheduled");
+		const label = (entry: Entry) =>
+			entry.kind === "agent"
+				? entry.row.type
+				: entry.kind === "wait"
+					? `⧗ ${entry.wait.tool}`
+					: entry.task.kind === "loop wakeup"
+						? "↻ loop"
+						: "↻ scheduled";
 		const nameWidth = Math.min(MAX_NAME_WIDTH, Math.max(4, ...list.map((e) => label(e).length)));
-		const statuses = visible.map((e) => (e.kind === "agent" ? statusText(e.row) : `${e.task.kind === "loop wakeup" ? "" : `${e.task.schedule} · `}next ${e.task.next}`));
+		const now = Date.now();
+		const statuses = visible.map((e) =>
+			e.kind === "agent"
+				? statusText(e.row)
+				: e.kind === "wait"
+					? `${elapsed(now - e.wait.startedAt)} · ${e.wait.checks} check${e.wait.checks === 1 ? "" : "s"}`
+					: `${e.task.kind === "loop wakeup" ? "" : `${e.task.schedule} · `}next ${e.task.next}`,
+		);
+		const description = (e: Entry) =>
+			e.kind === "agent" ? e.row.description : e.kind === "wait" ? `${e.wait.id} · ${e.wait.label}${e.wait.last ? ` · ${e.wait.last}` : ""}` : e.task.prompt;
 		const statusWidth = Math.max(...statuses.map((s) => s.length), 0);
 		visible.forEach((entry, i) => {
 			const index = scroll + i + 1;
 			const isSelected = marked === index;
 			const name = truncateToWidth(label(entry), nameWidth, "…").padEnd(nameWidth);
 			const descWidth = Math.max(8, inner - 2 - nameWidth - 3 - statusWidth - 2);
-			const desc = truncateToWidth((entry.kind === "agent" ? entry.row.description : entry.task.prompt) || "", descWidth, "…").padEnd(descWidth);
+			const desc = truncateToWidth(description(entry) || "", descWidth, "…").padEnd(descWidth);
 			const status = statuses[i].padStart(statusWidth);
 			panelLines[lines.length] = index;
 			const shown = entry.kind === "agent" && entry.row.agentId === viewing;
@@ -897,7 +951,7 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 			// Finished agents and, while the panel is not in use, every row recede, all but the agent shown.
-			const recede = entry.kind === "scheduled" ? !focused : !shown && (entry.row.status === "completed" || !focused);
+			const recede = entry.kind !== "agent" ? !focused : !shown && (entry.row.status === "completed" || !focused);
 			const tone = (text: string) => (recede ? theme.fg("dim", text) : text);
 			const state = entry.kind === "agent" ? statusColor(entry.row, status, theme, recede) : tone(status);
 			lines.push(line(`${pointer(false)}${shown ? theme.bold(name) : tone(name)} ${theme.fg("dim", "›")} ${tone(desc)}  ${state}`, false));
@@ -990,6 +1044,12 @@ export default function (pi: ExtensionAPI) {
 			const entry = list[selected - 1];
 			if (entry.kind === "scheduled") {
 				pi.events.emit("scheduled-tasks:delete", entry.task.id);
+				selected = Math.max(0, selected - 1);
+				refresh();
+				return true;
+			}
+			if (entry.kind === "wait") {
+				pi.events.emit("background-waits:cancel", { id: entry.wait.id });
 				selected = Math.max(0, selected - 1);
 				refresh();
 				return true;
@@ -1399,10 +1459,12 @@ export default function (pi: ExtensionAPI) {
 		rows.clear();
 		sent.clear();
 		scheduled = [];
+		waits.clear();
 		selected = -1;
 		hovered = undefined;
 		if (context.mode === "tui") context.ui.setEditorComponent((tui, theme, keybindings) => new AgentsEditor(tui, theme, keybindings));
 		pi.events.emit("subagents:request", undefined);
+		pi.events.emit("background-waits:request", undefined);
 		pi.events.emit("scheduled-tasks:request", undefined);
 	});
 
@@ -1448,6 +1510,7 @@ export default function (pi: ExtensionAPI) {
 		if (!current || agentId !== current.agentId) return;
 		if (current.transcript.event(event)) current.tui.requestRender();
 	});
+	pi.events.on("background-waits:state", onWaits);
 	pi.events.on("scheduled-tasks:state", onScheduled);
 	pi.events.on("statusline:status-click", (data) => {
 		if ((data as { key?: unknown } | undefined)?.key === STATUS_KEY && selected < 0) focusPanel();

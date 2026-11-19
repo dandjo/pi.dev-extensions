@@ -1,16 +1,17 @@
 /**
- * tmux tab activity: while Pi or one of its subagents works, a block swings back and forth over the number and name of
- * its tmux tab, one character at a time, 20 frames a second, whatever the name's length.
+ * tmux tab activity: while Pi or one of its subagents works, or a background wait runs, a block swings back and forth
+ * over the number and name of its tmux tab, one character at a time, 20 frames a second, whatever the name's length.
  *
  * Pi shows the session in the terminal title, "π - <name> - <directory>", or "π - <directory>" while the session has
- * no name. During a run, a compaction, or while a subagent works (subagents.ts, "subagents:state" on the event bus; not
- * one that waits for an instruction or an answer), this extension writes it as "π - ␟ <name> - <directory>" (an unnamed
- * session's directory as its name), where ␟ stands for the window number and the tab formats below put the number in
- * its place. The title carries tmux style tokens that draw one character like the active tab, in
- * window-status-current-style, undimmed (in reverse video while that style is tmux's default, which sets nothing), and
- * the block moves on by one character per frame over the number, the space, and the name; at either end it turns
- * without a pause. It stops when Pi settles and no subagent works, pauses while an AskUserQuestion dialog waits (the
- * tab's bell shows then), and puts Pi's own title back. The tokens take no room, so the tab keeps its width.
+ * no name. During a run, a compaction, while a subagent works (subagents.ts, "subagents:state" on the event bus; not
+ * one that waits for an instruction or an answer), or while a background wait runs (wait.ts and gitlab.ts,
+ * "background-waits:state"), this extension writes it as "π - ␟ <name> - <directory>" (an unnamed session's
+ * directory as its name), where ␟ stands for the window number and the tab formats below put the number in its place.
+ * The title carries tmux style tokens that draw one character like the active tab, in window-status-current-style,
+ * undimmed (in reverse video while that style is tmux's default, which sets nothing), and the block moves on by one
+ * character per frame over the number, the space, and the name; at either end it turns without a pause. It stops when
+ * Pi settles, no subagent works, and no background wait runs, pauses while an AskUserQuestion dialog waits (the tab's
+ * bell shows then), and puts Pi's own title back. The tokens take no room, so the tab keeps its width.
  *
  * The block shows on the inactive tabs. The active tab, drawn in the same style, shows it only through its format:
  * the setup below turns it into a gap there (#[noreverse]), a letter in the tab colour that runs through the tab's
@@ -74,6 +75,9 @@ const PLAIN_BLOCK = "nodim,reverse";
 /** subagents.ts: the subagents of this session, whenever something changes, and the request for that list. */
 const SUBAGENTS_STATE = "subagents:state";
 const SUBAGENTS_REQUEST = "subagents:request";
+/** wait.ts, gitlab.ts: the background waits of a tool ({ tool, waits }), whenever they change, and the request for them. */
+const WAITS_STATE = "background-waits:state";
+const WAITS_REQUEST = "background-waits:request";
 /** ask-user-question.ts: a dialog opens and closes (answered, declined, or withdrawn), with its tool call id. */
 const QUESTIONS_OPEN = "ask-user-question:open";
 const QUESTIONS_CLOSE = "ask-user-question:close";
@@ -144,6 +148,8 @@ export default function (pi: ExtensionAPI) {
 	let compacting = false;
 	/** The subagents that work now: running, and not waiting for an instruction or an answer. */
 	let agents = 0;
+	/** The background waits running now, by the tool that waits. */
+	const waits = new Map<string, number>();
 	/** The AskUserQuestion dialogs open now, by tool call id. */
 	const asking = new Set<string>();
 	let timer: ReturnType<typeof setInterval> | null = null;
@@ -156,7 +162,8 @@ export default function (pi: ExtensionAPI) {
 	/** Counts the calls of update(), so one that waited for the setup check does nothing once a later one came. */
 	let generation = 0;
 
-	const working = () => (running || compacting || agents > 0) && asking.size === 0;
+	const waiting = () => [...waits.values()].some((count) => count > 0);
+	const working = () => (running || compacting || agents > 0 || waiting()) && asking.size === 0;
 	const dir = (context: ExtensionContext) => path.basename(context.cwd);
 
 	function frame(): void {
@@ -218,6 +225,14 @@ export default function (pi: ExtensionAPI) {
 			agents = now;
 			void update();
 		}),
+		pi.events.on(WAITS_STATE, (data) => {
+			const { tool, waits: list } = (data ?? {}) as { tool?: unknown; waits?: unknown };
+			if (typeof tool !== "string") return;
+			const now = Array.isArray(list) ? list.length : 0;
+			if (!waiting() && now > 0 && !timer) setup = null;
+			waits.set(tool, now);
+			void update();
+		}),
 	];
 
 	pi.on("session_start", (_event, context) => {
@@ -225,9 +240,11 @@ export default function (pi: ExtensionAPI) {
 		running = false;
 		compacting = false;
 		agents = 0;
+		waits.clear();
 		asking.clear();
 		setup = null;
 		pi.events.emit(SUBAGENTS_REQUEST, undefined);
+		pi.events.emit(WAITS_REQUEST, undefined);
 	});
 
 	pi.on("agent_start", () => {

@@ -43,6 +43,7 @@ import {
 	DEFAULT_MAX_BYTES,
 	DEFAULT_MAX_LINES,
 	type ExtensionAPI,
+	type ExtensionContext,
 	formatSize,
 	getAgentDir,
 	getShellConfig,
@@ -918,10 +919,14 @@ function forgetToken(instance: ConfiguredInstance): boolean {
  * - play, retry, cancel, and run change state; with wait: true they wait for the job or pipeline afterwards.
  * - background: true (with wait, or with wait: true) returns at once with an id. The wait goes on without stopping for
  *   the user's messages, and a message brings its result into the conversation and starts a turn when Pi is idle.
- *   stop_wait (waitId) or /gitlab-waits stop <id> ends one, /gitlab-waits lists them; they end with the session, also
- *   on /reload. A check that fails on the network or with a server error is repeated, up to CI_RETRIES times in a row.
+ *   stop_wait (waitId) or /gitlab-waits stop <id> ends one; list and /gitlab-waits list them, those of the wait tool
+ *   too. A check that fails on the network or with a server error is repeated, up to CI_RETRIES times in a row.
+ * - Background waits go on over /reload, and a result that comes while Pi reloads arrives once it has; another session
+ *   (/new, /resume, /fork) ends them and names them in a notice. They are published on the event bus as the wait
+ *   tool's are ("background-waits:state", see wait.ts), for the panel of background-agents.ts and for
+ *   tmux-tab-activity.ts.
  */
-const CI_ACTIONS = ["status", "wait", "log", "play", "retry", "cancel", "run", "stop_wait"] as const;
+const CI_ACTIONS = ["status", "wait", "log", "play", "retry", "cancel", "run", "stop_wait", "list"] as const;
 type CiAction = (typeof CI_ACTIONS)[number];
 /** States of a job or pipeline that still change by themselves; manual waits for a person and counts as settled. */
 const CI_ACTIVE = new Set(["created", "waiting_for_resource", "preparing", "pending", "running", "scheduled", "waiting_for_callback"]);
@@ -938,6 +943,11 @@ const CI_BACKGROUND_TIMEOUT_MIN = 120;
 const CI_RETRIES = 3;
 const CI_MESSAGE_TYPE = "gitlab_pipeline";
 const CI_MAX_TIMEOUT_MIN = 180;
+/** The event-bus contract with wait.ts, background-agents.ts, and tmux-tab-activity.ts. */
+const WAITS_STATE = "background-waits:state";
+const WAITS_REQUEST = "background-waits:request";
+const WAITS_OPEN = "background-waits:open";
+const WAITS_CANCEL = "background-waits:cancel";
 /** What GitLab's timestamped job logs put before each line: the time, the stream, and "+" (append) or a space. */
 const CI_LOG_PREFIX = /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?Z [0-9a-f]{2}[OE][+ ]?/;
 /** The start and end markers of a collapsible section in a job log. */
@@ -1151,7 +1161,7 @@ function ciToolWanted(): boolean {
 const CiParams = {
 	action: StringEnum(CI_ACTIONS, {
 		description:
-			"status: the pipeline and its jobs; wait: until a job or the pipeline settles; log: the end of a job log; play: start a manual job; retry: a job, or the failed jobs of the pipeline; cancel: a job or the pipeline; run: a new pipeline for ref; stop_wait: end a background wait (waitId), the pipeline or job itself goes on",
+			"status: the pipeline and its jobs; wait: until a job or the pipeline settles; log: the end of a job log; play: start a manual job; retry: a job, or the failed jobs of the pipeline; cancel: a job or the pipeline; run: a new pipeline for ref; stop_wait: end a background wait (waitId), the pipeline or job itself goes on; list: the background waits, the wait tool's too",
 	}),
 	project: Type.Optional(
 		Type.String({
@@ -1193,6 +1203,131 @@ const CiParams = {
 		Type.String({ description: "log: only the lines matching this regular expression (case-insensitive), with their numbers" }),
 	),
 };
+
+interface CiWait {
+	id: string;
+	/** "pipeline 123 of group/project", "job 456 of group/project". */
+	what: string;
+	started: number;
+	checks: number;
+	/** What the last check found. */
+	progress: string;
+	intervalMs: number;
+	timeoutMs: number;
+	abort: AbortController;
+}
+
+// A copy of BackgroundWaitView from wait.ts, the event-bus contract between wait.ts, gitlab.ts, background-agents.ts,
+// and tmux-tab-activity.ts: change all alike.
+/** A background wait as other extensions see it ("background-waits:state", { tool, waits } for each tool that waits). */
+interface BackgroundWaitView {
+	/** w1, gp1, …: what cancel and stop_wait take. */
+	id: string;
+	/** The tool that waits: wait, gitlab_pipeline. */
+	tool: string;
+	/** What is awaited. */
+	label: string;
+	/** When the wait ends, in words. */
+	until: string;
+	startedAt: number;
+	checks: number;
+	/** What the last check found, in one line. */
+	last?: string;
+	intervalMs: number;
+	/** When it gives up. */
+	deadline: number;
+}
+
+/** A result that came while no session runtime could take it, during a /reload. */
+interface CiHeld {
+	content: string;
+	details: Record<string, unknown>;
+}
+
+/**
+ * The background waits of gitlab_pipeline, shared by the session runtimes of this process: /reload loads this file
+ * afresh and replaces the runtime, and its pi and ctx throw once replaced. So a wait outlives the runtime that started
+ * it and reports to the one current when it ends.
+ */
+interface CiShared {
+	/** The current runtime; ready once it is complete, after resources_discover. None during a reload. */
+	live?: { pi: ExtensionAPI; ctx: ExtensionContext; ready: boolean };
+	waits: Map<string, CiWait>;
+	counter: number;
+	held: CiHeld[];
+	/** The waits a switch to another session ended, for a notice in that one. */
+	ended: string[];
+}
+const ciStore = globalThis as typeof globalThis & Record<symbol, CiShared | undefined>;
+const ciShared: CiShared = (ciStore[Symbol.for("pi.gitlab-pipeline.waits")] ??= { waits: new Map(), counter: 0, held: [], ended: [] });
+
+function ciClock(ms: number): string {
+	const d = new Date(ms);
+	return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+}
+
+function ciView(entry: CiWait): BackgroundWaitView {
+	return {
+		id: entry.id,
+		tool: CI_MESSAGE_TYPE,
+		label: entry.what,
+		until: `the ${entry.what.split(" ")[0]} settles`,
+		startedAt: entry.started,
+		checks: entry.checks,
+		last: entry.progress,
+		intervalMs: entry.intervalMs,
+		deadline: entry.started + entry.timeoutMs,
+	};
+}
+
+/** Tells the other extensions about the background waits, through the runtime given or else the current one. */
+function ciPublish(via: ExtensionAPI | undefined = ciShared.live?.pi): void {
+	try {
+		via?.events.emit(WAITS_STATE, { tool: CI_MESSAGE_TYPE, waits: [...ciShared.waits.values()].map(ciView) });
+	} catch {
+		// A runtime replaced meanwhile; the next one asks at its start.
+	}
+}
+
+/** Brings a result into the conversation of the current runtime, or keeps it until there is one. */
+function ciDeliver(held: CiHeld): void {
+	const live = ciShared.live;
+	if (live?.ready) {
+		try {
+			live.pi.sendMessage(
+				{ customType: CI_MESSAGE_TYPE, content: held.content, display: true, details: held.details },
+				{ triggerTurn: true, deliverAs: "followUp" },
+			);
+			return;
+		} catch {
+			// The runtime went away meanwhile: kept for the next one.
+		}
+	}
+	ciShared.held.push(held);
+}
+
+function stopCiWait(id: string): string {
+	const entry = ciShared.waits.get(id);
+	const running = [...ciShared.waits.keys()];
+	if (!entry) return `No background wait ${id}${running.length > 0 ? `; running: ${running.join(", ")}` : ""}.`;
+	entry.abort.abort();
+	ciShared.waits.delete(id);
+	ciPublish();
+	const span = ciDuration((Date.now() - entry.started) / 1000) || "0s";
+	return `Stopped background wait ${id} for ${entry.what} after ${span}; the ${entry.what.split(" ")[0]} itself goes on.`;
+}
+
+/** One line per background wait, of every tool that waits. */
+function ciListText(views: BackgroundWaitView[]): string {
+	if (views.length === 0) return "No background waits.";
+	const now = Date.now();
+	return views
+		.map((v) => {
+			const span = `${v.checks} check${v.checks === 1 ? "" : "s"} in ${ciDuration((now - v.startedAt) / 1000) || "0s"}, every ${ciDuration(v.intervalMs / 1000)}`;
+			return `${v.id}  ${v.label} (${v.tool}): until ${v.until}; ${span}, gives up at ${ciClock(v.deadline)}${v.last ? `; last: ${v.last}` : ""}`;
+		})
+		.join("\n");
+}
 
 function ciParameters(instances: Instance[]) {
 	const all = Type.Object({ host: Type.Optional(hostParameter(instances, "GitLab")), ...CiParams });
@@ -1355,20 +1490,63 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	if (!ciToolWanted()) return;
-	type CiWait = { id: string; what: string; started: number; progress: string; abort: AbortController };
-	const ciWaits = new Map<string, CiWait>();
-	let ciWaitCounter = 0;
-	const stopCiWait = (id: string): string => {
-		const entry = ciWaits.get(id);
-		if (!entry) return `No background wait ${id}${ciWaits.size > 0 ? `; running: ${[...ciWaits.keys()].join(", ")}` : ""}.`;
-		entry.abort.abort();
-		ciWaits.delete(id);
-		const span = ciDuration((Date.now() - entry.started) / 1000) || "0s";
-		return `Stopped background wait ${id} for ${entry.what} after ${span}; the ${entry.what.split(" ")[0]} itself goes on.`;
-	};
-	pi.on("session_shutdown", () => {
-		for (const entry of ciWaits.values()) entry.abort.abort();
-		ciWaits.clear();
+	/** The background waits of the other tools, as "background-waits:state" brings them. */
+	const otherWaits = new Map<string, BackgroundWaitView[]>();
+	const allWaits = () => [...[...ciShared.waits.values()].map(ciView), ...[...otherWaits.values()].flat()];
+
+	pi.on("session_start", (_event, ctx) => {
+		ciShared.live = { pi, ctx, ready: false };
+		otherWaits.clear();
+		if (ciShared.ended.length > 0 && ctx.hasUI) {
+			ctx.ui.notify(`Background waits of gitlab_pipeline in the previous session ended with it: ${ciShared.ended.join(", ")}.`, "warning");
+		}
+		ciShared.ended = [];
+		// The other tools publish theirs, and this file's own handler publishes the waits that went on over a /reload.
+		pi.events.emit(WAITS_REQUEST, undefined);
+	});
+	// Pi emits resources_discover after session_start, at the start and at /reload alike; a message sent before could
+	// start a turn inside the reload. The results that came meanwhile go out then.
+	pi.on("resources_discover", () => {
+		setTimeout(() => {
+			const live = ciShared.live;
+			if (live?.pi !== pi) return;
+			live.ready = true;
+			for (const held of ciShared.held.splice(0)) ciDeliver(held);
+		}, 0);
+	});
+	pi.on("session_shutdown", (event) => {
+		if (ciShared.live?.pi === pi) ciShared.live = undefined;
+		if (event.reason === "reload") return;
+		// Another session or the end of Pi: the waits belong to the conversation that started them.
+		const ended = [
+			...[...ciShared.waits.values()].map((entry) => `${entry.id} (${entry.what})`),
+			...ciShared.held.map((held) => `${String(held.details.waitId)} (its result unread)`),
+		];
+		for (const entry of ciShared.waits.values()) entry.abort.abort();
+		ciShared.waits.clear();
+		ciShared.held = [];
+		if (event.reason !== "quit") ciShared.ended.push(...ended);
+	});
+	pi.events.on(WAITS_REQUEST, () => ciPublish(pi));
+	pi.events.on(WAITS_STATE, (data) => {
+		const { tool, waits } = (data ?? {}) as { tool?: unknown; waits?: unknown };
+		if (typeof tool === "string" && tool !== CI_MESSAGE_TYPE && Array.isArray(waits)) otherWaits.set(tool, waits as BackgroundWaitView[]);
+	});
+	pi.events.on(WAITS_OPEN, (data) => {
+		const entry = ciShared.waits.get(String((data as { id?: unknown } | undefined)?.id));
+		if (!entry) return;
+		const v = ciView(entry);
+		const text = [
+			`Background wait ${v.id} of gitlab_pipeline: ${v.label}`,
+			`Until ${v.until}`,
+			`Since ${ciClock(v.startedAt)} (${ciDuration((Date.now() - v.startedAt) / 1000) || "0s"}), ${v.checks} check${v.checks === 1 ? "" : "s"} every ${ciDuration(v.intervalMs / 1000)}, gives up at ${ciClock(v.deadline)}`,
+			`Last check: ${v.last}`,
+		].join("\n");
+		ciShared.live?.ctx.ui.notify(text, "info");
+	});
+	pi.events.on(WAITS_CANCEL, (data) => {
+		const id = String((data as { id?: unknown } | undefined)?.id);
+		if (ciShared.waits.has(id)) ciShared.live?.ctx.ui.notify(stopCiWait(id), "info");
 	});
 
 	pi.registerTool({
@@ -1384,8 +1562,9 @@ export default function (pi: ExtensionAPI) {
 			"lines matching grep, without colour codes and timestamps. play starts a manual job (with variables), retry runs " +
 			"a job again (without job: the failed jobs of the pipeline), cancel stops a job or the pipeline, run starts a " +
 			"pipeline for ref (with variables); with wait: true they wait afterwards. background: true (with wait) returns at " +
-			"once with an id, and a message brings the result later as a turn of its own; stop_wait with waitId ends such a " +
-			"wait, the pipeline itself goes on. The project defaults to the one of " +
+			"once with an id, and a message brings the result later as a turn of its own; it goes on over /reload. stop_wait " +
+			"with waitId ends such a wait, the pipeline itself goes on; list lists the background waits, the wait tool's too. " +
+			"The project defaults to the one of " +
 			"the working directory's origin remote; the pipeline is pipeline (its id), the head pipeline of mr, or the " +
 			"latest of ref or of the project; a job is its name in that pipeline or its id.",
 		promptSnippet: "See, wait for, and drive GitLab CI pipelines and jobs: status, wait, log, play, retry, cancel, run",
@@ -1405,6 +1584,7 @@ export default function (pi: ExtensionAPI) {
 				if (!id) throw new Error("stop_wait needs waitId: the id of a background wait, as gp1");
 				return { content: [{ type: "text", text: stopCiWait(id) }], details: { host: "", project: "", action } };
 			}
+			if (action === "list") return { content: [{ type: "text", text: ciListText(allWaits()) }], details: { host: "", project: "", action } };
 			const background = params.background === true;
 			if (background && action !== "wait" && !(params.wait && (action === "play" || action === "retry" || action === "run"))) {
 				throw new Error("background works with action wait, or with wait: true on play, retry, and run");
@@ -1548,8 +1728,9 @@ export default function (pi: ExtensionAPI) {
 			const intervalMs = Math.min(Math.max(params.interval ?? CI_INTERVAL_S, 5), 300) * 1000;
 			const defaultTimeout = background ? CI_BACKGROUND_TIMEOUT_MIN : CI_TIMEOUT_MIN;
 			const timeoutMs = Math.min(Math.max(params.timeout ?? defaultTimeout, 0.5), CI_MAX_TIMEOUT_MIN) * 60_000;
-			// Where a check reports: the tool row in the foreground, the /gitlab-waits list in the background.
-			let progressTo = (text: string) => onUpdate?.({ content: [{ type: "text", text: mask(text) }], details });
+			// Where a check reports: the tool row in the foreground, the list of background waits in the background; text
+			// for the row, found for the list.
+			let progressTo = (text: string, _checks: number, _found: string) => onUpdate?.({ content: [{ type: "text", text: mask(text) }], details });
 			const interrupted = () => !background && ctx.hasPendingMessages();
 			type Polled<T> = { outcome: "settled" | "timeout" | "interrupted"; value: T; checks: number; elapsedMs: number };
 			const poll = async <T>(check: () => Promise<{ settled: boolean; progress: string; value: T }>): Promise<Polled<T>> => {
@@ -1575,9 +1756,10 @@ export default function (pi: ExtensionAPI) {
 						if (state.settled) return done("settled");
 						if (elapsedMs >= timeoutMs) return done("timeout");
 						if (interrupted()) return done("interrupted");
-						progressTo(`${span}, ${checks} checks: ${state.progress}`);
+						progressTo(`${span}, ${checks} checks: ${state.progress}`, checks, state.progress);
 					} else {
-						progressTo(`${span}, ${checks} checks: the last ${failures} failed, trying again`);
+						const found = `the last ${failures} failed, trying again`;
+						progressTo(`${span}, ${checks} checks: ${found}`, checks, found);
 					}
 					const until = Date.now() + Math.min(intervalMs, Math.max(timeoutMs - elapsedMs, 1000));
 					while (Date.now() < until && !active?.aborted && !interrupted()) {
@@ -1625,34 +1807,30 @@ export default function (pi: ExtensionAPI) {
 			const settle = async (kind: "job" | "pipeline", id: number): Promise<string> => {
 				const run = () => (kind === "job" ? waitJob(id) : waitPipeline(id));
 				if (!background) return run();
+				// The wait runs on in this closure over /reload, and reports through ciShared, never through this runtime's pi.
 				const entry: CiWait = {
-					id: `gp${++ciWaitCounter}`,
+					id: `gp${++ciShared.counter}`,
 					what: `${kind} ${id} of ${label}`,
 					started: Date.now(),
+					checks: 0,
 					progress: "first check",
+					intervalMs,
+					timeoutMs,
 					abort: new AbortController(),
 				};
-				ciWaits.set(entry.id, entry);
+				ciShared.waits.set(entry.id, entry);
+				ciPublish();
 				active = entry.abort.signal;
-				progressTo = (text) => {
-					entry.progress = mask(text);
+				progressTo = (_text, checks, found) => {
+					entry.checks = checks;
+					entry.progress = mask(found);
+					ciPublish();
 				};
 				const deliver = (text: string) => {
 					if (entry.abort.signal.aborted) return;
-					ciWaits.delete(entry.id);
-					try {
-						pi.sendMessage(
-							{
-								customType: CI_MESSAGE_TYPE,
-								content: limited(mask(text), "", false),
-								display: true,
-								details: { ...details, waitId: entry.id },
-							},
-							{ triggerTurn: true, deliverAs: "followUp" },
-						);
-					} catch {
-						// the session is gone
-					}
+					if (ciShared.waits.get(entry.id) === entry) ciShared.waits.delete(entry.id);
+					ciPublish();
+					ciDeliver({ content: limited(mask(text), "", false), details: { ...details, waitId: entry.id } });
 				};
 				void run().then(
 					(text) => deliver(`Background wait ${entry.id}: ${text}`),
@@ -1799,18 +1977,14 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("gitlab-waits", {
-		description: "List gitlab_pipeline's background waits (/gitlab-waits stop <id> ends one)",
+		description: "List the background waits, the wait tool's too (/gitlab-waits stop <id> ends one of gitlab_pipeline's)",
 		handler: async (args, ctx) => {
 			const [verb, id] = args.trim().split(/\s+/);
 			if (verb === "stop" && id) {
 				ctx.ui.notify(stopCiWait(id), "info");
 				return;
 			}
-			if (ciWaits.size === 0) {
-				ctx.ui.notify("No background waits of gitlab_pipeline.", "info");
-				return;
-			}
-			ctx.ui.notify([...ciWaits.values()].map((entry) => `${entry.id}  ${entry.what}: ${entry.progress}`).join("\n"), "info");
+			ctx.ui.notify(ciListText(allWaits()), "info");
 		},
 	});
 }
