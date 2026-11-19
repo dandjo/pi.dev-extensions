@@ -9,10 +9,10 @@ Claude Code's hooks, brings over Claude Code's subagents, questions, side
 questions, goals, loops, scheduled prompts, diff view, agent panel, and Remote
 Control for the Claude app, reads and changes OpenProject and GitLab, reads
 and writes the clipboard, reads PDF and Office documents as Markdown, controls
-your Chrome, keeps requests alive through network trouble, continues after a
-usage limit resets, keeps long conversations small, waits for pipelines and
-deploys without spending requests, keeps itself and the Claude Agent SDK
-current, and fixes how the provider resumes after edited history.
+your Chrome, keeps requests alive through network trouble, keeps long
+conversations small, waits for pipelines and deploys without spending
+requests, keeps itself and the Claude Agent SDK current, and fixes how the
+provider resumes after edited history.
 
 Install it as a Pi package (step 3 of the setup below): its `package.json`
 names `extensions/`, which holds one file per extension.
