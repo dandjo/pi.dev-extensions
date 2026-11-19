@@ -8,7 +8,9 @@
  * - <project>/.claude/settings.json and .claude/settings.local.json, only once the project is trusted in Pi,
  * - hooks/hooks.json of every Claude Code plugin in ~/.pi/agent/claude-code-plugins (one directory per plugin, or a
  *   link to one) and of every plugin Claude Code installed for the user and enabled in its user settings (a plugin in
- *   claude-code-plugins replaces an installed one of the same name), with CLAUDE_PLUGIN_ROOT pointing at the plugin.
+ *   claude-code-plugins replaces an installed one of the same name), with CLAUDE_PLUGIN_ROOT pointing at the plugin;
+ *   not of a plugin that the switch files of claude-code-plugins.ts turn off (the user's, and the project's once it
+ *   is trusted).
  * `disableAllHooks: true` in one of the settings files turns them all off.
  *
  * Events, and the Pi event each one runs at:
@@ -131,16 +133,39 @@ function readJson(file: string): any {
 }
 
 /**
+ * Whether a plugin is on: the switch files of claude-code-plugins.ts can turn it off, claude-code-plugins.json in Pi's
+ * agent directory and, once the project is trusted, <cwd>/.pi/claude-code-plugins.json over it ("plugins":
+ * {"<name>": false}; a project's true turns on what the user's file turns off). A file that cannot be read counts as
+ * none. claude-code-agents.ts carries a copy of this function, claude-code-plugins.ts the same rule: change them alike.
+ */
+function pluginOn(name: string, cwd: string, trusted: boolean): boolean {
+	const files = [path.join(getAgentDir(), "claude-code-plugins.json")];
+	if (trusted) files.push(path.join(cwd, ".pi", "claude-code-plugins.json"));
+	let on = true;
+	for (const file of files) {
+		try {
+			const value = JSON.parse(readFileSync(file, "utf8"))?.plugins?.[name];
+			if (typeof value === "boolean") on = value;
+		} catch {
+			// no such file, or not JSON
+		}
+	}
+	return on;
+}
+
+/**
  * The Claude Code plugins Pi uses, by name: every directory in ~/.pi/agent/claude-code-plugins (or a link to one),
  * then the plugins Claude Code installed for the user (plugins/installed_plugins.json) and enabled in
- * its user settings (enabledPlugins), at their installPath. Of two plugins of one name, the one found first wins.
+ * its user settings (enabledPlugins), at their installPath. Of two plugins of one name, the one found first wins; a
+ * plugin the switch files turn off (pluginOn) is left out, in either place.
  * claude-code-agents.ts carries a copy of this function: change them alike.
  */
-function claudePlugins(): { name: string; root: string }[] {
+function claudePlugins(cwd: string, trusted: boolean): { name: string; root: string }[] {
 	const plugins = new Map<string, string>();
 	const linked = path.join(getAgentDir(), "claude-code-plugins");
 	try {
 		for (const name of readdirSync(linked).sort()) {
+			if (!pluginOn(name, cwd, trusted)) continue;
 			try {
 				if (statSync(path.join(linked, name)).isDirectory()) plugins.set(name, path.join(linked, name));
 			} catch {
@@ -162,6 +187,7 @@ function claudePlugins(): { name: string; root: string }[] {
 	for (const id of Object.keys(installed).sort()) {
 		const name = id.split("@")[0];
 		if (!name || enabled[id] !== true || plugins.has(name) || !Array.isArray(installed[id])) continue;
+		if (!pluginOn(name, cwd, trusted)) continue;
 		const entry = installed[id].find((e: any) => e?.scope === "user" && typeof e.installPath === "string");
 		if (entry && existsSync(entry.installPath)) plugins.set(name, entry.installPath);
 	}
@@ -208,7 +234,7 @@ function loadConfig(cwd: string, trusted: boolean): Config {
 			all.push(hook);
 		}
 	}
-	for (const { name, root } of claudePlugins()) {
+	for (const { name, root } of claudePlugins(cwd, trusted)) {
 		const file = path.join(root, "hooks", "hooks.json");
 		const json = readJson(file);
 		if (!json) continue;

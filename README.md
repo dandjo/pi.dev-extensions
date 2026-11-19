@@ -49,7 +49,7 @@ answers.
 
 | Extension                   | What it does                                                                              | Needs                                                            |
 | :-------------------------- | :---------------------------------------------------------------------------------------- | :--------------------------------------------------------------- |
-| `claude-code-plugins.ts`    | Loads the plugins of Claude Code marketplace packages into Pi                             | Each marketplace installed with `pi install`                     |
+| `claude-code-plugins.ts`    | Loads the plugins of Claude Code marketplaces into Pi; `/plugins` turns them on or off    | Each marketplace installed with `pi install`                     |
 | `claude-code-hooks.ts`      | Runs Claude Code's hooks, from settings files and plugins, at Pi's events                 | —                                                                |
 | `claude-code-agents.ts`     | Adds Claude Code's agent definitions, tool names, and model families to `Agent`           | `subagents.ts`                                                   |
 
@@ -363,8 +363,8 @@ model: the plugins work with any provider.
 
 - A marketplace is a Pi package whose folder holds
   `.claude-plugin/marketplace.json`, installed for you (not with `--local`)
-  from git or from a local folder. Without one the extension does nothing; it
-  clones nothing itself.
+  from git or from a local folder. Without one the extension only offers
+  `/plugins`, for the plugins Claude Code installed; it clones nothing itself.
 
   ```bash
   pi install git:git@github.com:acme/claude-marketplace
@@ -403,6 +403,40 @@ model: the plugins work with any provider.
   marketplaces share goes to the first. Links into a copy follow the copies,
   and so does a broken link of a mirrored plugin's name; any other entry there
   is left alone.
+- Every plugin, and every skill of a mirrored plugin, is on unless a switch
+  file turns it off: `~/.pi/agent/claude-code-plugins.json` for you, and the
+  project's `.pi/claude-code-plugins.json` over it once Pi trusts the project.
+  A skill goes by Claude Code's name, `<plugin>:<skill>`:
+
+  ```json
+  {
+    "plugins": { "my-plugin": false },
+    "skills": { "other-plugin:review": false }
+  }
+  ```
+
+  In a project, `true` turns on what your file turns off, so
+  `{"plugins": {"my-plugin": true}}` in one project brings it back there.
+  Pi loads only the skills that are on, of plugins that are on;
+  [claude-code-hooks](#claude-code-hooks) and
+  [claude-code-agents](#claude-code-agents) skip a plugin that is off, the
+  copy Claude Code installed included. The links stay, since one project may
+  need what another turns off. Pi asks for project trust only for its own
+  protected files (`.pi/settings.json`, `.pi/extensions/`, …), so a project
+  with nothing but this file counts as trusted.
+- `/plugins` lists the plugins Pi uses with their skills below them, like
+  `/settings`: Enter or Space switches the selected one, typing searches, Tab
+  moves between your file and the project's, where a row can also follow your
+  setting. Every switch is saved at once, and Pi reloads when the list closes.
+  Without the TUI, `/plugins` prints the list.
+- `/plugins list` prints the plugins with what they bring (skills, hooks,
+  agents) and the switches that are set; `/plugins enable|disable|reset <name>`
+  sets one, in your file or with `--project` in the project's, and Pi
+  reloads. `<name>` is a plugin or `<plugin>:<skill>`; Pi's skill name
+  (`other-plugin-review`) works too. In your file `enable` removes the
+  switch, as on is the default there; `reset` removes it in either file.
+  Other sessions take a change at their next start or reload, their hooks
+  already at their next prompt.
 - Pi warns at start about skill descriptions longer than 1,024 characters (the
   skill loads anyway).
 - Never edit the package's clone in `~/.pi/agent/git/` or the copies in
@@ -1260,8 +1294,10 @@ no Claude model: the hooks run whichever model answers.
   `~/.claude/settings.json` (`enabledPlugins`; a plugin of the same name in
   `claude-code-plugins` replaces it), with
   `CLAUDE_PLUGIN_ROOT` set to the plugin and `CLAUDE_PLUGIN_DATA` to
-  `~/.pi/agent/plugin-data/<plugin>`. `disableAllHooks: true` in a settings
-  file turns them all off. The files are read again before every prompt.
+  `~/.pi/agent/plugin-data/<plugin>`; not of a plugin the switch files of
+  [claude-code-plugins](#claude-code-plugins) turn off.
+  `disableAllHooks: true` in a settings file turns them all off. The files
+  are read again before every prompt.
 - Events: `SessionStart` (at start, resume, `/new`, fork, reload, and after
   compaction; its output goes into the system prompt), `UserPromptSubmit`,
   `PreToolUse` (`deny` and exit 2 block the call, `ask` asks you,
@@ -1444,7 +1480,9 @@ Without `subagents.ts` it does nothing.
   `~/.pi/agent/agents/`; from the trusted project's `.claude/agents/`, at every
   level up to the repository root, below that level's `.pi/agents/`; and from
   `agents/` of the plugins in `~/.pi/agent/claude-code-plugins/` and of the plugins Claude Code installed for you and
-  enabled, as `<plugin>:<name>`, below every user and project agent.
+  enabled, as `<plugin>:<name>`, below every user and project agent; not of a
+  plugin the switch files of [claude-code-plugins](#claude-code-plugins) turn
+  off.
 - Tool entries in Claude Code's names (`Read`, `Bash`, `Glob`, …) and
   permission rules (`Bash(git *)`) name the matching Pi tools, in every
   definition, those in `.pi/agents/` included.
