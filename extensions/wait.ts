@@ -8,14 +8,16 @@
  *   match), no longer matches it ("nomatch"), the check succeeds ("success", the default without match), fails
  *   ("failure"), or its output changes ("change"). It gives up after timeout minutes (default 30). The first check
  *   runs at once.
- * - In the foreground the call returns when the condition holds, with the last output. It stops early when the user
- *   sends a message, so a long wait never shuts them out; Esc stops it. The tool row shows the checks so far.
+ * - In the foreground the call returns when the condition holds, with the last output; Esc stops it. The tool row
+ *   shows the checks so far. When the user sends a message meanwhile, the wait goes on in the background with the
+ *   checks it made, and the call returns at once with its id, so a long wait never shuts the user out.
  * - background: true (shell commands only) returns at once. When the condition holds or the wait gives up, a message
  *   brings the result into the conversation and starts a turn when Pi is idle. list: true and /waits list the
  *   background waits, gitlab_pipeline's too; cancel: "<id>" or /waits cancel <id> stops one.
  * - Background waits go on over /reload, and a result that comes while Pi reloads arrives once it has. Another session
  *   (/new, /resume, /fork) ends them, as they belong to the conversation that started them; the next session names
- *   them in a notice.
+ *   them in a notice. A wait for a tool, which only gets to the background by a message from the user, calls the tool
+ *   through the context of its tool call, which the runtime takes along: it ends at /reload, and a message says so.
  * - Other extensions see the background waits on the event bus: "background-waits:state" carries { tool, waits }
  *   whenever they change and on "background-waits:request"; "background-waits:cancel" with { id } stops one.
  *   background-agents.ts lists them in its panel below the prompt, tmux-tab-activity.ts counts them as work, and
@@ -46,7 +48,8 @@ const CANCEL = "background-waits:cancel";
 const TOOL = "wait";
 
 type Until = "match" | "nomatch" | "success" | "failure" | "change";
-type Status = "met" | "timeout" | "interrupted" | "cancelled" | "aborted";
+/** How a wait ended; "ended": a wait for a tool, at the /reload of the runtime whose tool context it used. */
+type Status = "met" | "timeout" | "cancelled" | "aborted" | "ended";
 
 interface Check {
 	ok: boolean;
@@ -85,6 +88,21 @@ interface Background {
 	/** The end of the last check's output. */
 	output?: string;
 	abort: AbortController;
+	/** The runtime whose tool context the checks use (a wait for a tool): its /reload ends the wait. */
+	boundTo?: unknown;
+	/** Where the wait stands, for the message its end at a /reload sends. */
+	run?: Run;
+}
+
+/** Where a wait stands: carried over when a wait in the foreground goes on in the background. */
+interface Run {
+	started: number;
+	checks: number;
+	/** The first output, for until "change". */
+	baseline?: string;
+	last?: Check;
+	/** When the next check is due; none before the first. */
+	nextAt?: number;
 }
 
 // A copy of BackgroundWaitView from wait.ts, the event-bus contract between wait.ts, gitlab.ts, background-agents.ts,
@@ -241,6 +259,17 @@ async function runTool(ctx: any, name: string, args: unknown, signal: AbortSigna
 	return { ok: !outcome?.isError, output };
 }
 
+/** A check that never throws: a tool context gone stale with its runtime, say, counts as a failed check. */
+function safe(check: (signal: AbortSignal) => Promise<Check>): (signal: AbortSignal) => Promise<Check> {
+	return async (signal) => {
+		try {
+			return await check(signal);
+		} catch (error) {
+			return { ok: false, output: "", note: error instanceof Error ? error.message : String(error) };
+		}
+	};
+}
+
 /** Sleeps, waking once a second for the abort signal and, in the foreground, for a message from the user. */
 async function pause(ms: number, signal: AbortSignal, interrupted?: () => boolean): Promise<void> {
 	const end = Date.now() + ms;
@@ -256,9 +285,9 @@ function resultText(spec: Spec, status: Status, checks: number, elapsedMs: numbe
 	const head = {
 		met: `${id ? `${who}: condition` : "Condition"} met after ${span}: ${describeCondition(spec)}.`,
 		timeout: `${id ? `${who} gave up` : "Gave up"} after ${span}; condition not met: ${describeCondition(spec)}.`,
-		interrupted: `Stopped waiting after ${span} because the user sent a message; not yet: ${describeCondition(spec)}.`,
 		cancelled: `${id ? `${who} was cancelled` : "Cancelled"} after ${span}.`,
 		aborted: `Aborted after ${span}.`,
+		ended: `${who} ended with the /reload after ${span}: a wait for a tool cannot outlive the runtime it calls the tool through. Not yet: ${describeCondition(spec)}. Wait again to go on.`,
 	}[status];
 	if (!last) return head;
 	const exit = spec.command ? ` (${last.note ?? `exit ${last.code}`})` : last.ok ? "" : " (error)";
@@ -335,23 +364,29 @@ export default function (pi: ExtensionAPI) {
 	const others = new Map<string, BackgroundWaitView[]>();
 	const allViews = () => [...[...shared.waits.values()].map(view), ...[...others.values()].flat()];
 
-	/** Runs checks until the condition holds, the time is up, or the wait is stopped. */
+	/**
+	 * Runs checks until the condition holds, the time is up, or the wait is stopped; in the foreground also until the
+	 * user sends a message ("handover"), and then run says where it stands, for the background to go on from there.
+	 */
 	async function loop(
 		spec: Spec,
 		check: (signal: AbortSignal) => Promise<Check>,
 		signal: AbortSignal,
+		run: Run,
 		progress: (checks: number, elapsedMs: number, last: Check) => void,
 		interrupted?: () => boolean,
-	): Promise<{ status: Status; checks: number; elapsedMs: number; last?: Check }> {
-		const started = Date.now();
-		let checks = 0;
-		let last: Check | undefined;
-		let baseline: string | undefined;
+	): Promise<Status | "handover"> {
 		for (;;) {
-			if (signal.aborted) return { status: "aborted", checks, elapsedMs: Date.now() - started, last };
-			last = await check(signal);
-			checks++;
-			if (signal.aborted) return { status: "aborted", checks, elapsedMs: Date.now() - started, last };
+			if (run.nextAt !== undefined) {
+				await pause(run.nextAt - Date.now(), signal, interrupted);
+				if (signal.aborted) return "aborted";
+				if (interrupted?.()) return "handover";
+			}
+			if (signal.aborted) return "aborted";
+			const last = await check(signal);
+			run.last = last;
+			run.checks++;
+			if (signal.aborted) return "aborted";
 			const met =
 				spec.until === "match"
 					? !!spec.regex?.test(last.output)
@@ -361,37 +396,43 @@ export default function (pi: ExtensionAPI) {
 							? last.ok
 							: spec.until === "failure"
 								? !last.ok
-								: baseline !== undefined && last.output !== baseline;
-			if (spec.until === "change" && baseline === undefined) baseline = last.output;
-			const elapsedMs = Date.now() - started;
-			if (met) return { status: "met", checks, elapsedMs, last };
-			if (elapsedMs >= spec.timeoutMs) return { status: "timeout", checks, elapsedMs, last };
-			if (interrupted?.()) return { status: "interrupted", checks, elapsedMs, last };
-			progress(checks, elapsedMs, last);
-			await pause(Math.min(spec.intervalMs, spec.timeoutMs - elapsedMs), signal, interrupted);
-			if (interrupted?.()) return { status: "interrupted", checks, elapsedMs: Date.now() - started, last };
+								: run.baseline !== undefined && last.output !== run.baseline;
+			if (spec.until === "change" && run.baseline === undefined) run.baseline = last.output;
+			const elapsedMs = Date.now() - run.started;
+			if (met) return "met";
+			if (elapsedMs >= spec.timeoutMs) return "timeout";
+			progress(run.checks, elapsedMs, last);
+			run.nextAt = Date.now() + Math.min(spec.intervalMs, spec.timeoutMs - elapsedMs);
 		}
 	}
 
-	// The loop runs on in the module that started it, and reports through `shared`, never through this runtime's pi.
-	function startBackground(spec: Spec, ctx: ExtensionContext): Background {
+	/**
+	 * Starts a background wait, or goes on in the background with one from the foreground (run). The loop runs on in the
+	 * module that started it, and reports through `shared`, never through this runtime's pi. A wait for a tool is bound
+	 * to this runtime (boundTo), whose tool context it calls the tool through.
+	 */
+	function startBackground(spec: Spec, check: (signal: AbortSignal) => Promise<Check>, run: Run = { started: Date.now(), checks: 0 }): Background {
 		const id = `w${++shared.counter}`;
-		const entry: Background = { id, spec, started: Date.now(), checks: 0, abort: new AbortController() };
+		const entry: Background = { id, spec, started: run.started, checks: run.checks, abort: new AbortController(), run };
+		if (spec.tool) entry.boundTo = pi;
+		const note = (last: Check) => {
+			entry.checks = run.checks;
+			entry.last = oneLine(last.output.trim().split("\n").at(-1) ?? "", 200) || last.note || undefined;
+			entry.output = last.output.trim() ? tail(last.output) : undefined;
+		};
+		if (run.last) note(run.last);
 		shared.waits.set(id, entry);
 		publish();
-		const cwd = ctx.cwd;
-		const check = (signal: AbortSignal) => runCommand(spec.command as string, cwd, checkTimeout(spec), signal);
-		void loop(spec, check, entry.abort.signal, (checks, _elapsedMs, last) => {
-			entry.checks = checks;
-			entry.last = oneLine(last.output.trim().split("\n").at(-1) ?? "", 200) || undefined;
-			entry.output = last.output.trim() ? tail(last.output) : undefined;
+		void loop(spec, safe(check), entry.abort.signal, run, (_checks, _elapsedMs, last) => {
+			note(last);
 			publish();
-		}).then((r) => {
+		}).then((status) => {
 			if (shared.waits.get(id) === entry) shared.waits.delete(id);
 			publish();
-			if (r.status === "aborted") return;
-			const details: WaitDetails = { id, label: spec.label, condition: describeCondition(spec), status: r.status, checks: r.checks, elapsedMs: r.elapsedMs };
-			deliver({ content: resultText(spec, r.status, r.checks, r.elapsedMs, r.last, id), details });
+			if (status === "aborted" || status === "handover") return;
+			const elapsedMs = Date.now() - run.started;
+			const details: WaitDetails = { id, label: spec.label, condition: describeCondition(spec), status, checks: run.checks, elapsedMs };
+			deliver({ content: resultText(spec, status, run.checks, elapsedMs, run.last, id), details });
 		});
 		return entry;
 	}
@@ -422,7 +463,21 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("session_shutdown", (event) => {
 		if (shared.live?.pi === pi) shared.live = undefined;
-		if (event.reason === "reload") return;
+		if (event.reason === "reload") {
+			// The waits for a tool call it through this runtime, which the reload replaces: they end, and the next runtime
+			// says so in a message.
+			for (const entry of [...shared.waits.values()]) {
+				if (entry.boundTo !== pi) continue;
+				entry.abort.abort();
+				shared.waits.delete(entry.id);
+				const checks = entry.run?.checks ?? entry.checks;
+				const elapsedMs = Date.now() - entry.started;
+				const condition = describeCondition(entry.spec);
+				const details: WaitDetails = { id: entry.id, label: entry.spec.label, condition, status: "ended", checks, elapsedMs };
+				shared.held.push({ content: resultText(entry.spec, "ended", checks, elapsedMs, entry.run?.last, entry.id), details });
+			}
+			return;
+		}
 		// Another session or the end of Pi: the waits belong to the conversation that started them.
 		const ended = [
 			...[...shared.waits.values()].map((entry) => `${entry.id} (${entry.spec.label})`),
@@ -476,7 +531,7 @@ export default function (pi: ExtensionAPI) {
 			"every interval seconds (default 30) until the condition holds, at most timeout minutes (default 30). " +
 			'until: "match" (output matches the regex match; the default when match is given), "nomatch" (no longer matches), ' +
 			'"success" (exit 0, or the tool call succeeds; the default otherwise), "failure", or "change" (output differs from the first check). ' +
-			"Returns the last output. In the foreground it stops early when the user sends a message. " +
+			"Returns the last output. When the user sends a message meanwhile, the wait goes on in the background and the call returns at once with its id. " +
 			"background: true (shell commands only) returns at once and a message brings the result later; it goes on over /reload. " +
 			"list: true lists the background waits (gitlab_pipeline's too), cancel: id stops one. " +
 			'Examples: {command: "docker service ps web --format {{.CurrentState}}", match: "^Running"}; ' +
@@ -537,9 +592,11 @@ export default function (pi: ExtensionAPI) {
 				timeoutMs: Math.min(Math.max(0.1, params.timeout ?? 30), 1440) * 60_000,
 			};
 
+			const cwd = ctx.cwd;
+			const runCheck = (s: AbortSignal) => runCommand(spec.command as string, cwd, checkTimeout(spec), s);
 			if (params.background) {
 				if (!spec.command) throw new Error("background works with command only; wait for a tool in the foreground");
-				const entry = startBackground(spec, ctx);
+				const entry = startBackground(spec, runCheck);
 				const details: WaitDetails = { id: entry.id, label: spec.label, condition: describeCondition(spec), status: "background", checks: 0, elapsedMs: 0 };
 				return {
 					content: [
@@ -558,15 +615,15 @@ export default function (pi: ExtensionAPI) {
 			const onAbort = () => abort.abort();
 			signal?.addEventListener("abort", onAbort, { once: true });
 			if (signal?.aborted) abort.abort();
-			const check = spec.command
-				? (s: AbortSignal) => runCommand(spec.command as string, ctx.cwd, checkTimeout(spec), s)
-				: (s: AbortSignal) => runTool(ctx, spec.tool as string, spec.args, s);
+			const check = spec.command ? runCheck : (s: AbortSignal) => runTool(ctx, spec.tool as string, spec.args, s);
 			const condition = describeCondition(spec);
+			const run: Run = { started: Date.now(), checks: 0 };
 			try {
-				const r = await loop(
+				const status = await loop(
 					spec,
 					check,
 					abort.signal,
+					run,
 					(checks, elapsedMs, last) => {
 						const details: WaitDetails = { label: spec.label, condition, status: "running", checks, elapsedMs };
 						const line = oneLine(last.output.trim().split("\n").at(-1) ?? "", 100);
@@ -574,9 +631,22 @@ export default function (pi: ExtensionAPI) {
 					},
 					() => ctx.hasPendingMessages(),
 				);
-				if (r.status === "aborted") throw new Error("wait aborted");
-				const details: WaitDetails = { label: spec.label, condition, status: r.status, checks: r.checks, elapsedMs: r.elapsedMs };
-				return { content: [{ type: "text", text: resultText(spec, r.status, r.checks, r.elapsedMs, r.last) }], details };
+				if (status === "aborted") throw new Error("wait aborted");
+				const elapsedMs = Date.now() - run.started;
+				if (status === "handover") {
+					// The user wrote: the wait makes way for them and goes on in the background, from where it stands.
+					const entry = startBackground(spec, check, run);
+					const details: WaitDetails = { id: entry.id, label: spec.label, condition, status: "background", checks: run.checks, elapsedMs };
+					const bound = spec.tool ? " It calls the tool through this runtime, so a /reload ends it." : "";
+					const text =
+						`The user sent a message, so the wait goes on in the background as ${entry.id}: ${condition}, checking every ` +
+						`${formatDuration(spec.intervalMs)}; ${run.checks} check${run.checks === 1 ? "" : "s"} in ${formatDuration(elapsedMs)} so far, ` +
+						`gives up at ${clock(run.started + spec.timeoutMs)}.${bound} A message brings the result; answer the user meanwhile.` +
+						(run.last ? `\nLast output:\n${tail(run.last.output)}` : "");
+					return { content: [{ type: "text", text }], details };
+				}
+				const details: WaitDetails = { label: spec.label, condition, status, checks: run.checks, elapsedMs };
+				return { content: [{ type: "text", text: resultText(spec, status, run.checks, elapsedMs, run.last) }], details };
 			} finally {
 				signal?.removeEventListener("abort", onAbort);
 			}

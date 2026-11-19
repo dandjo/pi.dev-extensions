@@ -9,10 +9,10 @@ Claude Code's hooks, brings over Claude Code's subagents, questions, side
 questions, goals, loops, scheduled prompts, diff view, agent panel, and Remote
 Control for the Claude app, reads and changes OpenProject and GitLab, reads
 and writes the clipboard, reads PDF and Office documents as Markdown, controls
-your Chrome, keeps requests alive through network trouble, keeps long
-conversations small, waits for pipelines and deploys without spending
-requests, keeps itself and the Claude Agent SDK current, and fixes how the
-provider resumes after edited history.
+your Chrome, keeps requests alive through network trouble, continues after a
+usage limit resets, keeps long conversations small, waits for pipelines and
+deploys without spending requests, keeps itself and the Claude Agent SDK
+current, and fixes how the provider resumes after edited history.
 
 Install it as a Pi package (step 3 of the setup below): its `package.json`
 names `extensions/`, which holds one file per extension.
@@ -877,8 +877,9 @@ out.
   - `wait`: checks a job, or the pipeline, every `interval` seconds (15)
     until it settles — success, failed, canceled, skipped, or held at a
     manual job — for at most `timeout` minutes (30, at most 180). The checks
-    cost no model requests, the tool row shows the state meanwhile, and a
-    message from you stops it early, as with `wait`. A failed pipeline or job
+    cost no model requests, and the tool row shows the state meanwhile. A
+    message from you sends the wait to the background, as with `wait`, where
+    it goes on with the checks it made. A failed pipeline or job
     comes with the last 15 lines of the logs of its failed jobs (at most
     three).
   - `log`: the end of a job log (`lines`, 60, at most 500), or with `grep`
@@ -2101,8 +2102,12 @@ is a request that reads the whole context.
   or the tool call succeeds; the default otherwise), `failure`, or `change`
   (the output differs from the first check).
 - In the foreground the call returns when the condition holds, with the last
-  output; the tool row counts the checks meanwhile. It stops early when you
-  send a message, and Esc stops it.
+  output; the tool row counts the checks meanwhile, and Esc stops it. When
+  you send a message meanwhile, the wait makes way for it: it goes on in the
+  background with the checks it made, the [agent panel](#background-agents)
+  lists it, and the result comes as a message. A wait for a tool gets to the
+  background only this way; it calls the tool through the runtime it started
+  in, so a `/reload` ends it, and a message says so.
 - `background: true`, for shell commands, returns at once. When the condition
   holds or the wait gives up, a message brings the result into the
   conversation and starts a turn when Pi is idle. `/waits` and the tool's

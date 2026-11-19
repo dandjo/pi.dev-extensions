@@ -912,8 +912,9 @@ function forgetToken(instance: ConfiguredInstance): boolean {
  * - status: the pipeline and its jobs as a table (stage, job, status, time, runner, id), trigger jobs with their
  *   downstream pipeline, and the manual jobs waiting to be played.
  * - wait polls a job, or the pipeline, until it settles, without model requests: success, failed, canceled, skipped,
- *   or held at a manual job. It stops early when the user sends a message, like the wait tool; a failed pipeline or
- *   job comes with the end of the logs of its failed jobs.
+ *   or held at a manual job; a failed pipeline or job comes with the end of the logs of its failed jobs. When the user
+ *   sends a message meanwhile, the wait goes on in the background with the checks it made, and the call returns at
+ *   once with its id, like the wait tool.
  * - log: the end of a job log, or the lines matching grep with their numbers, without colour codes, timestamps,
  *   section markers, and the lines a carriage return overwrote.
  * - play, retry, cancel, and run change state; with wait: true they wait for the job or pipeline afterwards.
@@ -1551,8 +1552,9 @@ export default function (pi: ExtensionAPI) {
 			"instances and tokens. status: the pipeline and a table of its jobs (stage, job, status, time, runner, id), " +
 			"trigger jobs with their downstream pipeline, and the manual jobs waiting to be played. wait: checks a job, or " +
 			"the pipeline, every interval seconds without model requests until it settles (success, failed, canceled, " +
-			"skipped, or held at a manual job), at most timeout minutes, and stops early when the user sends a message; a " +
-			"failed pipeline or job comes with the end of the logs of its failed jobs. log: the end of a job log, or the " +
+			"skipped, or held at a manual job), at most timeout minutes; when the user sends a message meanwhile, it goes on " +
+			"in the background and the call returns at once with its id. A failed pipeline or job comes with the end of " +
+			"the logs of its failed jobs. log: the end of a job log, or the " +
 			"lines matching grep, without colour codes and timestamps. play starts a manual job (with variables), retry runs " +
 			"a job again (without job: the failed jobs of the pipeline), cancel stops a job or the pipeline, run starts a " +
 			"pipeline for ref (with variables); with wait: true they wait afterwards. background: true (with wait) returns at " +
@@ -1725,11 +1727,16 @@ export default function (pi: ExtensionAPI) {
 			// Where a check reports: the tool row in the foreground, the list of background waits in the background; text
 			// for the row, found for the list.
 			let progressTo = (text: string, _checks: number, _found: string) => onUpdate?.({ content: [{ type: "text", text: mask(text) }], details });
-			const interrupted = () => !background && ctx.hasPendingMessages();
-			type Polled<T> = { outcome: "settled" | "timeout" | "interrupted"; value: T; checks: number; elapsedMs: number };
+			/** The background wait a wait in the foreground went on as, after a message from the user. */
+			let moved: CiWait | undefined;
+			/** Set while a wait runs in the foreground: hands it to the background, from where it stands. */
+			let handOver: ((started: number, checks: number, found: string) => void) | undefined;
+			const interrupted = () => !background && !moved && handOver !== undefined && ctx.hasPendingMessages();
+			type Polled<T> = { outcome: "settled" | "timeout"; value: T; checks: number; elapsedMs: number };
 			const poll = async <T>(check: () => Promise<{ settled: boolean; progress: string; value: T }>): Promise<Polled<T>> => {
 				const started = Date.now();
 				let failures = 0;
+				let found = "first check";
 				for (let checks = 1; ; checks++) {
 					if (active?.aborted) throw new Error("gitlab_pipeline: wait aborted");
 					let state: { settled: boolean; progress: string; value: T } | undefined;
@@ -1749,14 +1756,15 @@ export default function (pi: ExtensionAPI) {
 						const done = (outcome: Polled<T>["outcome"]) => ({ outcome, value, checks, elapsedMs });
 						if (state.settled) return done("settled");
 						if (elapsedMs >= timeoutMs) return done("timeout");
-						if (interrupted()) return done("interrupted");
+						found = state.progress;
 						progressTo(`${span}, ${checks} checks: ${state.progress}`, checks, state.progress);
 					} else {
-						const found = `the last ${failures} failed, trying again`;
+						found = `the last ${failures} failed, trying again`;
 						progressTo(`${span}, ${checks} checks: ${found}`, checks, found);
 					}
 					const until = Date.now() + Math.min(intervalMs, Math.max(timeoutMs - elapsedMs, 1000));
-					while (Date.now() < until && !active?.aborted && !interrupted()) {
+					while (Date.now() < until && !active?.aborted) {
+						if (interrupted()) handOver?.(started, checks, found);
 						await new Promise((resolve) => setTimeout(resolve, Math.min(1000, until - Date.now())));
 					}
 				}
@@ -1766,8 +1774,7 @@ export default function (pi: ExtensionAPI) {
 				if (polled.outcome === "settled") {
 					return polled.checks === 1 ? `${what} is ${status}.` : `${what} is ${status}, after ${span} of waiting (${polled.checks} checks).`;
 				}
-				if (polled.outcome === "timeout") return `Gave up after ${span}: ${what} is still ${status}. Wait again to go on.`;
-				return `Stopped waiting after ${span} because the user sent a message: ${what} is still ${status}.`;
+				return `Gave up after ${span}: ${what} is still ${status}. Wait again to go on.`;
 			};
 			const waitPipeline = async (id: number): Promise<string> => {
 				const polled = await poll(async () => {
@@ -1797,17 +1804,15 @@ export default function (pi: ExtensionAPI) {
 				if (polled.outcome === "settled" && status === "failed") text += await tails([job]);
 				return text;
 			};
-			// Waits for a job or pipeline here, or hands the wait to the background and says so.
-			const settle = async (kind: "job" | "pipeline", id: number): Promise<string> => {
-				const run = () => (kind === "job" ? waitJob(id) : waitPipeline(id));
-				if (!background) return run();
-				// The wait runs on in this closure over /reload, and reports through ciShared, never through this runtime's pi.
+			// A background wait for a job or pipeline: listed for the panel and the lists, checked through its own signal. It
+			// runs on in this closure over /reload, and reports through ciShared, never through this runtime's pi.
+			const register = (what: string, started: number, checks: number, found: string): CiWait => {
 				const entry: CiWait = {
 					id: `gp${++ciShared.counter}`,
-					what: `${kind} ${id} of ${label}`,
-					started: Date.now(),
-					checks: 0,
-					progress: "first check",
+					what,
+					started,
+					checks,
+					progress: mask(found),
 					intervalMs,
 					timeoutMs,
 					abort: new AbortController(),
@@ -1815,29 +1820,67 @@ export default function (pi: ExtensionAPI) {
 				ciShared.waits.set(entry.id, entry);
 				ciPublish();
 				active = entry.abort.signal;
-				progressTo = (_text, checks, found) => {
-					entry.checks = checks;
-					entry.progress = mask(found);
+				progressTo = (_text, count, last) => {
+					entry.checks = count;
+					entry.progress = mask(last);
 					ciPublish();
 				};
-				const deliver = (text: string) => {
-					if (entry.abort.signal.aborted) return;
-					if (ciShared.waits.get(entry.id) === entry) ciShared.waits.delete(entry.id);
-					ciPublish();
-					ciDeliver({ content: limited(mask(text), "", false), details: { ...details, waitId: entry.id } });
-				};
-				void run().then(
-					(text) => deliver(`Background wait ${entry.id}: ${text}`),
-					(error) => deliver(`Background wait ${entry.id} for ${entry.what} ended without a result: ${error instanceof Error ? error.message : String(error)}`),
-				);
+				return entry;
+			};
+			const deliverTo = (entry: CiWait, text: string) => {
+				if (entry.abort.signal.aborted) return;
+				if (ciShared.waits.get(entry.id) === entry) ciShared.waits.delete(entry.id);
+				ciPublish();
+				ciDeliver({ content: limited(mask(text), "", false), details: { ...details, waitId: entry.id } });
+			};
+			const failed = (entry: CiWait, error: unknown) =>
+				`Background wait ${entry.id} for ${entry.what} ended without a result: ${error instanceof Error ? error.message : String(error)}`;
+			// Waits for a job or pipeline here, or hands the wait to the background and says so.
+			const settle = async (kind: "job" | "pipeline", id: number): Promise<string> => {
+				const run = () => (kind === "job" ? waitJob(id) : waitPipeline(id));
+				const what = `${kind} ${id} of ${label}`;
 				const every = ciDuration(intervalMs / 1000);
-				const upTo = ciDuration(timeoutMs / 1000);
-				return `Waiting in the background as ${entry.id} for ${entry.what}, checking every ${every} for up to ${upTo}. A message brings the result; until then carry on or end your turn.`;
+				if (background) {
+					const entry = register(what, Date.now(), 0, "first check");
+					void run().then(
+						(text) => deliverTo(entry, `Background wait ${entry.id}: ${text}`),
+						(error) => deliverTo(entry, failed(entry, error)),
+					);
+					const upTo = ciDuration(timeoutMs / 1000);
+					return `Waiting in the background as ${entry.id} for ${entry.what}, checking every ${every} for up to ${upTo}. A message brings the result; until then carry on or end your turn.`;
+				}
+				// In the foreground a message from the user hands the wait to the background, which goes on from where it
+				// stands; the call returns then, and the result comes as a message.
+				let handed: (text: string) => void = () => {};
+				const handedOver = new Promise<string>((resolve) => (handed = resolve));
+				handOver = (started, checks, found) => {
+					const entry = register(what, started, checks, found);
+					moved = entry;
+					const span = ciDuration((Date.now() - started) / 1000) || "0s";
+					handed(
+						`The user sent a message, so the wait goes on in the background as ${entry.id} for ${entry.what}, checking every ` +
+							`${every}; ${checks} check${checks === 1 ? "" : "s"} in ${span} so far, the last: ${found}. Gives up at ` +
+							`${ciClock(started + timeoutMs)}. A message brings the result; answer the user meanwhile.`,
+					);
+				};
+				const running = run();
+				running.then(
+					(text) => moved && deliverTo(moved, `Background wait ${moved.id}: ${text}`),
+					(error) => moved && deliverTo(moved, failed(moved, error)),
+				);
+				try {
+					return await Promise.race([running, handedOver]);
+				} finally {
+					handOver = undefined;
+				}
 			};
 			// The answer of play, retry, and run: what they did, then the wait wait: true asks for.
 			const after = async (done: () => string | Promise<string>, kind: "job" | "pipeline", id: number): Promise<string> => {
 				if (!params.wait) return done();
-				if (!background) return settle(kind, id);
+				if (!background) {
+					const text = await settle(kind, id);
+					return moved ? `${await done()}\n${text}` : text;
+				}
 				return `${await done()}\n${await settle(kind, id)}`;
 			};
 
