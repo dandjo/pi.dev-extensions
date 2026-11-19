@@ -46,7 +46,7 @@ import {
 	getSettingsListTheme,
 	SettingsManager,
 } from "@earendil-works/pi-coding-agent";
-import { type AutocompleteItem, type SettingItem, SettingsList, type TuiMouseEvent, truncateToWidth } from "@earendil-works/pi-tui";
+import { type AutocompleteItem, type SettingItem, SettingsList, type TuiMouseEvent, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
@@ -728,6 +728,10 @@ function listItems(plugins: PluginInfo[], s: Switches, scope: Scope): SettingIte
 			items.push(row(`${plugin.name}:${skill.name}`, `  ${plugin.name}:${skill.name}`, about));
 		}
 	}
+	// SettingsList puts the values after the longest label, but at most 36 columns in, so a longer label pushes its own
+	// value out of line: every label is padded to the longest one.
+	const width = Math.max(0, ...items.map((item) => visibleWidth(item.label)));
+	for (const item of items) item.label += " ".repeat(width - visibleWidth(item.label));
 	return items;
 }
 
