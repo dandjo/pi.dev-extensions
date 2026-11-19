@@ -17,6 +17,8 @@
  * - A newer version outside those ranges is reported once per version: it needs a new version of the package that
  *   declares the range first (`pi update npm:pi-claude-subscription`).
  * - /claude-sdk-update checks and installs at once and reports the state, also when nothing is due.
+ * - A check outlasts a session replaced while it runs (/new, /resume, /fork, /reload): its notices and the event below
+ *   go to the session current when it ends.
  * - One update at a time: Pi processes starting together share a lock file in the npm root, a lock older than 15
  *   minutes counts as left over.
  * - Claude Code stays startable during the update. npm writes a package into its place file by file, and an
@@ -367,44 +369,51 @@ function reportedVersion(): string | null {
 	}
 }
 
+interface Shared {
+	/** The check in flight. */
+	check?: Promise<Result>;
+	/** The session runtime current now, with the context of its session_start; none between two runtimes. */
+	live?: { pi: ExtensionAPI; ctx: ExtensionContext };
+}
+
 /**
- * The check in flight, shared by the session runtimes of this process: /reload loads this file afresh, and a session
- * started with /new or /resume while the check still runs must not start a second one.
+ * Shared by the session runtimes of this process. /reload loads this file afresh, and /new, /resume, /fork, and /reload
+ * replace the runtime while a check may still run: a session started then must not start a second check, and the pi
+ * and ctx of a replaced runtime throw when used, which ends Pi from a promise. So whatever a check reports goes to the
+ * runtime current when it ends.
  */
-const shared = globalThis as typeof globalThis & Record<symbol, Promise<Result> | undefined>;
-const CHECK = Symbol.for("pi.claude-sdk-update.check");
+const store = globalThis as typeof globalThis & Record<symbol, Shared | undefined>;
+const shared: Shared = (store[Symbol.for("pi.claude-sdk-update")] ??= {});
+
+function runCheck(): Promise<Result> {
+	shared.check ??= check((from, to) => {
+		shared.live?.ctx.ui.notify(`Updating the Claude Agent SDK ${from.version} -> ${to} …`, "info");
+	})
+		.catch((error): Result => ({ kind: "failed", message: describe(error) }))
+		.then((result) => {
+			if (result.kind === "updated") {
+				shared.live?.pi.events.emit("claude-sdk-update:installed", {
+					dir: path.join(ROOT, result.to.location),
+					version: result.to.version,
+					claudeCode: result.to.claudeCode,
+				});
+			}
+			return result;
+		})
+		.finally(() => {
+			shared.check = undefined;
+		});
+	return shared.check;
+}
 
 export default function (pi: ExtensionAPI) {
-	// The context of the current session runtime; the notices of a check go to the session that is current then.
-	let ctx: ExtensionContext | null = null;
-
-	function runCheck(): Promise<Result> {
-		shared[CHECK] ??= check((from, to) => {
-			ctx?.ui.notify(`Updating the Claude Agent SDK ${from.version} -> ${to} …`, "info");
-		})
-			.catch((error): Result => ({ kind: "failed", message: describe(error) }))
-			.then((result) => {
-				if (result.kind === "updated") {
-					pi.events.emit("claude-sdk-update:installed", {
-						dir: path.join(ROOT, result.to.location),
-						version: result.to.version,
-						claudeCode: result.to.claudeCode,
-					});
-				}
-				return result;
-			})
-			.finally(() => {
-				shared[CHECK] = undefined;
-			});
-		return shared[CHECK];
-	}
-
 	pi.on("session_start", (event, context) => {
-		ctx = context;
+		shared.live = { pi, ctx: context };
 		if (event.reason !== "startup" || context.mode !== "tui") return;
 		if (process.env.PI_SUBAGENT_DEPTH || process.env.PI_OFFLINE) return;
 		if (!installedSdk()) return;
 		void runCheck().then((result) => {
+			const ctx = shared.live?.ctx;
 			if (!ctx) return;
 			if (result.kind === "failed") ctx.ui.notify(`Claude Agent SDK update failed: ${result.message}`, "warning");
 			if (result.kind === "updated") {
@@ -423,7 +432,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("session_shutdown", () => {
-		ctx = null;
+		if (shared.live?.pi === pi) shared.live = undefined;
 	});
 
 	pi.registerCommand(COMMAND, {
@@ -457,7 +466,8 @@ export default function (pi: ExtensionAPI) {
 					break;
 			}
 			if ((result.kind === "current" || result.kind === "updated") && result.blocked) lines.push(blockedNotice(result.blocked));
-			command.ui.notify(lines.join("\n"), level);
+			// Not command.ui: the session may have been replaced while the check ran, and this context with it.
+			shared.live?.ctx.ui.notify(lines.join("\n"), level);
 		},
 	});
 }

@@ -1873,6 +1873,9 @@ since npm keeps a dependency at the version of `package-lock.json`.
   new `pi-claude-subscription` first (`pi update npm:pi-claude-subscription`).
 - `/claude-sdk-update` checks and installs at once and reports the state,
   also when nothing is due.
+- A check outlasts a session replaced while it runs (`/new`, `/resume`,
+  `/fork`, `/reload`): its notices and the event below go to the session
+  current when it ends.
 - After an update, `claude-sdk-update:installed` on Pi's event bus carries the
   new SDK's folder and versions, and [Remote Control](#claude-remote-control)
   checks its repairs against the new bundle at once.
