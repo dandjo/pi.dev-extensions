@@ -1,6 +1,6 @@
 /**
- * AskUserQuestion: Claude Code's multiple-choice question tool, with its name, parameters, and answer format, so skills
- * written for Claude Code (setup wizards, …) work in Pi unchanged.
+ * ask_user_question: Claude Code's multiple-choice question tool AskUserQuestion, with its parameters and answer
+ * format, so skills written for Claude Code (setup wizards, …) work in Pi unchanged.
  *
  * - One to four questions per call, each with a short header, two to four options (label, description, optional
  *   preview), and multiSelect. Every question also offers "Other" for an answer in the user's own words.
@@ -761,10 +761,10 @@ export default function (pi: ExtensionAPI) {
 	pi.events.emit(ASKER, asker);
 
 	pi.registerTool<typeof Params, Details>({
-		name: "AskUserQuestion",
+		name: "ask_user_question",
 		label: "Ask user",
 		description: DESCRIPTION,
-		promptSnippet: "AskUserQuestion: ask the user 1-4 multiple-choice questions and wait for the answers",
+		promptSnippet: "Ask the user 1-4 multiple-choice questions and wait for the answers",
 		parameters: Params,
 		exposure: "model-only",
 		executionMode: "sequential",
@@ -804,7 +804,7 @@ export default function (pi: ExtensionAPI) {
 			const qs = (args.questions ?? []) as Question[];
 			const headers = qs.map((q) => q.header).filter(Boolean).join(", ");
 			return new Text(
-				theme.fg("toolTitle", theme.bold("AskUserQuestion ")) +
+				theme.fg("toolTitle", theme.bold("ask_user_question ")) +
 					theme.fg("muted", `${qs.length} question${qs.length === 1 ? "" : "s"}`) +
 					(headers ? theme.fg("dim", ` (${headers})`) : ""),
 				0,

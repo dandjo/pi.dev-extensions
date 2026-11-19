@@ -1,5 +1,5 @@
 /**
- * Claude Code agents: Claude Code's agent definitions and settings for the Agent tool of subagents.ts
+ * Claude Code agents: Claude Code's agent definitions and settings for the agent tool of subagents.ts
  * (https://code.claude.com/docs/en/sub-agents). It reads Claude Code's formats only and works with any provider.
  *
  * - Agent definitions from ~/.claude/agents (CLAUDE_CONFIG_DIR is honoured), above ~/.pi/agent/agents; from
@@ -114,8 +114,15 @@ const CLAUDE_TO_PI: Record<string, string[]> = {
 	WebFetch: ["web_fetch", "fetch_content"],
 	WebSearch: ["web_search", "get_search_content"],
 	ToolSearch: ["tool_search"],
-	Task: ["Agent"],
-	Agent: ["Agent"],
+	Task: ["agent"],
+	Agent: ["agent"],
+	AskUserQuestion: ["ask_user_question"],
+	CronCreate: ["cron_create"],
+	CronList: ["cron_list"],
+	CronDelete: ["cron_delete"],
+	ScheduleWakeup: ["schedule_wakeup"],
+	ListAgents: ["list_agents"],
+	SendMessage: ["send_message"],
 	NotebookEdit: [],
 	NotebookRead: [],
 	TodoWrite: [],
@@ -138,7 +145,7 @@ function piToolNames(entry: string): string[] {
 }
 
 // A copy of SubagentsProvider from subagents.ts, the event-bus contract between the two: change both alike.
-/** What another extension adds to the Agent tool ("subagents:provider" on the event bus). */
+/** What another extension adds to the agent tool ("subagents:provider" on the event bus). */
 interface SubagentsProvider {
 	/** Providers apply in the order of their ids; one emitted again under the same id replaces the earlier one. */
 	id: string;

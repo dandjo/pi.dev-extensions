@@ -1,18 +1,19 @@
 /**
  * Session-scoped scheduled tasks: Claude Code's /loop and its cron tools CronCreate, CronList, CronDelete, and
- * ScheduleWakeup (https://code.claude.com/docs/en/scheduled-tasks).
+ * ScheduleWakeup (https://code.claude.com/docs/en/scheduled-tasks), here cron_create, cron_list, cron_delete, and
+ * schedule_wakeup.
  *
  * - /loop <interval> <prompt> runs the prompt now and then on a fixed schedule ("5m", "2h", "every 30 minutes";
  *   s/m/h/d). An interval that no cron step fits is rounded to the nearest one that does, and said so.
- * - /loop <prompt> is self-paced: after each iteration the model calls ScheduleWakeup with a delay between one minute
+ * - /loop <prompt> is self-paced: after each iteration the model calls schedule_wakeup with a delay between one minute
  *   and one hour, or with stop: true when the work is done. An iteration that does neither gets one fallback wakeup
  *   20 minutes later; when that one does not reschedule either, the loop ends. Esc on an empty editor while the loop
  *   waits, or /loop stop, cancels it.
  * - /loop alone runs .claude/loop.md (or .pi/loop.md, ~/.claude/loop.md, ~/.pi/agent/loop.md), read fresh at every
  *   iteration, else a built-in maintenance prompt.
- * - The model schedules tasks itself with CronCreate (5-field cron, local time, recurring or one-shot), lists them with
- *   CronList, and cancels them with CronDelete. /cron does the same by hand: /cron, /cron add|once <m h dom mon dow>
- *   <prompt>, /cron delete <id>|all.
+ * - The model schedules tasks itself with cron_create (5-field cron, local time, recurring or one-shot), lists them
+ *   with cron_list, and cancels them with cron_delete. /cron does the same by hand: /cron, /cron add|once
+ *   <m h dom mon dow> <prompt>, /cron delete <id>|all.
  * - In the interactive terminal /cron opens the task manager, a box above the prompt as /btw shows it: the tasks by
  *   next run, ↑↓ or the pointer select, Enter or a click shows a task (schedule, next run, expiry, the whole
  *   prompt), x deletes it, Esc goes back and closes. A click on "↻ … scheduled" in the status line opens it too (statusline:status-click), and background-agents.ts
@@ -74,7 +75,7 @@ export interface ScheduledTaskView {
 interface SelfLoop {
 	id: string;
 	prompt: string;
-	/** The current iteration called ScheduleWakeup (or stop). */
+	/** The current iteration called schedule_wakeup (or stop). */
 	rescheduled: boolean;
 	/** The pending wakeup is the fallback after an iteration that did not reschedule. */
 	fallback: boolean;
@@ -376,8 +377,8 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	function setWakeupTool(active: boolean): void {
-		const tools = pi.getActiveTools().filter((t) => t !== "ScheduleWakeup");
-		pi.setActiveTools(active ? [...tools, "ScheduleWakeup"] : tools);
+		const tools = pi.getActiveTools().filter((t) => t !== "schedule_wakeup");
+		pi.setActiveTools(active ? [...tools, "schedule_wakeup"] : tools);
 	}
 
 	function endLoop(reason: string, notify = true): void {
@@ -435,7 +436,7 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	function iterationPrompt(prompt: string): string {
-		return `${prompt}\n\n(This runs as a self-paced /loop. When this iteration's work is done, call ScheduleWakeup: delaySeconds between ${MIN_WAKEUP_S} and ${MAX_WAKEUP_S} with a one-line reason — short while something is about to change, such as a running build; long when nothing is pending — or stop: true once the loop's work is complete and nothing more needs checking.)`;
+		return `${prompt}\n\n(This runs as a self-paced /loop. When this iteration's work is done, call schedule_wakeup: delaySeconds between ${MIN_WAKEUP_S} and ${MAX_WAKEUP_S} with a one-line reason — short while something is about to change, such as a running build; long when nothing is pending — or stop: true once the loop's work is complete and nothing more needs checking.)`;
 	}
 
 	function resolvePrompt(task: Task, ctx: ExtensionContext): string {
@@ -790,7 +791,7 @@ export default function (pi: ExtensionAPI) {
 	// --- Tools ------------------------------------------------------------------------------------------------------
 
 	pi.registerTool({
-		name: "CronCreate",
+		name: "cron_create",
 		label: "Schedule",
 		description: [
 			"Schedule a prompt to run later in this session, once or on a recurring schedule.",
@@ -799,7 +800,7 @@ export default function (pi: ExtensionAPI) {
 			"Tasks fire only while this session is open and idle, between turns. Recurring tasks expire after 7 days. At most 50 tasks.",
 			"The prompt runs as if the user had sent it, so write it as a complete instruction.",
 		].join("\n"),
-		promptSnippet: "CronCreate/CronList/CronDelete: schedule prompts in this session (reminders, polling)",
+		promptSnippet: "Schedule prompts in this session (reminders, polling)",
 		parameters: Type.Object({
 			cron: Type.String({ description: 'Standard 5-field cron expression in local time, e.g. "*/5 * * * *" or "30 14 23 10 *".' }),
 			prompt: Type.String({ description: "The prompt to run when the task fires." }),
@@ -825,7 +826,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerTool({
-		name: "CronList",
+		name: "cron_list",
 		label: "Scheduled tasks",
 		description: "List the scheduled tasks of this session with their IDs, schedules, next run times, and prompts.",
 		parameters: Type.Object({}),
@@ -840,10 +841,10 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerTool({
-		name: "CronDelete",
+		name: "cron_delete",
 		label: "Unschedule",
 		description: "Cancel a scheduled task of this session by its ID.",
-		parameters: Type.Object({ id: Type.String({ description: "The 8-character task ID from CronCreate or CronList." }) }),
+		parameters: Type.Object({ id: Type.String({ description: "The 8-character task ID from cron_create or cron_list." }) }),
 		async execute(_id, params) {
 			const task = remove(params.id.trim());
 			if (!task) throw new Error(`No scheduled task with ID ${params.id}.`);
@@ -852,7 +853,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerTool({
-		name: "ScheduleWakeup",
+		name: "schedule_wakeup",
 		label: "Schedule wakeup",
 		description: `Schedule the next iteration of the running self-paced /loop. Pick delaySeconds between ${MIN_WAKEUP_S} and ${MAX_WAKEUP_S} from what you observed: short while something is about to change, long when nothing is pending. Pass stop: true instead once the loop's work is complete.`,
 		parameters: Type.Object({

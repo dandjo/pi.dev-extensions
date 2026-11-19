@@ -470,7 +470,7 @@ function interpret(hook: Hook, run: RunResult, timeoutS: number): Outcome {
  *
  * claude-code-agents.ts, claude-remote-control.ts carry a copy of this block, or of a part of it: change them alike.
  */
-/** Pi tool name -> Claude Code tool name. Tools without an entry keep their name (MCP tools, Agent, …). */
+/** Pi tool name -> Claude Code tool name. Tools without an entry keep their name (MCP tools, other extension tools). */
 const PI_TO_CLAUDE: Record<string, string> = {
 	bash: "Bash",
 	powershell: "PowerShell",
@@ -484,6 +484,14 @@ const PI_TO_CLAUDE: Record<string, string> = {
 	fetch_content: "WebFetch",
 	web_search: "WebSearch",
 	tool_search: "ToolSearch",
+	agent: "Agent",
+	ask_user_question: "AskUserQuestion",
+	cron_create: "CronCreate",
+	cron_list: "CronList",
+	cron_delete: "CronDelete",
+	schedule_wakeup: "ScheduleWakeup",
+	list_agents: "ListAgents",
+	send_message: "SendMessage",
 };
 
 function claudeToolName(piName: string): string {

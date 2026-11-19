@@ -19,7 +19,7 @@
  * - /gc cuts at the next request, regardless of the thresholds; /gc status shows what was cut and what could go now.
  * - Settings in ~/.pi/agent/context-gc.json, every key optional: {"enabled": true, "keepRecent": 10,
  *   "minResultChars": 4000, "minArgChars": 2000, "batchTokens": 100000, "coldMinutes": 60, "coldMinTokens": 5000,
- *   "thinking": true, "toolResults": true, "toolArgs": true, "keepTools": ["Agent", "AskUserQuestion"]}. Under
+ *   "thinking": true, "toolResults": true, "toolArgs": true, "keepTools": ["agent", "ask_user_question"]}. Under
  *   "providers", every key can be set for one provider and wins there over the top level: coldMinutes matches the
  *   claude-sdk provider's prompt cache, which lives an hour, and a provider whose cache lives shorter can cut sooner
  *   ({"providers": {"openai": {"coldMinutes": 10}}}).
@@ -67,7 +67,7 @@ const DEFAULTS: Config = {
 	thinking: true,
 	toolResults: true,
 	toolArgs: true,
-	keepTools: ["Agent", "AskUserQuestion"],
+	keepTools: ["agent", "ask_user_question"],
 };
 
 /** The settings for a provider: the defaults, the file's top level, then the file's entry for the provider. */

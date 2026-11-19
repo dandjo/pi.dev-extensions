@@ -10,7 +10,7 @@
  * The title carries tmux style tokens that draw one character like the active tab, in window-status-current-style,
  * undimmed (in reverse video while that style is tmux's default, which sets nothing), and the block moves on by one
  * character per frame over the number, the space, and the name; at either end it turns without a pause. It stops when
- * Pi settles, no subagent works, and no background wait runs, pauses while an AskUserQuestion dialog waits (the tab's
+ * Pi settles, no subagent works, and no background wait runs, pauses while an ask_user_question dialog waits (the tab's
  * bell shows then), and puts Pi's own title back. A run that waits for a usage limit to reset (auto-continue.ts,
  * "auto-continue:state") does not count as work meanwhile. The tokens take no room, so the tab keeps its width.
  *
@@ -156,7 +156,7 @@ export default function (pi: ExtensionAPI) {
 	let agents = 0;
 	/** The background waits running now, by the tool that waits. */
 	const waits = new Map<string, number>();
-	/** The AskUserQuestion dialogs open now, by tool call id. */
+	/** The ask_user_question dialogs open now, by tool call id. */
 	const asking = new Set<string>();
 	let timer: ReturnType<typeof setInterval> | null = null;
 	/** The letter the block is on, -1 before the first frame of a run, and the way it moves: 1 right, -1 left. */

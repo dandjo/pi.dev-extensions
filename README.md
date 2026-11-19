@@ -30,8 +30,8 @@ names `extensions/`, which holds one file per extension.
 | `session-title.ts`          | Names each session after its first prompt and shows it in the terminal title              | —                                                                |
 | `tmux-tab-activity.ts`      | Swings a block over its tmux tab while Pi, a subagent, or a background wait works         | tmux 3.2 or later, set up as its section describes               |
 | `session-socket.ts`         | Lets sessions message each other and your Claude Code sessions, as Claude Code does       | Linux or macOS                                                   |
-| `ask-user-question.ts`      | Adds `AskUserQuestion`, Claude Code's multiple-choice questions                           | —                                                                |
-| `subagents.ts`              | Adds the `Agent` tool: subagents in their own Pi process, on a tier or a model of choice  | —                                                                |
+| `ask-user-question.ts`      | Adds `ask_user_question`, Claude Code's multiple-choice questions                         | —                                                                |
+| `subagents.ts`              | Adds the `agent` tool: subagents in their own Pi process, on a tier or a model of choice  | —                                                                |
 | `btw.ts`                    | `/btw`: a side question about the session that stays out of the conversation              | —                                                                |
 | `goal.ts`                   | `/goal`: keeps working until an evaluator model judges a condition met                    | —                                                                |
 | `scheduled-tasks.ts`        | `/loop`, `/cron`, and the cron tools: prompts on a schedule within the session            | —                                                                |
@@ -51,7 +51,7 @@ answers.
 | :-------------------------- | :---------------------------------------------------------------------------------------- | :--------------------------------------------------------------- |
 | `claude-code-plugins.ts`    | Loads the plugins of Claude Code marketplaces into Pi; `/plugins` turns them on or off    | Each marketplace installed with `pi install`                     |
 | `claude-code-hooks.ts`      | Runs Claude Code's hooks, from settings files and plugins, at Pi's events                 | —                                                                |
-| `claude-code-agents.ts`     | Adds Claude Code's agent definitions, tool names, and model families to `Agent`           | `subagents.ts`                                                   |
+| `claude-code-agents.ts`     | Adds Claude Code's agent definitions, tool names, and model families to `agent`           | `subagents.ts`                                                   |
 
 **The Claude subscription** (`claude-*`). They need a Claude Code login and
 show nothing without one; Remote Control connects only while a Claude model is
@@ -263,7 +263,7 @@ Start Pi in a project, or run `/reload` in a running session:
 - With Pi running in a second terminal, `/peers` lists that session, and
   "Send the other session a hello" shows up there as `› Message from @…`.
 - `/hooks` lists the hooks from your Claude Code settings.
-- "Ask me with AskUserQuestion whether I prefer tea or coffee" shows a
+- "Ask me with ask_user_question whether I prefer tea or coffee" shows a
   question dialog.
 - "Use an Explore subagent to find where the session title is set" runs a
   subagent; `/agents` lists the agent types.
@@ -1146,7 +1146,7 @@ runs as a gap, a character in the tab colour through the tab's block.
   the block moves on by one character per frame over the number, the space,
   and the name; at either end it turns without a pause. The tokens take no room,
   so the tab keeps its width.
-- It pauses while an AskUserQuestion dialog waits, when the tab's bell takes
+- It pauses while an `ask_user_question` dialog waits, when the tab's bell takes
   over, and while a run waits for a usage limit to reset
   ([auto-continue](#auto-continue)). It puts Pi's own title back when Pi
   settles, no subagent works, and no background wait runs.
@@ -1220,13 +1220,14 @@ works: with its wire protocol, its wording towards the model, and its safety
 rules. "Tell the session in ~/projects/api that the migration is done" sends a
 summary — not the conversation or its files.
 
-- The model gets `ListAgents` and `SendMessage`, named and shaped like Claude
-  Code's. `ListAgents` shows this session's own name and every other live
-  session with its kind (Pi or Claude Code), idle or busy, working directory,
-  and age. `SendMessage` takes the name as the address — `name [ref]` when two
-  sessions share it — or, to answer a message, its `from` address. With
-  `notify_when_idle`, a Pi session sends one `[Cross-session idle notice]` when
-  it next goes idle or exits; the subscription expires after 12 hours.
+- The model gets `list_agents` and `send_message`, shaped like Claude Code's
+  `ListAgents` and `SendMessage`. `list_agents` shows this session's own name
+  and every other live session with its kind (Pi or Claude Code), idle or
+  busy, working directory, and age. `send_message` takes the name as the
+  address — `name [ref]` when two sessions share it — or, to answer a message,
+  its `from` address. With `notify_when_idle`, a Pi session sends one
+  `[Cross-session idle notice]` when it next goes idle or exits; the
+  subscription expires after 12 hours.
 - An idle session starts a turn with the message; a busy one reads it between
   tool calls. It arrives as `<cross-session-message from="uds:…" from-name="…">`
   with Claude Code's framing: it comes from another session, not from you; it
@@ -1315,8 +1316,10 @@ no Claude model: the hooks run whichever model answers.
 - Tools reach hooks under Claude Code's names and input fields: `bash` as
   `Bash` with `command`; `read`, `write`, and `edit` as `Read`, `Write`, and
   `Edit` with an absolute `file_path` (an edit also with `old_string`,
-  `new_string`, and `edits[]`); `grep` as `Grep`; `find` as `Glob`. MCP tools
-  keep their `mcp__…` names.
+  `new_string`, and `edits[]`); `grep` as `Grep`; `find` as `Glob`; the tools
+  of these extensions as their Claude Code originals, `agent` as `Agent`,
+  `ask_user_question` as `AskUserQuestion`, and so on. MCP tools keep their
+  `mcp__…` names.
 - Skill references in hook output get Pi's names: `my-plugin:my-skill`
   becomes `my-plugin-my-skill`.
 - Hooks run as your user, with your environment, like every extension.
@@ -1324,8 +1327,8 @@ no Claude model: the hooks run whichever model answers.
 
 ## ask-user-question
 
-`AskUserQuestion`, named and shaped like Claude Code's tool, so skills that ask
-through it, such as setup wizards, work unchanged.
+`ask_user_question`, shaped like Claude Code's `AskUserQuestion`, so skills
+that ask through it, such as setup wizards, work unchanged.
 
 - One to four questions per call, each with a short header, two to four
   options, and optionally several answers; `Other` takes an answer in your own
@@ -1361,7 +1364,7 @@ through it, such as setup wizards, work unchanged.
 
 ## subagents
 
-The `Agent` tool, after [Claude Code's subagents](https://code.claude.com/docs/en/sub-agents):
+The `agent` tool, after [Claude Code's subagents](https://code.claude.com/docs/en/sub-agents):
 a subagent is a separate Pi process with its own context window, and only its
 final report comes back. Beyond Claude Code, you can write to a subagent,
 interrupt it, and answer its questions, and it stays alive after its report.
@@ -1375,12 +1378,12 @@ interrupt it, and answer its questions, and it stays alive after its report.
   and plugins.
 - A subagent gets the parent's active tools, narrowed by its definition, whose
   `tools` and `disallowedTools` name Pi tools (`read`, `bash`, …). It never
-  gets the cron tools, `ListAgents`, or `SendMessage`, and subagents nest at
+  gets the cron tools, `list_agents`, or `send_message`, and subagents nest at
   most three levels deep. MCP servers start in it only when its tools name an
   MCP tool. Hooks run inside it too, with `agent_id` and `agent_type` in every
   event.
 - A subagent's dialogs open in your session, one at a time, titled with the
-  agent: the questions of `AskUserQuestion`, which it has where the session
+  agent: the questions of `ask_user_question`, which it has where the session
   has a user interface, and a hook's confirmation. The questions look as the
   session's own do: tabs, multi-select, previews, and the mouse (see
   [ask-user-question](#ask-user-question)). Without a user interface the
@@ -1415,16 +1418,16 @@ interrupt it, and answer its questions, and it stays alive after its report.
   be taken for an injection. A subagent that calls tools again is stopped,
   and what it wrote last comes back marked as partial. Either way the report
   says that the limit was reached, and `resume` lets the subagent go on.
-- Several `Agent` calls in one response run in parallel.
+- Several `agent` calls in one response run in parallel.
   `run_in_background: true` returns at once; the report arrives later as a
   message that starts a turn, and the footer counts the running agents. A
   running foreground subagent can be moved to the background (Ctrl+B in
-  [background-agents](#background-agents)); its `Agent` call then returns at
+  [background-agents](#background-agents)); its `agent` call then returns at
   once in the same way. `resume` with an agent ID continues that subagent
   with its history. `fork: true` starts a new one with a copy of the
   conversation so far, up to the turn that makes the call; a fork starts no
   fork of its own.
-- The `Agent` call looks like Pi's own tools: the call as its title, while
+- The `agent` call looks like Pi's own tools: the call as its title, while
   the agent works its latest two tool calls, afterwards the first line of
   the report with Pi's note on the hidden lines (Ctrl+O shows the tool
   calls and the whole report), and the figures last (tool calls, tokens,
@@ -1463,7 +1466,7 @@ interrupt it, and answer its questions, and it stays alive after its report.
   interrupts it, `subagents:message` with `{ agentId, text, images? }` writes
   to it, and `subagents:background` with an agent ID moves a running
   foreground one to the background.
-- Other extensions extend the `Agent` tool through the event bus: they emit
+- Other extensions extend the `agent` tool through the event bus: they emit
   `subagents:provider` with a `SubagentsProvider` — agent directories, a
   translation of tool names, model families, a default model, limits — at load
   and again on every `subagents:provider-request`, so the load order does not
@@ -1471,7 +1474,7 @@ interrupt it, and answer its questions, and it stays alive after its report.
 
 ## claude-code-agents
 
-Brings Claude Code's agent definitions and settings to the `Agent` tool of
+Brings Claude Code's agent definitions and settings to the `agent` tool of
 [subagents](#subagents), after
 [Claude Code's subagents](https://code.claude.com/docs/en/sub-agents).
 Without `subagents.ts` it does nothing.
@@ -1516,7 +1519,7 @@ Claude Code, the prompt writes to the agent shown, and Esc interrupts it.
   failed or stopped one in red. Finished agents stay 30 seconds, then
   disappear. The footer reads `↓ to manage` while the panel exists.
   The selected row has an arrow (`→`), the accent colour, and the selection
-  background, as in Pi's own lists and the `AskUserQuestion` dialog.
+  background, as in Pi's own lists and the `ask_user_question` dialog.
 - ↓ on the last line of the prompt (not while browsing history or with the
   autocomplete open) selects the `main` row; the footer then says what the
   keys do. ↑/↓ move, ↑ from `main` returns to the prompt, Enter opens the
@@ -1547,7 +1550,7 @@ Claude Code, the prompt writes to the agent shown, and Esc interrupts it.
   commands and prompt templates expand in the agent. A `!` command still
   goes to `main` and brings the conversation back.
 - Esc on a working agent interrupts it: it stops what it is doing and waits
-  for your instruction, while a foreground agent's `Agent` call keeps
+  for your instruction, while a foreground agent's `agent` call keeps
   waiting. Esc again stops it. Esc on an agent that does not work shows the
   conversation again. The line under the agent's state says what the prompt
   and Esc do right now.
@@ -1557,7 +1560,7 @@ Claude Code, the prompt writes to the agent shown, and Esc interrupts it.
 - Foreground subagents (without `run_in_background`) are listed too; their
   tool call still shows their progress in the conversation. Ctrl+B moves them
   to the background, as in Claude Code: the one selected in the panel, or else
-  every foreground agent. Its `Agent` call returns at once, the conversation
+  every foreground agent. Its `agent` call returns at once, the conversation
   goes on, and the report arrives as a message when the agent finishes. While
   one runs, the footer adds `ctrl+b to run in background`; without a
   foreground agent, Ctrl+B stays the editor's cursor left.
@@ -1574,7 +1577,7 @@ Claude Code, the prompt writes to the agent shown, and Esc interrupts it.
   in the task manager, `x` deletes it. The panel also appears while only waits
   or tasks are there.
 - In fullscreen mode the row under the pointer gets the arrow and the
-  selection background, as in the `AskUserQuestion` dialog; when the pointer
+  selection background, as in the `ask_user_question` dialog; when the pointer
   leaves the panel, the marker goes back to the row selected with the keys, or
   disappears while the prompt has the focus. ↑/↓, Enter, and `x` act on the
   row with the marker. A click on a row opens it, a click on `main` shows the
@@ -1646,15 +1649,16 @@ evaluator judges the condition met — Claude Code's
 
 Claude Code's
 [session-scoped scheduled tasks](https://code.claude.com/docs/en/scheduled-tasks):
-`/loop`, `/cron`, and the tools `CronCreate`, `CronList`, `CronDelete`, and
-`ScheduleWakeup`.
+`/loop`, `/cron`, and the tools `cron_create`, `cron_list`, `cron_delete`, and
+`schedule_wakeup` (Claude Code's `CronCreate`, `CronList`, `CronDelete`, and
+`ScheduleWakeup`).
 
 - `/loop 5m <prompt>` (or `<prompt> every 2 hours`; units `s`, `m`, `h`,
   `d`) runs the prompt now and then on that schedule. An interval no cron step
   fits, such as `7m`, is rounded to the nearest one that does, with a notice.
   `/cron delete <id>` stops it.
 - `/loop <prompt>` without an interval paces itself: after each iteration the
-  model schedules the next one in one to 60 minutes with `ScheduleWakeup`, or
+  model schedules the next one in one to 60 minutes with `schedule_wakeup`, or
   ends the loop. An iteration that does neither gets one fallback 20 minutes
   later. Esc on an empty editor while the loop waits, or `/loop stop`, cancels
   it.
@@ -1663,7 +1667,7 @@ Claude Code's
   otherwise a maintenance prompt: continue unfinished work, tend to the
   branch's merge request, then clean up.
 - "Remind me at 3 pm to …" or "check the pipeline every 10 minutes" makes the
-  model schedule a task with `CronCreate` — a standard 5-field cron expression
+  model schedule a task with `cron_create` — a standard 5-field cron expression
   in local time, recurring or once. `/cron add|once <m h dom mon dow>
   <prompt>` and `/cron delete <id>|all` manage them by hand.
 - `/cron` alone opens the task manager, a box above the prompt as `/btw`
@@ -1802,7 +1806,7 @@ and you can work on from there while Pi keeps running on your machine.
   Pi's estimate of the compacted context. A manual `/compact` in the terminal
   is a turn of its own in the app, and the history shows earlier compactions
   at their place.
-- Questions: an `AskUserQuestion` dialog opens in the app as well, as Claude
+- Questions: an `ask_user_question` dialog opens in the app as well, as Claude
   Code's question card, and can be answered there or in the terminal. The app
   takes an answer only for a pending permission request, so the questions go
   out as one (`can_use_tool`), and the session shows as waiting for input while
@@ -2166,7 +2170,7 @@ long tool inputs.
   long script) to their start and end, and replaces tool outputs longer than
   4,000 characters with a stub that names the command or file and keeps the
   first and last lines. Images in tool results go as well. The outputs of
-  `Agent` and `AskUserQuestion` stay.
+  `agent` and `ask_user_question` stay.
 - The cuts are Pi's own context edits. The session file keeps everything: the
   transcript, `/tree`, exports, and the session totals stay complete, and
   going back with `/tree` to a point before a cut brings the full text back.
@@ -2198,7 +2202,7 @@ long tool inputs.
   `keepRecent` (10 responses), `minResultChars` (4000), `minArgChars` (2000),
   `batchTokens` (100000), `coldMinutes` (60), `coldMinTokens` (5000),
   `thinking`, `toolResults`, and `toolArgs` (true each), and `keepTools`
-  (`["Agent", "AskUserQuestion"]`). Under `providers`, each of them can be
+  (`["agent", "ask_user_question"]`). Under `providers`, each of them can be
   set for one provider and wins there over the top level: `coldMinutes`
   follows the one-hour cache of `claude-sdk`, and a provider whose cache
   lives shorter can cut sooner:

@@ -12,7 +12,7 @@
  *   conversation again and returns to the prompt), x stops a running agent or clears a finished one, Esc returns to
  *   the prompt, and typing goes to the prompt. /tasks lists the agents as well.
  * - Ctrl+B, while a foreground agent runs, moves it to the background, as in Claude Code: the agent selected in the
- *   panel, or else every foreground agent. Its Agent call returns at once, the conversation goes on, and the report
+ *   panel, or else every foreground agent. Its agent call returns at once, the conversation goes on, and the report
  *   arrives as a message when the agent finishes. Without a foreground agent, Ctrl+B stays the editor's cursor left.
  * - Opening an agent shows its transcript in place of the conversation above the prompt, as Claude Code does; the
  *   panel shows the name of the agent shown in bold. The view follows the end while the agent works and scrolls like
@@ -48,7 +48,7 @@
  * - The mouse: the row under the pointer gets the selection marker, and when the pointer leaves the panel the marker
  *   goes back to the row selected with the keys (none while the prompt has the focus); Pi reports no leaving, so the
  *   TUI's mouse moves are observed (observeMouseMoves). A key that acts on a row (↑↓, Enter, x) acts on the one with
- *   the marker, as in the AskUserQuestion dialog. A click on a row opens it, a click on `main` returns to the
+ *   the marker, as in the ask_user_question dialog. A click on a row opens it, a click on `main` returns to the
  *   prompt, and a click on "↓ to manage" in the status line (statusline:status-click) moves into the panel.
  */
 
@@ -933,7 +933,7 @@ export default function (pi: ExtensionAPI) {
 		scroll = Math.max(0, Math.min(scroll, Math.max(0, total - MAX_VISIBLE_ROWS)));
 		const visible = list.slice(scroll, scroll + MAX_VISIBLE_ROWS);
 
-		// The selected row as Pi's own lists and the AskUserQuestion dialog mark theirs: an arrow, the accent colour, and
+		// The selected row as Pi's own lists and the ask_user_question dialog mark theirs: an arrow, the accent colour, and
 		// the selection background across the width.
 		const pointer = (isSelected: boolean) => (isSelected ? theme.fg("accent", "→ ") : "  ");
 		const inner = Math.max(0, width - INDENT.length);
@@ -1040,7 +1040,7 @@ export default function (pi: ExtensionAPI) {
 	function panelKey(data: string, keybindings: KeybindingsManager): boolean {
 		const list = entries();
 		if (selected < 0 || list.length === 0) return false;
-		// A key that acts on a row acts on the one with the marker, as in the AskUserQuestion dialog: the row under the
+		// A key that acts on a row acts on the one with the marker, as in the ask_user_question dialog: the row under the
 		// pointer becomes the one selected with the keys.
 		const acts =
 			matchesKey(data, Key.down) ||

@@ -1241,7 +1241,7 @@ interface ClaudeLoginRefusal {
  *
  * claude-code-agents.ts, claude-code-hooks.ts carry a copy of this block, or of a part of it: change them alike.
  */
-/** Pi tool name -> Claude Code tool name. Tools without an entry keep their name (MCP tools, Agent, …). */
+/** Pi tool name -> Claude Code tool name. Tools without an entry keep their name (MCP tools, other extension tools). */
 const PI_TO_CLAUDE: Record<string, string> = {
 	bash: "Bash",
 	powershell: "PowerShell",
@@ -1255,6 +1255,14 @@ const PI_TO_CLAUDE: Record<string, string> = {
 	fetch_content: "WebFetch",
 	web_search: "WebSearch",
 	tool_search: "ToolSearch",
+	agent: "Agent",
+	ask_user_question: "AskUserQuestion",
+	cron_create: "CronCreate",
+	cron_list: "CronList",
+	cron_delete: "CronDelete",
+	schedule_wakeup: "ScheduleWakeup",
+	list_agents: "ListAgents",
+	send_message: "SendMessage",
 };
 
 function claudeToolName(piName: string): string {
@@ -1813,7 +1821,7 @@ export default function (pi: ExtensionAPI) {
 	/** False once session_shutdown ran: this runtime is being replaced or the process quits. */
 	let alive = true;
 	let shutdownReason: string | undefined;
-	/** AskUserQuestion dialogs open in this runtime, by tool call id. */
+	/** ask_user_question dialogs open in this runtime, by tool call id. */
 	const questions = new Map<string, PendingQuestions>();
 
 	// After session_shutdown, pi and ctx of this runtime are stale and throw: the three stay silent then.

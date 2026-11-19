@@ -1,6 +1,6 @@
 /**
- * Subagents: Claude Code's Agent tool. Each subagent is a separate Pi process with its own context window; only its
- * final report comes back (https://code.claude.com/docs/en/sub-agents).
+ * Subagents: Claude Code's Agent tool, here the tool agent. Each subagent is a separate Pi process with its own context
+ * window; only its final report comes back (https://code.claude.com/docs/en/sub-agents).
  *
  * - Agent types: the built-ins general-purpose, Explore, and Plan (read-only: no edit/write), plus definitions in
  *   Claude Code's format (Markdown with name, description, tools, disallowedTools, model, effort, maxTurns, skills,
@@ -8,8 +8,8 @@
  *   is trusted) and ~/.pi/agent/agents, plus the directories providers add (below). Project beats user beats plugin;
  *   a user or project agent named like a built-in replaces it.
  * - Tools: the parent's active tools, narrowed by the definition, whose entries name Pi tools unless a provider
- *   translates them. A subagent never gets AskUserQuestion, the cron and loop tools, or cross-session messaging; Agent
- *   only up to three levels deep. MCP servers start only when the subagent's tools name an MCP tool. Hooks
+ *   translates them. A subagent never gets ask_user_question, the cron and loop tools, or cross-session messaging;
+ *   agent only up to three levels deep. MCP servers start only when the subagent's tools name an MCP tool. Hooks
  *   (claude-code-hooks.ts) run inside it too.
  * - Model: the call's model, else the definition's, else a provider's default, else the current model, at the
  *   parent's thinking level unless the definition sets effort. A model is a full id, inherit (the current model), a
@@ -22,7 +22,7 @@
  *   - A family resolves to its newest model on the current provider; a family the current model belongs to keeps the
  *     current model; a family the provider lacks falls back to its tier (haiku small, sonnet inherit, opus and fable
  *     large), with a note in the result.
- *   - The Agent tool offers the tiers and the families the current provider has, renewed on a switch to another
+ *   - The agent tool offers the tiers and the families the current provider has, renewed on a switch to another
  *     provider.
  * - Explore runs on small at medium effort, without the context files, and reports after at most 30 turns: a search
  *   of many steps costs a fraction there of what it costs in a long conversation, and only the report comes back.
@@ -33,7 +33,7 @@
  *   is stopped, and what it wrote last comes back marked as partial. resume continues it.
  * - run_in_background: true (or background: true in the definition) returns at once; the report arrives later as a
  *   message that starts a turn. A foreground subagent can be moved to the background while it runs (Ctrl+B in
- *   background-agents.ts): its Agent call then returns at once in the same way. resume: <agentId> continues an earlier
+ *   background-agents.ts): its agent call then returns at once in the same way. resume: <agentId> continues an earlier
  *   subagent with its full history. fork: true starts a new one with a copy of the conversation so far.
  * - A subagent is Pi in RPC mode and stays alive after its report, for five minutes without work (three idle ones at
  *   most; PI_SUBAGENT_IDLE_MS sets another time, 0 none), so a resume or a message continues it at once; later it
@@ -48,10 +48,10 @@
  *   conversation without starting a turn. "subagents:interrupt" stops what it is doing and leaves it waiting for an
  *   instruction (five minutes, then it counts as stopped); "subagents:stop" ends it. background-agents.ts offers all
  *   three in the agent's transcript.
- * - A subagent's dialogs (AskUserQuestion, a hook's confirmation) open in this session, titled with the agent, one
- *   at a time; without a user interface here they are declined. Its AskUserQuestion questions come as one request
+ * - A subagent's dialogs (ask_user_question, a hook's confirmation) open in this session, titled with the agent, one
+ *   at a time; without a user interface here they are declined. Its ask_user_question questions come as one request
  *   (QUESTIONS_RELAY) and are shown by ask-user-question.ts in the dialog this session's own questions get.
- * - The Agent call is drawn like Pi's own tools: its call as the title, while it runs its latest two tool calls, then
+ * - The agent call is drawn like Pi's own tools: its call as the title, while it runs its latest two tool calls, then
  *   the first line of its report with Pi's note on the lines that are hidden, and its figures last, as bash ends with
  *   "Took …"; the colour of the tool box shows the state. A background agent's report arrives as an [agent] block, as
  *   Pi draws [skill] and [compaction]. The tool's renderers are also registered through pi.registerToolRenderer, since
@@ -73,7 +73,7 @@
  * tool_execution_update, tool_execution_end, and agent_end events, so its transcript can stream as the conversation
  * does.
  *
- * Providers extend the Agent tool through the event bus as well, whatever the load order: an extension emits
+ * Providers extend the agent tool through the event bus as well, whatever the load order: an extension emits
  * "subagents:provider" with a SubagentsProvider at load and again on every "subagents:provider-request".
  * claude-code-agents.ts is one: it adds Claude Code's agent directories, tool names, model families with their
  * tiers, and settings.
@@ -146,16 +146,16 @@ const MAX_IDLE = 3;
 const FROM_AGENT = "[From the agent that started you]";
 /** What the task of a fork begins with: the copied conversation ends on a request that is not the fork's to carry out. */
 const FORK_NOTE =
-	"[You are a fork of the conversation above: a subagent that the agent in it started through its Agent tool, with that conversation as your background. The requests in it were made to that agent, which is carrying them out: do not carry them out yourself, and do not start a fork. Your only task is the one below.]";
+	"[You are a fork of the conversation above: a subagent that the agent in it started through its agent tool, with that conversation as your background. The requests in it were made to that agent, which is carrying them out: do not carry them out yourself, and do not start a fork. Your only task is the one below.]";
 const SESSIONS_ROOT = path.join(getAgentDir(), "subagents");
 
 /** Tools no subagent gets, whatever its definition lists (Claude Code's first filter, plus Pi's own equivalents). */
-const NEVER = new Set(["CronCreate", "CronDelete", "CronList", "ScheduleWakeup", "ListAgents", "SendMessage"]);
+const NEVER = new Set(["cron_create", "cron_delete", "cron_list", "schedule_wakeup", "list_agents", "send_message"]);
 /** The tool a subagent asks the user with: its dialogs open in the session that started it, when that one has a UI. */
-const ASK = "AskUserQuestion";
+const ASK = "ask_user_question";
 /**
- * A copy of QUESTIONS_RELAY and Asker from ask-user-question.ts, the contract between a subagent's AskUserQuestion and
- * the session that started it: an editor request with this title carries the questions as JSON in its prefill, and
+ * A copy of QUESTIONS_RELAY and Asker from ask-user-question.ts, the contract between a subagent's ask_user_question
+ * and the session that started it: an editor request with this title carries the questions as JSON in its prefill, and
  * its value is the reply as JSON ({ unsupported: true } without an Asker here). "ask-user-question:asker" on the
  * event bus carries the Asker, at load and on every "ask-user-question:asker-request".
  */
@@ -197,7 +197,7 @@ interface RunDetails {
 	status: "running" | "completed" | "failed" | "aborted" | "background";
 	/** While running: the user interrupted it and it waits for an instruction, or one of its dialogs is open. */
 	waiting?: "instruction" | "answer";
-	/** What started the run: a task of the Agent tool (also when absent), a message of the user, or the subagent itself. */
+	/** What started the run: a task of the agent tool (also when absent), a message of the user, or the subagent. */
 	origin?: "task" | "user" | "self";
 	/** What the user wrote to the subagent during the run. */
 	userMessages?: string[];
@@ -295,9 +295,9 @@ interface Running {
 	child: Child;
 	abort: AbortController;
 	background: boolean;
-	/** What the run's report notes besides its own, from the start of the Agent call. */
+	/** What the run's report notes besides its own, from the start of the agent call. */
 	notes: string[];
-	/** Moves a foreground subagent to the background: its Agent call returns at once. */
+	/** Moves a foreground subagent to the background: its agent call returns at once. */
 	detach?: () => void;
 }
 
@@ -337,7 +337,7 @@ export interface SubagentView {
 const TIERS = ["small", "large"] as const;
 export type Tier = (typeof TIERS)[number] | "inherit";
 
-/** What another extension adds to the Agent tool ("subagents:provider" on the event bus). */
+/** What another extension adds to the agent tool ("subagents:provider" on the event bus). */
 export interface SubagentsProvider {
 	/** Providers apply in the order of their ids; one emitted again under the same id replaces the earlier one. */
 	id: string;
@@ -709,9 +709,9 @@ function resolveTools(
 	if (READ_ONLY.has(def.name) && def.source === "built-in") {
 		denied.add("edit");
 		denied.add("write");
-		denied.add("Agent");
+		denied.add("agent");
 	}
-	if (childDepth >= maxDepth()) denied.add("Agent");
+	if (childDepth >= maxDepth()) denied.add("agent");
 	if (!canAsk) denied.add(ASK);
 	return { tools: [...new Set(tools)].filter((name) => !denied.has(name) && !NEVER.has(name)), unmatched };
 }
@@ -742,7 +742,7 @@ function subagentPreamble(depth: number, canAsk: boolean): string {
 		"",
 		"",
 		"## Running as a subagent",
-		`You run as a subagent (level ${depth}) started by another agent through its Agent tool. The task message comes from that agent, not from the user. Your final message is your report back to it; the user does not see it directly. ${ask} End with one complete report of what you found or did, including what is still open.`,
+		`You run as a subagent (level ${depth}) started by another agent through its agent tool. The task message comes from that agent, not from the user. Your final message is your report back to it; the user does not see it directly. ${ask} End with one complete report of what you found or did, including what is still open.`,
 		`Later messages: one that begins with "${FROM_AGENT}" is the next instruction of that agent. Any other later message was typed by the user, who can watch you work and write to you while you work or after your report: it takes precedence over the task where the two conflict, and your report says what the user asked of you. While you work, such a message can reach you as a notice next to a tool result ("the user sent a new message while you were working"): that is how it is delivered here, so follow it as the user's message.`,
 	].join("\n");
 }
@@ -774,8 +774,8 @@ function summarize(name: string, args: Record<string, unknown>): string {
 			return `grep /${short(args.pattern, 40)}/ ${home(args.path ?? ".")}`;
 		case "find":
 			return `find ${short(args.pattern, 40)} ${home(args.path ?? ".")}`;
-		case "Agent":
-			return `Agent ${args.subagent_type ?? "general-purpose"}: ${short(args.description, 50)}`;
+		case "agent":
+			return `agent ${args.subagent_type ?? "general-purpose"}: ${short(args.description, 50)}`;
 		default:
 			return `${name} ${short(JSON.stringify(args), 60)}`;
 	}
@@ -1195,7 +1195,7 @@ function report(details: RunDetails, kind: "foreground" | "background" | "user" 
 		: "";
 	const partial =
 		details.status === "completed" ? "" : `\n\n[The subagent ${details.status === "aborted" ? "was stopped" : "ended on an error"} before finishing: ${details.error ?? "unknown error"}. The text above is partial.]`;
-	const trailer = `\n\nagentId: ${details.agentId} (call Agent with resume: "${details.agentId}" to continue this agent with its full history)\n<usage>total_tokens: ${details.tokens}, tool_uses: ${details.toolCount}, duration_ms: ${details.durationMs ?? 0}</usage>`;
+	const trailer = `\n\nagentId: ${details.agentId} (call agent with resume: "${details.agentId}" to continue this agent with its full history)\n<usage>total_tokens: ${details.tokens}, tool_uses: ${details.toolCount}, duration_ms: ${details.durationMs ?? 0}</usage>`;
 	const summary = kind === "user" ? "answered the user" : kind === "self" ? "went on by itself" : details.status;
 	const body =
 		kind === "foreground"
@@ -1205,7 +1205,7 @@ function report(details: RunDetails, kind: "foreground" | "background" | "user" 
 }
 
 /**
- * Writes the conversation of this session, up to the turn that makes the Agent call, as the session a new subagent
+ * Writes the conversation of this session, up to the turn that makes the agent call, as the session a new subagent
  * starts from. Returns false when there is nothing to copy.
  */
 function forkSession(ctx: ExtensionContext, dir: string, meta: Meta, toolCallId: string): boolean {
@@ -1254,7 +1254,7 @@ function cleanup(): void {
 
 // --- Extension ------------------------------------------------------------------------------------------------------
 
-/** The Agent tool's parameters; a fork is not offered `fork`, which it must not use. */
+/** The agent tool's parameters; a fork is not offered `fork`, which it must not use. */
 function agentParams(families: string[], canFork = !process.env.PI_SUBAGENT_FORK) {
 	const named = ["small or large (a cheaper or a stronger model of the current provider)", ...families, "or a full model id"];
 	return Type.Object({
@@ -1312,14 +1312,14 @@ function toolDescription(agents: Map<string, AgentDef>): string {
 	const lines = [...agents.values()].map((def) => `- ${def.name}: ${def.description || "(no description)"} (Tools: ${toolsLabel(def)})`);
 	return `Launch a new agent to handle complex, multi-step tasks autonomously.
 
-The Agent tool launches specialized agents (separate processes) that autonomously handle complex tasks. Each agent type has specific capabilities and tools available to it.
+The agent tool launches specialized agents (separate processes) that autonomously handle complex tasks. Each agent type has specific capabilities and tools available to it.
 
 Available agent types and the tools they have access to:
 ${lines.join("\n")}
 
-When using the Agent tool, specify a subagent_type to select which agent type to use. Without it, general-purpose is used.
+When using the agent tool, specify a subagent_type to select which agent type to use. Without it, general-purpose is used.
 
-When NOT to use the Agent tool:
+When NOT to use the agent tool:
 - If you want to read a specific file path, use read instead, to find the match more quickly
 - If you are searching for a specific class definition like "class Foo", use grep instead
 - If you are searching for code within a specific file or set of 2-3 files, use read instead
@@ -1645,7 +1645,7 @@ export default function (pi: ExtensionAPI) {
 		});
 	}
 
-	/** Puts the result of a run that no Agent call waits for into the conversation. */
+	/** Puts the result of a run that no agent call waits for into the conversation. */
 	function deliver(result: RunResult): void {
 		if (!active) return;
 		const { details, origin } = result;
@@ -1719,15 +1719,15 @@ export default function (pi: ExtensionAPI) {
 		void done.then((result) => deliver(result));
 	});
 
-	/** The families the registered Agent tool offers. */
+	/** The families the registered agent tool offers. */
 	let offeredKey = "";
 
-	// The Agent tool's renderers. Pi rebuilds the conversation on /reload before session_start registers the tool: the
+	// The agent tool's renderers. Pi rebuilds the conversation on /reload before session_start registers the tool: the
 	// resolver draws its calls there as well, as long as the tool is not registered.
 	const agentRenderers = {
 		renderCall(args: Static<Params>, theme: Theme) {
 			const type = args.subagent_type || "general-purpose";
-			let text = `${theme.fg("toolTitle", theme.bold("Agent "))}${theme.fg("accent", args.resume ? `resume ${args.resume}` : type)}`;
+			let text = `${theme.fg("toolTitle", theme.bold("agent "))}${theme.fg("accent", args.resume ? `resume ${args.resume}` : type)}`;
 			if (args.description) text += theme.fg("muted", ` — ${args.description}`);
 			if (args.run_in_background) text += theme.fg("dim", " (background)");
 			if (args.fork && !args.resume) text += theme.fg("dim", " (fork)");
@@ -1785,19 +1785,19 @@ export default function (pi: ExtensionAPI) {
 		},
 	};
 	// The arguments of a call are those the tool gets, so the cast from the tool's typed renderers holds.
-	pi.registerToolRenderer((toolName, next) => next() ?? (toolName === "Agent" ? (agentRenderers as ToolRenderers) : undefined));
+	pi.registerToolRenderer((toolName, next) => next() ?? (toolName === "agent" ? (agentRenderers as ToolRenderers) : undefined));
 
 	function register(ctx: ExtensionContext): void {
 		const agents = discoverAgents(ctx.cwd, ctx.isProjectTrusted());
 		const offered = offeredFamilies(ctx);
 		offeredKey = offered.join(",");
 		pi.registerTool<Params, RunDetails>({
-			name: "Agent",
+			name: "agent",
 			label: "Agent",
 			description: toolDescription(agents),
-			promptSnippet: "Agent: delegate a task to a subagent with its own context window (Explore, Plan, general-purpose, …)",
+			promptSnippet: "Delegate a task to a subagent with its own context window (Explore, Plan, general-purpose, …)",
 			promptGuidelines: [
-				"Agent: hand a search that takes more than a few greps or reads (where something is defined, how a feature works across files, which files use something) to Explore with a thoroughness, instead of reading file after file in this conversation: Explore runs on a small model with its own context, and only its report enters this one. Read or grep yourself when you know the file or need one or two lookups.",
+				"agent: hand a search that takes more than a few greps or reads (where something is defined, how a feature works across files, which files use something) to Explore with a thoroughness, instead of reading file after file in this conversation: Explore runs on a small model with its own context, and only its report enters this one. Read or grep yourself when you know the file or need one or two lookups.",
 			],
 			parameters: agentParams(offered),
 			executionMode: "parallel",
@@ -1885,7 +1885,7 @@ export default function (pi: ExtensionAPI) {
 
 				if (!active) throw new Error("The session was replaced; the subagent was not started.");
 				const own = new AbortController();
-				// A foreground subagent stops with the Agent call, until it is moved to the background.
+				// A foreground subagent stops with the agent call, until it is moved to the background.
 				const forward = () => own.abort();
 				if (!background) {
 					if (signal?.aborted) own.abort();
@@ -1909,7 +1909,7 @@ export default function (pi: ExtensionAPI) {
 								entry.detach = () => resolve("detached");
 							});
 
-				/** Reports the subagent once it finishes, as a message that starts a turn, and returns the Agent call now. */
+				/** Reports the subagent once it finishes, as a message that starts a turn, and returns the agent call now. */
 				const inBackground = (text: string): AgentToolResult<RunDetails> => {
 					void run.then((result) => deliver(result));
 					const current = entry?.details;
@@ -2052,7 +2052,7 @@ export default function (pi: ExtensionAPI) {
 		if (DEPTH === 0) setTimeout(cleanup, 5_000).unref();
 	});
 
-	// Another provider may have other families: the Agent tool offers those it has.
+	// Another provider may have other families: the agent tool offers those it has.
 	pi.on("model_select", (_event, ctx) => {
 		if (active && canSpawn() && offeredFamilies(ctx).join(",") !== offeredKey) register(ctx);
 	});
