@@ -1521,7 +1521,11 @@ Claude Code, the prompt writes to the agent shown, and Esc interrupts it.
 - Background waits ([wait](#wait), [`gitlab_pipeline`](#gitlab_pipeline))
   are listed below the agents, marked `⧗` with the tool, with their id, what
   they wait for, what the last check found, the time since they started, and
-  their checks. Enter shows one in a notice, `x` cancels it.
+  their checks; `x` cancels one. Enter opens a box above the prompt, as the
+  task manager shows a scheduled task: what the wait waits for and until when,
+  since when, when it gives up, its checks, its command, and the end of the
+  last check's output, kept current while it runs. `x` cancels it there too,
+  Esc closes the box.
 - Scheduled tasks ([scheduled-tasks](#scheduled-tasks)) are listed below them,
   marked `↻`, with their prompt, schedule, and next run. Enter opens the task
   in the task manager, `x` deletes it. The panel also appears while only waits

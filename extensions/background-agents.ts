@@ -39,7 +39,10 @@
  *   to the message. The panel replaces the editor with a subclass of Pi's own, so another extension that replaces the
  *   editor wins over it.
  * - Background waits (wait.ts and gitlab.ts, background-waits:state) are listed below the agents with what they wait
- *   for, the time since they started, and their checks: Enter shows one in a notice, x cancels it.
+ *   for, the time since they started, and their checks. Enter opens a box above the prompt, as the task manager of
+ *   scheduled-tasks.ts shows a task: what the wait waits for and until when, since when, when it gives up, its checks,
+ *   its command, and the end of the last check's output, kept current; x cancels the wait, Esc closes the box. x in
+ *   the panel cancels it as well (background-waits:cancel).
  * - Scheduled tasks (scheduled-tasks.ts, scheduled-tasks:state) are listed below them with their schedule and next
  *   run: Enter opens the task in its manager, x deletes it. The panel also exists while only waits or tasks are there.
  * - The mouse: the row under the pointer gets the selection marker, and when the pointer leaves the panel the marker
@@ -166,6 +169,36 @@ function elapsed(ms: number): string {
 	const h = Math.floor(m / 60);
 	if (h < 24) return `${h}h ${m % 60}m ${s % 60}s`;
 	return `${Math.floor(h / 24)}d ${h % 24}h ${m % 60}m`;
+}
+
+// A copy of posixLocale, timeOfDay, and clock from scheduled-tasks.ts: change them alike.
+function posixLocale(category: "LC_TIME" | "LC_MONETARY"): string | undefined {
+	for (const value of [process.env.LC_ALL, process.env[category], process.env.LANG]) {
+		if (!value) continue;
+		const tag = value.split(/[.@]/)[0].replace(/_/g, "-");
+		if (tag === "C" || tag === "POSIX") return undefined;
+		try {
+			return Intl.DateTimeFormat.supportedLocalesOf([tag]).length > 0 ? tag : undefined;
+		} catch {
+			return undefined;
+		}
+	}
+	return undefined;
+}
+
+/** Times and dates in the locale of LC_TIME (or LC_ALL, else LANG). */
+const TIME_LOCALE = posixLocale("LC_TIME");
+
+/** The time of day in the locale ("21:29", "09:29 PM"). */
+function timeOfDay(date: Date): string {
+	return date.toLocaleTimeString(TIME_LOCALE, { hour: "2-digit", minute: "2-digit" });
+}
+
+function clock(ms: number): string {
+	const date = new Date(ms);
+	const today = new Date().toDateString() === date.toDateString();
+	const time = timeOfDay(date);
+	return today ? time : `${date.toLocaleDateString(TIME_LOCALE, { weekday: "short", day: "2-digit", month: "2-digit" })} ${time}`;
 }
 
 function compact(n: number): string {
@@ -671,6 +704,10 @@ interface BackgroundWaitView {
 	checks: number;
 	/** What the last check found, in one line. */
 	last?: string;
+	/** The command each check runs, where there is one. */
+	command?: string;
+	/** The end of the last check's output, where it says more than last. */
+	output?: string;
 	intervalMs: number;
 	/** When it gives up. */
 	deadline: number;
@@ -859,7 +896,7 @@ export default function (pi: ExtensionAPI) {
 	function openEntry(entry: Entry | undefined): void {
 		if (!entry) return;
 		if (entry.kind === "agent") void openAgent(entry.row);
-		else if (entry.kind === "wait") pi.events.emit("background-waits:open", { id: entry.wait.id });
+		else if (entry.kind === "wait") void openWait(entry.wait.id);
 		else pi.events.emit("scheduled-tasks:open", { id: entry.task.id });
 	}
 
@@ -1359,6 +1396,79 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 		await openOverlay(row, sessionId);
+	}
+
+	// --- the box of a background wait ------------------------------------------------------------------------------------------
+
+	/** Enter on a wait: a box above the prompt with its details, kept current while it runs; x cancels it, Esc closes. */
+	async function openWait(id: string): Promise<void> {
+		const find = () => [...waits.values()].flat().find((wait) => wait.id === id);
+		let shown = find();
+		if (!ctx || ctx.mode !== "tui" || !shown) return;
+		await ctx.ui.custom<void>((tui, theme, _keybindings, done) => {
+			let offset = 0;
+			let total = 0;
+			let rows = 1;
+			/** Body rows of the box: at most half the terminal, so the conversation above stays readable (as /btw). */
+			const maxRows = () => Math.max(4, Math.floor(tui.terminal.rows * 0.5) - 3);
+			const body = (wait: BackgroundWaitView, running: boolean, inner: number): string[] => {
+				const label = (name: string) => theme.fg("muted", name.padEnd(11));
+				const block = (title: string, text: string) => [
+					"",
+					theme.fg("muted", title),
+					...text.split("\n").flatMap((line) => (line ? wrapTextWithAnsi(line, inner) : [""])),
+				];
+				const checks = `${wait.checks}, every ${elapsed(wait.intervalMs)}`;
+				return [
+					...wrapTextWithAnsi(`${label("Waits for")}${wait.label}`, inner),
+					...wrapTextWithAnsi(`${label("Until")}${wait.until}`, inner),
+					`${label("Since")}${clock(wait.startedAt)} (${elapsed(Date.now() - wait.startedAt)})`,
+					`${label("Gives up")}${clock(wait.deadline)}`,
+					`${label("Checks")}${checks}`,
+					...(running ? [] : ["", theme.fg("warning", "Ended: its result comes as a message, unless it was cancelled.")]),
+					...(wait.command ? block("Command", wait.command) : []),
+					...(wait.output ? block("Last output", wait.output) : wait.last ? block("Last check", wait.last) : []),
+				];
+			};
+			return {
+				render(width: number): string[] {
+					const current = find();
+					if (current) shown = current;
+					const wait = shown as BackgroundWaitView;
+					const lines = body(wait, !!current, Math.max(1, width - 4));
+					total = lines.length;
+					rows = Math.min(maxRows(), Math.max(1, total));
+					offset = Math.max(0, Math.min(offset, total - rows));
+					const more = total > rows ? `  ${offset + 1}–${Math.min(total, offset + rows)}/${total}` : "";
+					const help = `${total > rows ? "↑↓ scroll · " : ""}${current ? "x cancel · " : ""}Esc close${more}`;
+					const title = `Background wait ${wait.id} · ${wait.tool}${current ? "" : " · ended"}`;
+					return frame(theme, width, title, viewport(lines, offset, rows), help);
+				},
+				handleInput(data: string): void {
+					if (matchesKey(data, Key.escape) || matchesKey(data, Key.enter) || data === "q") {
+						done();
+						return;
+					}
+					if (data === "x" || matchesKey(data, Key.delete)) {
+						if (!find()) return;
+						pi.events.emit("background-waits:cancel", { id });
+						done();
+						return;
+					}
+					const next = scrollKey(data, offset, total, rows);
+					if (next === undefined) return;
+					offset = next;
+					tui.requestRender();
+				},
+				handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+					if (event.type !== "wheel" || !event.wheelDelta) return undefined;
+					offset = Math.max(0, Math.min(Math.max(0, total - rows), offset + (event.wheelDelta < 0 ? -1 : 1)));
+					tui.requestRender();
+					return { handled: true };
+				},
+				invalidate(): void {},
+			};
+		});
 	}
 
 	// --- transcript overlay, when the main view cannot be swapped ------------------------------------------------------------------

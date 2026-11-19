@@ -17,9 +17,9 @@
  *   (/new, /resume, /fork) ends them, as they belong to the conversation that started them; the next session names
  *   them in a notice.
  * - Other extensions see the background waits on the event bus: "background-waits:state" carries { tool, waits }
- *   whenever they change and on "background-waits:request"; "background-waits:open" shows one in a notice and
- *   "background-waits:cancel" stops one, each with { id }. background-agents.ts lists them in its panel below the
- *   prompt, tmux-tab-activity.ts counts them as work, and gitlab.ts publishes gitlab_pipeline's the same way.
+ *   whenever they change and on "background-waits:request"; "background-waits:cancel" with { id } stops one.
+ *   background-agents.ts lists them in its panel below the prompt, tmux-tab-activity.ts counts them as work, and
+ *   gitlab.ts publishes gitlab_pipeline's the same way.
  * - A bash call that sleeps 15 seconds or more right after another bash call that did is refused with a pointer to
  *   wait. {"nudge": false} in ~/.pi/agent/wait.json turns that off.
  */
@@ -42,7 +42,6 @@ const NUDGE_WINDOW_MS = 10 * 60_000;
 /** The event-bus contract with gitlab.ts, background-agents.ts, and tmux-tab-activity.ts. */
 const STATE = "background-waits:state";
 const REQUEST = "background-waits:request";
-const OPEN = "background-waits:open";
 const CANCEL = "background-waits:cancel";
 const TOOL = "wait";
 
@@ -83,6 +82,8 @@ interface Background {
 	checks: number;
 	/** The last line of the last check's output. */
 	last?: string;
+	/** The end of the last check's output. */
+	output?: string;
 	abort: AbortController;
 }
 
@@ -102,6 +103,10 @@ interface BackgroundWaitView {
 	checks: number;
 	/** What the last check found, in one line. */
 	last?: string;
+	/** The command each check runs, where there is one. */
+	command?: string;
+	/** The end of the last check's output, where it says more than last. */
+	output?: string;
 	intervalMs: number;
 	/** When it gives up. */
 	deadline: number;
@@ -145,9 +150,12 @@ function formatDuration(ms: number): string {
 	return m < 60 ? `${m}m ${s % 60}s` : `${Math.floor(m / 60)}h ${m % 60}m`;
 }
 
+/** A time as HH:MM, with the date before it when it is not today. */
 function clock(ms: number): string {
 	const d = new Date(ms);
-	return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+	const pad = (n: number) => String(n).padStart(2, "0");
+	const time = `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+	return d.toDateString() === new Date().toDateString() ? time : `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${time}`;
 }
 
 function oneLine(text: string, max: number): string {
@@ -267,6 +275,8 @@ function view(entry: Background): BackgroundWaitView {
 		startedAt: entry.started,
 		checks: entry.checks,
 		last: entry.last,
+		command: spec.command,
+		output: entry.output,
 		intervalMs: spec.intervalMs,
 		deadline: entry.started + spec.timeoutMs,
 	};
@@ -317,19 +327,6 @@ function listText(views: BackgroundWaitView[]): string {
 			return `${v.id}  ${v.label} (${v.tool}): until ${v.until}; ${span}, gives up at ${clock(v.deadline)}${v.last ? `; last: ${v.last}` : ""}`;
 		})
 		.join("\n");
-}
-
-/** The notice "background-waits:open" shows. */
-function detailText(entry: Background): string {
-	const v = view(entry);
-	const checks = `${v.checks} check${v.checks === 1 ? "" : "s"} every ${formatDuration(v.intervalMs)}`;
-	return [
-		`Background wait ${v.id}: ${v.label}`,
-		`Until ${v.until}`,
-		`Command: ${oneLine(entry.spec.command ?? "", 300)}`,
-		`Since ${clock(v.startedAt)} (${formatDuration(Date.now() - v.startedAt)}), ${checks}, gives up at ${clock(v.deadline)}`,
-		...(v.last ? [`Last output: ${v.last}`] : []),
-	].join("\n");
 }
 
 export default function (pi: ExtensionAPI) {
@@ -387,6 +384,7 @@ export default function (pi: ExtensionAPI) {
 		void loop(spec, check, entry.abort.signal, (checks, _elapsedMs, last) => {
 			entry.checks = checks;
 			entry.last = oneLine(last.output.trim().split("\n").at(-1) ?? "", 200) || undefined;
+			entry.output = last.output.trim() ? tail(last.output) : undefined;
 			publish();
 		}).then((r) => {
 			if (shared.waits.get(id) === entry) shared.waits.delete(id);
@@ -440,10 +438,6 @@ export default function (pi: ExtensionAPI) {
 	pi.events.on(STATE, (data) => {
 		const { tool, waits } = (data ?? {}) as { tool?: unknown; waits?: unknown };
 		if (typeof tool === "string" && tool !== TOOL && Array.isArray(waits)) others.set(tool, waits as BackgroundWaitView[]);
-	});
-	pi.events.on(OPEN, (data) => {
-		const entry = shared.waits.get(String((data as { id?: unknown } | undefined)?.id));
-		if (entry) shared.live?.ctx.ui.notify(detailText(entry), "info");
 	});
 	pi.events.on(CANCEL, (data) => {
 		const id = String((data as { id?: unknown } | undefined)?.id);

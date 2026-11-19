@@ -946,7 +946,6 @@ const CI_MAX_TIMEOUT_MIN = 180;
 /** The event-bus contract with wait.ts, background-agents.ts, and tmux-tab-activity.ts. */
 const WAITS_STATE = "background-waits:state";
 const WAITS_REQUEST = "background-waits:request";
-const WAITS_OPEN = "background-waits:open";
 const WAITS_CANCEL = "background-waits:cancel";
 /** What GitLab's timestamped job logs put before each line: the time, the stream, and "+" (append) or a space. */
 const CI_LOG_PREFIX = /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?Z [0-9a-f]{2}[OE][+ ]?/;
@@ -1233,6 +1232,10 @@ interface BackgroundWaitView {
 	checks: number;
 	/** What the last check found, in one line. */
 	last?: string;
+	/** The command each check runs, where there is one. */
+	command?: string;
+	/** The end of the last check's output, where it says more than last. */
+	output?: string;
 	intervalMs: number;
 	/** When it gives up. */
 	deadline: number;
@@ -1261,9 +1264,12 @@ interface CiShared {
 const ciStore = globalThis as typeof globalThis & Record<symbol, CiShared | undefined>;
 const ciShared: CiShared = (ciStore[Symbol.for("pi.gitlab-pipeline.waits")] ??= { waits: new Map(), counter: 0, held: [], ended: [] });
 
+/** A time as HH:MM, with the date before it when it is not today. */
 function ciClock(ms: number): string {
 	const d = new Date(ms);
-	return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+	const pad = (n: number) => String(n).padStart(2, "0");
+	const time = `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+	return d.toDateString() === new Date().toDateString() ? time : `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${time}`;
 }
 
 function ciView(entry: CiWait): BackgroundWaitView {
@@ -1531,18 +1537,6 @@ export default function (pi: ExtensionAPI) {
 	pi.events.on(WAITS_STATE, (data) => {
 		const { tool, waits } = (data ?? {}) as { tool?: unknown; waits?: unknown };
 		if (typeof tool === "string" && tool !== CI_MESSAGE_TYPE && Array.isArray(waits)) otherWaits.set(tool, waits as BackgroundWaitView[]);
-	});
-	pi.events.on(WAITS_OPEN, (data) => {
-		const entry = ciShared.waits.get(String((data as { id?: unknown } | undefined)?.id));
-		if (!entry) return;
-		const v = ciView(entry);
-		const text = [
-			`Background wait ${v.id} of gitlab_pipeline: ${v.label}`,
-			`Until ${v.until}`,
-			`Since ${ciClock(v.startedAt)} (${ciDuration((Date.now() - v.startedAt) / 1000) || "0s"}), ${v.checks} check${v.checks === 1 ? "" : "s"} every ${ciDuration(v.intervalMs / 1000)}, gives up at ${ciClock(v.deadline)}`,
-			`Last check: ${v.last}`,
-		].join("\n");
-		ciShared.live?.ctx.ui.notify(text, "info");
 	});
 	pi.events.on(WAITS_CANCEL, (data) => {
 		const id = String((data as { id?: unknown } | undefined)?.id);
