@@ -28,7 +28,7 @@ names `extensions/`, which holds one file per extension.
 | `markitdown.ts`             | Adds `markitdown`: PDF, Office, EPUB, HTML, and CSV files as Markdown, through `read` too | `pdftotext` (Poppler) for PDF                                    |
 | `memory.ts`                 | Keeps a memory per project, shared with Claude Code's auto memory when it is there        | —                                                                |
 | `session-title.ts`          | Names each session after its first prompt and shows it in the terminal title              | —                                                                |
-| `tmux-tab-activity.ts`      | Swings a block over its tmux tab while Pi, a subagent, or a background wait works         | tmux 3.2 or later, set up as its section describes               |
+| `tmux-tab-activity.ts`      | Turns Pi's spinner in its tmux tab while Pi, a subagent, or a background wait works       | tmux 3.2 or later, set up as its section describes               |
 | `session-socket.ts`         | Lets sessions message each other and your Claude Code sessions, as Claude Code does       | Linux or macOS                                                   |
 | `ask-user-question.ts`      | Adds `ask_user_question`, Claude Code's multiple-choice questions                         | —                                                                |
 | `subagents.ts`              | Adds the `agent` tool: subagents in their own Pi process, on a tier or a model of choice  | —                                                                |
@@ -1127,25 +1127,19 @@ background while the agent works.
 
 ## tmux-tab-activity
 
-While Pi or one of its subagents works, or a background wait runs, a block
-swings back and forth over the number and name of its tmux tab, one character at a time, twenty frames a
-second whatever the name's length, so the tab bar shows which sessions are
-busy. The block has the colours of the active tab; on the active tab itself it
-runs as a gap, a character in the tab colour through the tab's block.
+While Pi or one of its subagents works, or a background wait runs, Pi's
+spinner turns in its tmux tab in place of the window number, so the tab bar
+shows which sessions are busy. The spinners of all tabs turn in step.
 
 - Pi shows the session in the terminal title, `π - <name> - <directory>`.
   During a run, a compaction, while a subagent works (one that waits for your
   instruction or an answer does not count), or while a background wait of
   [wait](#wait) or [`gitlab_pipeline`](#gitlab_pipeline) runs, the extension
-  writes it as
-  `π - ␟ <name> - <directory>` (an unnamed session's directory as its name),
-  where `␟` stands for the window number and the tab formats below put the
-  number in its place. The title carries tmux style tokens that draw one
-  character like the active tab, in `window-status-current-style` (in reverse
-  video while that style is tmux's default, which sets nothing), undimmed, and
-  the block moves on by one character per frame over the number, the space,
-  and the name; at either end it turns without a pause. The tokens take no room,
-  so the tab keeps its width.
+  writes it as `π - ␟⠹ <name> - <directory>` (an unnamed session's directory
+  as its name): `␟` marks the title of a working session, and the spinner's
+  frame follows it, which the tab formats below put in place of the number.
+  The frames are Pi's own, `⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏`, one every 80 ms, each taken from
+  the clock, so all tabs show the same frame.
 - It pauses while an `ask_user_question` dialog waits, when the tab's bell takes
   over, and while a run waits for a usage limit to reset
   ([auto-continue](#auto-continue)). It puts Pi's own title back when Pi
@@ -1154,11 +1148,8 @@ runs as a gap, a character in the tab colour through the tab's block.
   pane's while it works, else the first other pane's that works, else the
   active pane's. While another pane works, the tab shows that pane's name, so
   its width changes when that run starts and ends.
-- A window renamed by hand keeps its name, and the block runs over its number
-  and that name: tmux puts it on the character at the same share of their
-  length as in the title, so it swings in the same time, skips characters of a
-  longer name and lingers on those of a shorter one, and the tab keeps its
-  width.
+- A window renamed by hand keeps its name, with the spinner in place of its
+  number.
 - tmux takes a title as the pane title at once, but names the window after it
   at most every 500 ms, so the tab has to show the pane title itself. Set up
   tmux 3.2 or later like this, in `~/.tmux.conf` or
@@ -1166,50 +1157,42 @@ runs as a gap, a character in the tab colour through the tab's block.
   running sessions:
 
   ```conf
-  # The window name: the session name from Pi's title without the block's
-  # tokens and the ␟ for the number, else the command.
+  # The window name: the session name from Pi's title without the spinner,
+  # else the command.
   set -g automatic-rename on
-  set -g automatic-rename-format '#{?#{m:π - *,#{pane_title}},#{s/^␟ //:#{s/#\[[^]]*\]//:#{s/^π - (.*) - .*$/\1/:pane_title}}},#{pane_current_command}}'
-  # The tab: the number and session name from a pane's title, block
-  # included, the number in place of ␟; the active pane's while it works,
-  # else the first other pane's that works (␞ separates their names, the
-  # first stays), else the active pane's.
+  set -g automatic-rename-format '#{?#{m:π - *,#{pane_title}},#{s/^␟. //:#{s/^π - (.*) - .*$/\1/:pane_title}},#{pane_current_command}}'
+  # The tab: the number and session name from a pane's title, the spinner in
+  # place of the number while that pane works; the active pane's while it
+  # works, else the first other pane's that works (␞ separates their names,
+  # the first stays), else the active pane's. A window renamed by hand keeps
+  # its name (#W).
   %hidden PI_NAME='#{s/^π - (.*) - .*$/\1/:pane_title}'
-  %hidden PI_BUSY='#{m:*[[]nodim*,#{pane_title}}'
-  %hidden PI_OTHERS='#{s/␞.*$//:#{P:#{?#{m:*[[]nodim*,#{pane_title}},#{s/^π - (.*) - .*$/\1/:pane_title}␞,}}}'
+  %hidden PI_BUSY='#{m:π - ␟*,#{pane_title}}'
+  %hidden PI_OTHERS='#{s/␞.*$//:#{P:#{?#{m:π - ␟*,#{pane_title}},#{s/^π - (.*) - .*$/\1/:pane_title}␞,}}}'
   %hidden PI_LIVE="#{?$PI_BUSY,$PI_NAME,$PI_OTHERS}"
-  # A window renamed by hand keeps its name (#W); while a pane works, the
-  # block runs over its number and name, on the character at the same share
-  # of their length (PI_AT). The ␞ marks keep regsub's groups from being
-  # empty: tmux writes the digit of an empty \1 or \3 as text.
-  %hidden PI_AT="#{e|/:#{e|*:#{w:#{s/[#][[]nodim,.*$//:$PI_LIVE}},#{e|-:#{w:#I #{window_name}},1}},#{?#{e|>:#{w:$PI_LIVE},1},#{e|-:#{w:$PI_LIVE},1},1}}"
-  %hidden PI_HAND="#{s/␞//:#{s/^(␞#{R:.,$PI_AT})(.)(.*␞)$/\\1#{s/^.*([#][[]nodim,[^]]*[]]).*$/\\1/:$PI_LIVE}\\2#[default]\\3/:#{l:␞}#I #{window_name}#{l:␞}}}"
-  %hidden PI_TAB="#{?$PI_LIVE,#{?#{automatic-rename},#{s/␟/#I/:$PI_LIVE},$PI_HAND},#I #{?#{&&:#{automatic-rename},#{m:π - *,#{pane_title}}},$PI_NAME,#W}}"
+  # The spinner, undimmed (#[nodim fg=blue] gives it a colour), and padded to
+  # the number's width.
+  %hidden PI_SPIN="#{s/^␟(.).*$/#[nodim]\\1#[default]/:$PI_LIVE}#{R: ,#{e|-:#{w:#{window_index}},1}}"
+  %hidden PI_TAB="#{?$PI_LIVE,$PI_SPIN #{?#{automatic-rename},#{s/^␟. //:$PI_LIVE},#W},#I #{?#{&&:#{automatic-rename},#{m:π - *,#{pane_title}}},$PI_NAME,#W}}"
   set -g window-status-format " $PI_TAB"
-  # The active tab: the same, with the block turned into a gap (its token
-  # starts with nodim,).
-  set -g window-status-current-format " #{s/[#][[]nodim,[^]]*[]]/#[noreverse]/:$PI_TAB}"
+  set -g window-status-current-format " $PI_TAB"
   ```
 
-  The gap needs an active tab drawn in reverse video, as a block; on one that
-  is not, `#[noreverse]` changes nothing and the block does not show there.
-
-- It checks the setup and reads the active tab's style when a run starts,
-  and animates only while a tab format shows the pane title (`pane_title` or
-  `#T`) and puts the number in place of `␟`, and `set-titles` does not hand
-  the pane title on to the outer
-  terminal, whose title would show the tokens as text. Outside tmux, in
-  subagents, in print and RPC mode, and for a name with a `#` it does
-  nothing.
-- Pi only writes its title, twenty times a second while it works, and tmux
-  redraws its status line for each frame; no tmux command runs per frame.
-  Faster ways through tmux commands were set aside: one process per frame
+- It checks the setup when a run starts, and turns the spinner only while a
+  tab format shows the pane title (`pane_title` or `#T`) and takes the
+  spinner from behind `␟`, and `set-titles` does not hand the pane title on
+  to the outer terminal, whose title would change with every frame. Outside
+  tmux, in subagents, and in print and RPC mode it does nothing.
+- Pi only writes its title, twelve and a half times a second while it works,
+  and tmux redraws its status line for each frame; no tmux command runs per
+  frame. Ways through tmux commands were set aside: one process per frame
   costs more, and a control-mode client counts as focused, so with
   `focus-events` on the visible pane would get focus events that are not
   real.
-- While a run goes on, tmux's tree view (prefix `s` or `w`) shows the tokens
-  in the pane title as text, and tmux-resurrect saves the title as it is: a
-  tab restored from such a save shows the saved frame until Pi starts there.
+- While a run goes on, tmux's tree view (prefix `s` or `w`) shows `␟` and a
+  frame before the name in the pane title, and tmux-resurrect saves the title
+  as it is: a tab restored from such a save shows a still spinner until Pi
+  starts there.
 
 ## session-socket
 
