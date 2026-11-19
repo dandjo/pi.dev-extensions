@@ -2101,22 +2101,28 @@ you send a prompt.
   `Usage limit reached · continuing automatically at 19:01 (in 3h 29m)`, and
   Esc ends the run as ever.
 - The reset time comes from what the provider says, the first found of:
-  - the error text: a clock time in the time zone it names (Claude Code), a
-    duration after "try again in", "retry after", or "resets in"
+  - the error text, in its common forms: a clock time in the time zone it
+    names, else the local one (Claude Code, Codex's `try again at 4:12 PM`),
+    a duration after "try again in", "retry after", or "resets in"
     (`7m54.24s` from OpenAI and Groq, `~123 min` from Codex,
-    `86400 seconds`), Gemini's `retryDelay`, Pi's
-    `Server requested 3600s retry delay`, an ISO time after "reset", or an
-    epoch time in a field such as `resets_at`;
+    `86400 seconds` from Azure, `19h14m47s` from Gemini CLI), Gemini's
+    `retryDelay`, and Pi's `Server requested 3600s retry delay`, in which Pi
+    passes on a `retry-after` header that extensions do not see;
   - the headers of the refused response, where the provider's transport
     hands them to extensions (Codex does; the Anthropic and OpenAI SDKs throw
     before): `retry-after`, `anthropic-ratelimit-unified-reset`,
-    `x-ratelimit-reset-*`, and `ratelimit-reset`;
+    `x-ratelimit-reset-*`, `ratelimit-reset`, and Codex's
+    `x-codex-primary-reset-at`, a used-up window's first;
   - the plan's limits, where an extension offers them for the model, as
     [claude-usage](#claude-usage) does for Claude: the latest reset among the
     windows used up.
 
-  A clock time is waited for plus a minute and up to half a minute more, so
-  the sessions of one account do not all start at the same second.
+  Rarer forms are not read — a day with a UTC time (Anthropic's spend
+  limits), Z.ai's time without a zone, ISO or epoch times in the body of the
+  error (OpenRouter), Gemini's daily quota: such a limit is tried again at
+  the intervals below. A clock time is waited for plus a minute and up to
+  half a minute more, so the sessions of one account do not all start at the
+  same second.
 - Without a reset time, a usage limit or quota is tried again after 2, 5, 10,
   15, and 30 minutes, then every hour. A plain rate limit (`429`,
   `rate limit`, `too many requests`) is left to Pi's retry and

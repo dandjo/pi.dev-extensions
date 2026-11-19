@@ -9,16 +9,19 @@
  *   working line reads "Usage limit reached · continuing automatically at 19:01 (in 3h 29m) · esc to cancel". Esc ends
  *   the run as ever.
  * - The reset comes from what the provider says, the first found of:
- *   - the error text: Claude Code's "resets 12:50am (Europe/Vienna)" and "resets Nov 21, 7pm (Europe/Vienna)" in the
- *     time zone it names; a duration after "try again in", "retry in", "retry after", "reset(s) in/after", "available
- *     in" ("7m54.24s", "~123 min", "86400 seconds", "2 days 3 hours"); Pi's "Server requested 3600s retry delay";
- *     Gemini's "retryDelay"; an ISO time with its zone after "reset"; an epoch time in a field such as "resets_at" or
- *     "X-RateLimit-Reset";
+ *   - the error text, in its common forms only: a clock time in the time zone it names, else the local one (Claude
+ *     Code's "resets 12:50am (Europe/Vienna)" and "resets Nov 21, 7pm (Europe/Vienna)", Codex's "try again at
+ *     4:12 PM"); a duration after "try again in", "retry in", "retry after", "reset(s) in/after", "available in"
+ *     ("7m54.24s", "~123 min", "86400 seconds", "19h14m47s"); Gemini's "retryDelay"; and Pi's "Server requested 3600s
+ *     retry delay", in which Pi passes on a retry-after header that extensions do not see;
  *   - the headers of the refused response, where the provider's transport hands them to extensions (OpenAI Codex; the
  *     Anthropic and OpenAI SDKs throw before): anthropic-ratelimit-unified-reset, retry-after-ms, retry-after, then the
- *     x-ratelimit-reset* and ratelimit-reset headers, those whose remaining count is 0 first;
+ *     x-ratelimit-reset*, ratelimit-reset, and x-codex-*-reset-at headers, those of a spent window first (remaining 0,
+ *     used 100 %);
  *   - the plan's limits, where an extension offers them for the model ("plan-usage:source", claude-usage.ts): the
  *     latest reset among the windows used up to 100 %.
+ *   Rarer forms are not read (a day with a UTC time, Z.ai's time without a zone, ISO or epoch times in the body of
+ *   the error, Gemini's daily quota): such a limit is tried again at intervals.
  *   A reset named as a clock time is waited for plus a minute (the provider counts in minutes) and up to half a minute
  *   more, so the sessions of one account do not all start at the same second; an exact one plus two seconds and up to
  *   a tenth of the wait, half a minute at most.
@@ -62,13 +65,13 @@ const STATE_REQUEST = "auto-continue:state-request";
 
 /** Errors of a used-up limit: plan and usage limits, quotas, and rate limits. */
 const LIMIT =
-	/hit your [^\n]*?limit|usage[ _-]?limit|limit (?:reached|exceeded)|quota|resource[ _-]?exhausted|exhausted your capacity|rate[ _-]?limit|too many (?:requests|tokens)|(?<![\w.])429(?![\w.])|retry delay|UsageLimitError|"code"\s*:\s*"?1308(?![0-9])/i;
+	/hit your [^\n]*?limit|reached your [^\n]*?limit|usage[ _-]?limit|limit (?:reached|exceeded|exhausted)|quota|resource[ _-]?exhausted|exhausted your capacity|rate[ _-]?limit|too many (?:requests|tokens)|(?<![\w.])429(?![\w.])|retry delay|UsageLimitError/i;
 /** Of those, the ones that are more than a rate limit: windows of hours or days, quotas, plans. */
 const USAGE =
-	/hit your [^\n]*?limit|usage[ _-]?limit|quota|exhausted your capacity|per[ _-]?(?:day|hour|week|month)|daily|weekly|monthly|UsageLimitError|subscription|"code"\s*:\s*"?1308(?![0-9])/i;
+	/hit your [^\n]*?limit|usage[ _-]?limit|quota|exhausted your capacity|per[ _-]?(?:day|hour|week|month)|daily|weekly|monthly|UsageLimitError|subscription/i;
 /** Credit and billing errors: without a reset time they never reset by themselves. */
 const BILLING =
-	/insufficient[ _-]?(?:credit|balance|funds|quota)|credit balance|out of (?:usage )?credits|payment required|(?<![\w.])402(?![\w.])|spend(?:ing)? limit|top[ -]?up|recharge|exceeded your current quota|plan and billing details/i;
+	/insufficient[ _-]?(?:credit|balance|funds|quota)|credit[ _-]?balance|out of (?:usage )?credits|payment required|(?<![\w.])402(?![\w.])|spend(?:ing)?[ _-]?limit|top[ -]?up|recharge|exceeded your current quota|plan and billing details/i;
 
 /** A wall-clock reset: Claude Code's "resets 12:50am (Europe/Vienna)", "resets Nov 21, 7pm (Europe/Vienna)". */
 const CLOCK_TEXT =
@@ -83,12 +86,7 @@ const DURATION_TEXT = new RegExp(
 	"i",
 );
 /** Pi's own words when a server asks for a longer retry delay than it waits, and Gemini's RetryInfo. */
-const DELAY_TEXT = /requested\s+(\d+(?:\.\d+)?)s\s+retry delay|"retryDelay"\s*:\s*"(\d+(?:\.\d+)?)s"|"?resets?_in_seconds"?\s*[:=]\s*"?(\d+(?:\.\d+)?)/i;
-/** An ISO time with its zone after the word reset or retry. */
-const ISO_TEXT =
-	/\b(?:resets?|retry|try again|available)\b[^\n]{0,60}?(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2}|\s?UTC|\s?GMT))/i;
-/** An epoch time in a field of the error: "resets_at": 1763560000, "X-RateLimit-Reset": "1741305600000". */
-const EPOCH_TEXT = /"?(?:x-ratelimit-reset(?:-[a-z-]+)?|resets?_?at|reset_?time|retry_?at)"?\s*[:=]\s*"?(\d{10,13}(?:\.\d+)?)(?![\d.])/i;
+const DELAY_TEXT = /requested\s+(\d+(?:\.\d+)?)s\s+retry delay|"retryDelay"\s*:\s*"(\d+(?:\.\d+)?)s"/i;
 
 /** A reset in less than this is left to Pi's retry and network-resilience.ts. */
 const SHORT_MS = 60_000;
@@ -206,7 +204,7 @@ function clockReset(text: string, at: number): number | undefined {
 	if (hour > 23 || minute > 59) return undefined;
 	const now = fields(at, zone);
 	if (m[1]) {
-		const month = MONTHS.indexOf(m[1].toLowerCase());
+		const month = MONTHS.indexOf(m[1].slice(0, 3).toLowerCase());
 		const day = Number(m[2]);
 		let reset = zoned(now.year, month, day, hour, minute, zone);
 		// A reset in January named in December.
@@ -251,16 +249,11 @@ function textReset(text: string, at: number): Reset | undefined {
 	const clock = clockReset(text, at);
 	if (clock !== undefined) return { at: clock, minute: true };
 	const delay = DELAY_TEXT.exec(text);
-	const seconds = delay ? Number(delay[1] ?? delay[2] ?? delay[3]) : Number.NaN;
+	const seconds = delay ? Number(delay[1] ?? delay[2]) : Number.NaN;
 	if (Number.isFinite(seconds)) return { at: at + seconds * 1000, minute: false };
 	const spoken = DURATION_TEXT.exec(text);
 	const ms = spoken ? duration(spoken[1]) : undefined;
 	if (ms !== undefined) return { at: at + ms, minute: /min|h|d/i.test(spoken![1]) && !/\d\s*s(?![a-z])|sec/i.test(spoken![1]) };
-	const iso = ISO_TEXT.exec(text);
-	const stamp = iso ? Date.parse(iso[1].replace(/\s?(?:UTC|GMT)$/i, "Z").replace(" ", "T")) : Number.NaN;
-	if (Number.isFinite(stamp)) return { at: stamp, minute: false };
-	const epoch = EPOCH_TEXT.exec(text);
-	if (epoch) return { at: epochOrDelay(Number(epoch[1]), at), minute: false };
 	return undefined;
 }
 
@@ -304,6 +297,15 @@ function headerReset(raw: Record<string, string> | undefined, at: number): Reset
 		if (instant === undefined) continue;
 		const remaining = m[2] ? h.get(`anthropic-ratelimit-${m[2]}-remaining`) : h.get(key.replace("reset", "remaining"));
 		resets.push({ at: instant, spent: remaining !== undefined && Number(remaining) <= 0 });
+	}
+	// Codex's windows: x-codex-primary-reset-at (epoch seconds), spent at x-codex-primary-used-percent 100.
+	for (const [key, value] of h) {
+		const m = /^x-codex-([a-z]+)-reset-(at|after-seconds)$/.exec(key);
+		if (!m) continue;
+		const instant = headerTime(value, at, m[2] === "after-seconds");
+		if (instant === undefined) continue;
+		const used = Number(h.get(`x-codex-${m[1]}-used-percent`));
+		resets.push({ at: instant, spent: Number.isFinite(used) && used >= 100 });
 	}
 	const spent = resets.filter((r) => r.spent);
 	const pick = spent.length > 0 ? spent : resets;
