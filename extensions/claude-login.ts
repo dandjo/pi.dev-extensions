@@ -43,9 +43,11 @@
  * the claude-sdk provider: "Failed to authenticate", "reached its time limit", "claude auth login") gets a notice below
  * the error that names /claude-login. One that fails because the account used up its plan limit ("You've hit your
  * weekly limit · resets …", "out of usage credits") gets a notice that /claude-login signs in another account; while
- * CLAUDE_CODE_OAUTH_TOKEN is set, it says that the prompts run on that token instead, which outranks any login. The
- * error itself stays as it is, also in the saved session. A branch summary of /tree fails another way and gets no
- * notice.
+ * CLAUDE_CODE_OAUTH_TOKEN is set, it says that the prompts run on that token instead, which outranks any login. While
+ * auto-continue.ts is loaded (it answers "auto-continue:state-request"), the run waits for the reset instead of ending,
+ * so that notice says a waiting run continues at once on the account /claude-login signs in, and asks for no new
+ * prompt. The error itself stays as it is, also in the saved session. A branch summary of /tree fails another way and
+ * gets no notice.
  *
  * Other extensions reach it through the event bus, whatever the load order: "claude-login:source" carries a
  * ClaudeLoginSource, at load and on every "claude-login:source-request". An extension that finds none reads Claude
@@ -91,6 +93,9 @@ const LIMIT_NOTICE =
 	"This Claude account has used up its limit: /claude-login signs Claude Code in with another one (Pi's /login does not reach the claude-sdk provider)";
 const LIMIT_TOKEN_NOTICE =
 	"This Claude account has used up its limit. The prompts run on CLAUDE_CODE_OAUTH_TOKEN, which outranks any login: start Pi with a token of another account, or without the variable after /claude-login";
+/** LIMIT_NOTICE while auto-continue.ts holds the run until the reset. */
+const LIMIT_WAIT_NOTICE =
+	"This Claude account has used up its limit: /claude-login signs Claude Code in with another one, and a run waiting for the reset continues on it at once (Pi's /login does not reach the claude-sdk provider)";
 const LOGIN_COMMAND = "claude-login";
 const STATUS_TIMEOUT_MS = 15_000;
 
@@ -657,11 +662,23 @@ export default function (pi: ExtensionAPI) {
 		return undefined;
 	};
 
+	/** auto-continue.ts is loaded: a run that hits the limit waits for the reset. */
+	let autoContinue = false;
+	pi.events.on("auto-continue:state", () => {
+		autoContinue = true;
+	});
+	pi.events.emit("auto-continue:state-request", undefined);
+
 	pi.on("message_end", (event, ctx) => {
 		const message = event.message as { role?: string; stopReason?: string; provider?: string; errorMessage?: string };
 		if (message.role !== "assistant" || message.stopReason !== "error" || message.provider !== "claude-sdk") return;
 		const text = ctx.hasUI ? notice(message.errorMessage ?? "") : undefined;
-		if (text) ctx.ui.notify(`${text}, then send the prompt again.`, "warning");
+		if (!text) return;
+		if (autoContinue && text !== LOGIN_NOTICE) {
+			ctx.ui.notify(`${text === LIMIT_NOTICE ? LIMIT_WAIT_NOTICE : text}.`, "warning");
+			return;
+		}
+		ctx.ui.notify(`${text}, then send the prompt again.`, "warning");
 	});
 
 	pi.on("session_compact_failed", (event, ctx) => {

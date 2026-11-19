@@ -9,10 +9,10 @@ Claude Code's hooks, brings over Claude Code's subagents, questions, side
 questions, goals, loops, scheduled prompts, diff view, agent panel, and Remote
 Control for the Claude app, reads and changes OpenProject and GitLab, reads
 and writes the clipboard, reads PDF and Office documents as Markdown, controls
-your Chrome, keeps requests alive through network trouble, keeps long
-conversations small, waits for pipelines and deploys without spending
-requests, keeps itself and the Claude Agent SDK current, and fixes how the
-provider resumes after edited history.
+your Chrome, keeps requests alive through network trouble, continues after a
+usage limit resets, keeps long conversations small, waits for pipelines and
+deploys without spending requests, keeps itself and the Claude Agent SDK
+current, and fixes how the provider resumes after edited history.
 
 Install it as a Pi package (step 3 of the setup below): its `package.json`
 names `extensions/`, which holds one file per extension.
@@ -38,6 +38,7 @@ names `extensions/`, which holds one file per extension.
 | `diff.ts`                   | `/diff`: a panel beside the conversation with the changes and each turn's edits           | git                                                              |
 | `background-agents.ts`      | The agent panel below the prompt: ↓ to the agents, Enter opens one, Ctrl+B to background  | `subagents.ts`                                                   |
 | `network-resilience.ts`     | Claude Code's handling of dropped connections: stall notice, restart, network wait        | —                                                                |
+| `auto-continue.ts`          | Waits out a used-up usage limit, quota, or rate limit and continues after the reset       | —                                                                |
 | `context-gc.ts`             | Cuts thinking and long tool outputs of older turns from the context, in batches           | —                                                                |
 | `wait.ts`                   | Adds `wait`: checks a command or tool until a condition holds, without model requests     | —                                                                |
 | `package-update.ts`         | Keeps this package and the marketplace packages current, and reloads Pi when they change  | The package installed with `pi install`                          |
@@ -95,7 +96,7 @@ What differs is the tool around the model.
   panels, and dialogs, see and change what goes to the model, and react to
   every step of a session. Claude Code offers hooks, skills, MCP servers, and
   a status line script; its interface and agent loop stay closed. All
-  thirty-one extensions here are such files: the GitLab and OpenProject
+  thirty-two extensions here are such files: the GitLab and OpenProject
   tools, the plan limits in the status line, the diff panel, scheduled
   prompts, messages between sessions. Each can be read in one go, and a fix
   is a commit here, not a wait for the next Claude Code release.
@@ -129,7 +130,7 @@ Where Claude Code stays the better choice:
 ## Set up Pi
 
 Follow the steps in order — together they are the complete setup: Pi itself,
-the Claude subscription, all thirty-one extensions, and the browser
+the Claude subscription, all thirty-two extensions, and the browser
 connection. Every step except the Chrome switch in step 4 is a shell command,
 so an agent can carry them out as well.
 
@@ -196,7 +197,7 @@ Install this repository as a Pi package:
 pi install git:github.com/dandjo/pi.dev-extensions
 ```
 
-Pi clones it into `~/.pi/agent/git/` and loads all thirty-one extensions
+Pi clones it into `~/.pi/agent/git/` and loads all thirty-two extensions
 from there; `pi list` shows the package. [package-update](#package-update)
 brings new versions at every start, new and renamed extensions included, and
 reloads Pi once it is idle; `/update` fetches them at once. There is no build
@@ -579,10 +580,12 @@ the account used up its plan limit (`You've hit your weekly limit · resets …`
 `out of usage credits`) gets a notice that `/claude-login` signs in another
 account and that Pi's `/login` does not reach `claude-sdk`; while
 `CLAUDE_CODE_OAUTH_TOKEN` is set, it says that the prompts run on that token
-instead. The error is Claude Code's own text, passed on by `claude-sdk`
-("Failed to authenticate", "reached its time limit"), and stays as it is, also
-in the saved session. The summary of a branch in `/tree` fails another way and
-gets no notice.
+instead. With [auto-continue](#auto-continue), which keeps the run waiting
+for the reset, it says that the waiting run continues at once on the account
+`/claude-login` signs in, and asks for no new prompt. The error is Claude
+Code's own text, passed on by `claude-sdk` ("Failed to authenticate", "reached
+its time limit"), and stays as it is, also in the saved session. The summary
+of a branch in `/tree` fails another way and gets no notice.
 
 Other extensions reach it through Pi's event bus, whatever the load order:
 `claude-login:source` carries a source with `token()` and `renew()`, at load
@@ -1110,8 +1113,9 @@ runs as a gap, a character in the tab colour through the tab's block.
   and the name; at either end it turns without a pause. The tokens take no room,
   so the tab keeps its width.
 - It pauses while an AskUserQuestion dialog waits, when the tab's bell takes
-  over, and puts Pi's own title back when Pi settles, no subagent works, and
-  no background wait runs.
+  over, and while a run waits for a usage limit to reset
+  ([auto-continue](#auto-continue)). It puts Pi's own title back when Pi
+  settles, no subagent works, and no background wait runs.
 - A window with several panes shows the pane whose Pi works: the active
   pane's while it works, else the first other pane's that works, else the
   active pane's. While another pane works, the tab shows that pane's name, so
@@ -2022,7 +2026,10 @@ time out.
 - When Pi gives up on a transient error, the run continues with Claude Code's
   backoff (4, 8, 16, then 32 seconds) until ten requests in a row have failed,
   with the attempt and the countdown in the working message. Usage limits,
-  login, request, and context errors are never retried.
+  login, request, and context errors are never retried;
+  [auto-continue](#auto-continue) waits out a usage limit, and a rate limit
+  once ten requests have failed on it. A failed request that auto-continue
+  took over is left to it, and its wait ends the series of failures.
 - Settings, all optional, go into `~/.pi/agent/network-resilience.json`:
   `noticeSeconds` (20), `graceSeconds` (10), `stallSeconds` (300; 0 turns
   the silence restart off), `maxRestarts` (3), `maxAttempts` (10),
@@ -2035,6 +2042,73 @@ time out.
   reflect your network, behind a proxy Pi does not know of, for example.
   Checking then stops until Pi restarts, and restarts after a disruption
   follow the 10 seconds alone. Set `probeHost` to a host that answers.
+
+## auto-continue
+
+Waits out a used-up usage limit, quota, or rate limit and continues the run
+after the reset, as Claude Code does with `autoContinueAtUsageLimit`, for any
+provider. Without it, a request that hits such a limit ends the run: Pi and
+[network-resilience](#network-resilience) retry a rate limit for a few
+minutes, but not a limit of hours or days — Claude Code's
+`You've hit your session limit · resets 7pm (Europe/Vienna)`, Codex's
+`You have hit your ChatGPT usage limit (plus plan). Try again in ~123 min.`,
+a daily quota of Gemini or Groq — and nothing goes on after the reset until
+you send a prompt.
+
+- The failed request leaves the model's context, as with Pi's own retry, and
+  a note joins the conversation: when the limit was reached, when it resets,
+  and that the model is to continue without repeating finished work. The run
+  stays active, and its next request waits until the reset. The working line
+  shows the time,
+  `Usage limit reached · continuing automatically at 19:01 (in 3h 29m)`, and
+  Esc ends the run as ever.
+- The reset time comes from what the provider says, the first found of:
+  - the error text: a clock time in the time zone it names (Claude Code), a
+    duration after "try again in", "retry after", or "resets in"
+    (`7m54.24s` from OpenAI and Groq, `~123 min` from Codex,
+    `86400 seconds`), Gemini's `retryDelay`, Pi's
+    `Server requested 3600s retry delay`, an ISO time after "reset", or an
+    epoch time in a field such as `resets_at`;
+  - the headers of the refused response, where the provider's transport
+    hands them to extensions (Codex does; the Anthropic and OpenAI SDKs throw
+    before): `retry-after`, `anthropic-ratelimit-unified-reset`,
+    `x-ratelimit-reset-*`, and `ratelimit-reset`;
+  - the plan's limits, where an extension offers them for the model, as
+    [claude-usage](#claude-usage) does for Claude: the latest reset among the
+    windows used up.
+
+  A clock time is waited for plus a minute and up to half a minute more, so
+  the sessions of one account do not all start at the same second.
+- Without a reset time, a usage limit or quota is tried again after 2, 5, 10,
+  15, and 30 minutes, then every hour. A plain rate limit (`429`,
+  `rate limit`, `too many requests`) is left to Pi's retry and
+  network-resilience first, and so is one whose reset is less than a minute
+  away; after ten failed requests in a row it is tried again the same way.
+  Credit and billing errors (`insufficient credits`, `payment required`,
+  OpenAI's `You exceeded your current quota`) do not reset by themselves and
+  stand as they are.
+- While the run waits, the plan's limits are asked every two minutes, and
+  once a used-up window is free again, the run continues early. After a
+  sign-in with [`/claude-login`](#claude-login) it continues at once, on the
+  account just signed in.
+- Whatever starts a run while the limit holds waits the same way after its
+  first failed request: a subagent's report, the result of a background
+  wait, a message from another session, a scheduled prompt, `/loop`, and
+  `/goal`. Subagents load the extension in their own Pi process, so they wait
+  and continue by themselves. Messages that arrive during the wait are queued
+  and reach the model when the run continues.
+- A request that hits the limit again right after the wait waits again, at
+  least two minutes. After three such hits in a row the named reset is no
+  longer trusted (Gemini names one of seconds for a used-up daily quota), and
+  the run tries again at the intervals above. A reset more than eight days
+  away, or tries over eight days, end the waiting with a notice.
+- If Pi ends during the wait (a reboot, `/quit`), the wait resumes when the
+  session starts again before the reset; after the reset, a notice says to
+  send a prompt. Esc during the wait is remembered as Esc: the session does
+  not wait again on its next start.
+- The [tmux tab](#tmux-tab-activity) rests while a run waits, and the notice
+  of [claude-login](#claude-login) says that a waiting run continues on the
+  account `/claude-login` signs in.
 
 ## context-gc
 

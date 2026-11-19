@@ -11,7 +11,8 @@
  * undimmed (in reverse video while that style is tmux's default, which sets nothing), and the block moves on by one
  * character per frame over the number, the space, and the name; at either end it turns without a pause. It stops when
  * Pi settles, no subagent works, and no background wait runs, pauses while an AskUserQuestion dialog waits (the tab's
- * bell shows then), and puts Pi's own title back. The tokens take no room, so the tab keeps its width.
+ * bell shows then), and puts Pi's own title back. A run that waits for a usage limit to reset (auto-continue.ts,
+ * "auto-continue:state") does not count as work meanwhile. The tokens take no room, so the tab keeps its width.
  *
  * The block shows on the inactive tabs. The active tab, drawn in the same style, shows it only through its format:
  * the setup below turns it into a gap there (#[noreverse]), a letter in the tab colour that runs through the tab's
@@ -81,6 +82,9 @@ const WAITS_REQUEST = "background-waits:request";
 /** ask-user-question.ts: a dialog opens and closes (answered, declined, or withdrawn), with its tool call id. */
 const QUESTIONS_OPEN = "ask-user-question:open";
 const QUESTIONS_CLOSE = "ask-user-question:close";
+/** auto-continue.ts: whether the run waits for a usage limit to reset ({ waiting }), and the request for it. */
+const LIMIT_STATE = "auto-continue:state";
+const LIMIT_REQUEST = "auto-continue:state-request";
 
 function tmuxOption(name: string): Promise<string> {
 	return new Promise((resolve) => {
@@ -145,6 +149,8 @@ export default function (pi: ExtensionAPI) {
 
 	let ctx: ExtensionContext | null = null;
 	let running = false;
+	/** The run waits for a usage limit to reset. */
+	let limitWait = false;
 	let compacting = false;
 	/** The subagents that work now: running, and not waiting for an instruction or an answer. */
 	let agents = 0;
@@ -163,7 +169,7 @@ export default function (pi: ExtensionAPI) {
 	let generation = 0;
 
 	const waiting = () => [...waits.values()].some((count) => count > 0);
-	const working = () => (running || compacting || agents > 0 || waiting()) && asking.size === 0;
+	const working = () => ((running && !limitWait) || compacting || agents > 0 || waiting()) && asking.size === 0;
 	const dir = (context: ExtensionContext) => path.basename(context.cwd);
 
 	function frame(): void {
@@ -225,6 +231,13 @@ export default function (pi: ExtensionAPI) {
 			agents = now;
 			void update();
 		}),
+		pi.events.on(LIMIT_STATE, (data) => {
+			const now = (data as { waiting?: unknown } | undefined)?.waiting === true;
+			if (now === limitWait) return;
+			if (!now && !timer) setup = null;
+			limitWait = now;
+			void update();
+		}),
 		pi.events.on(WAITS_STATE, (data) => {
 			const { tool, waits: list } = (data ?? {}) as { tool?: unknown; waits?: unknown };
 			if (typeof tool !== "string") return;
@@ -243,8 +256,10 @@ export default function (pi: ExtensionAPI) {
 		waits.clear();
 		asking.clear();
 		setup = null;
+		limitWait = false;
 		pi.events.emit(SUBAGENTS_REQUEST, undefined);
 		pi.events.emit(WAITS_REQUEST, undefined);
+		pi.events.emit(LIMIT_REQUEST, undefined);
 	});
 
 	pi.on("agent_start", () => {

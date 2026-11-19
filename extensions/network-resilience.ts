@@ -27,7 +27,8 @@
  *   up to 30 min per outage. Esc interrupts the wait.
  * - More attempts: when Pi gives up on a transient error, the run continues with Claude Code's backoff (4 s, 8 s,
  *   16 s, then 32 s, plus up to 25 % jitter) until ten requests have failed in a row. Usage limits, login, request,
- *   and context errors are never retried.
+ *   and context errors are never retried. A failed request that an earlier handler of agent_before_settle took out of
+ *   the context already is left to it: auto-continue.ts waits out a rate limit whose reset is a minute or more away.
  * - While the host does not answer, the footer shows "⚠ offline".
  * - When the API delivers data while the probe fails, the probe does not reflect this network (a proxy Pi does not
  *   see, for example). Probing then stops until Pi restarts; restarts after a disruption follow the grace alone.
@@ -700,14 +701,20 @@ export default function (pi: ExtensionAPI): void {
 		const messages = event.context.contextMessages;
 		const last = messages[messages.length - 1];
 		if (!last || last.role !== "assistant" || last.stopReason !== "error") return undefined;
+		const same = (m: (typeof messages)[number]) => m === last || (m.role === "assistant" && m.timestamp === last.timestamp && m.stopReason === "error");
+		const entry = [...event.context.contextEntries].reverse().find((e) => e.messages.some(same));
+		if (!entry) return undefined;
+		// An earlier handler took the attempt out already and continues the run its own way (auto-continue.ts): its
+		// wait ends the series of failures.
+		if (event.entries.some((e) => e.type === "context_edit" && e.targetId === entry.sourceEntry.id)) {
+			failures = 0;
+			return undefined;
+		}
 		if (failures >= config.maxAttempts) {
 			if (ctx.hasUI) ctx.ui.notify(`network-resilience: ${failures} failed requests in a row, giving up`, "warning");
 			return undefined;
 		}
 		// Omit the failed attempt from the model's context, as Pi's own retry does, so the run can continue.
-		const same = (m: (typeof messages)[number]) => m === last || (m.role === "assistant" && m.timestamp === last.timestamp && m.stopReason === "error");
-		const entry = [...event.context.contextEntries].reverse().find((e) => e.messages.some(same));
-		if (!entry) return undefined;
 		retry = { attempt: failures + 1, delayMs: backoff(failures), error: shortError(lastError.text) };
 		return {
 			entries: [...event.entries, { type: "context_edit", targetId: entry.sourceEntry.id, replacement: null }],
