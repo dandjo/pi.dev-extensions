@@ -14,9 +14,17 @@
  * which Claude Code sends only after renewing the token under its own lock.
  *
  * A login that reached its time limit cannot be renewed: Claude Code then keeps it without a refresh token (and marks
- * it loginEnded). token() answers reason "ended" for it at once, without starting a process; it needs a new login:
- * `claude auth login` (in Pi `!!claude auth login`), which opens the browser and needs no input when the browser can
- * reach this machine's localhost.
+ * it loginEnded). token() answers reason "ended" for it at once, without starting a process; it needs a new login.
+ *
+ * /claude-login signs Claude Code in, with another account if need be: Pi's own /login signs in only Pi's anthropic
+ * provider and never reaches the claude-sdk provider. The command runs `claude auth login` (its --sso and --email
+ * options pass on) with the Claude Code program the Agent SDK brings, else `claude` on the PATH, in Pi's login dialog.
+ * Claude Code opens its sign-in page in the browser and takes the answer on this machine's localhost, so nothing needs
+ * typing in Pi. Where the browser cannot reach that (over SSH), the dialog shows Claude Code's other link, whose page
+ * shows a code to paste into the dialog. Esc cancels; a cancelled or failed sign-in leaves the login as it was.
+ * Afterwards the command names the account and plan, and "claude-login:changed" on the event bus has claude-usage.ts
+ * fetch the limits of the new account at once. A Claude Code process notices the changed login file and uses the new
+ * login with its next request, so the claude-sdk sessions run on it from their next prompt.
  *
  * The account: while CLAUDE_CODE_OAUTH_TOKEN is set (a token of `claude setup-token`), Claude Code runs the claude-sdk
  * provider's prompts on it, as it outranks the stored login. A login of another account would then show the limits
@@ -33,16 +41,27 @@
  *
  * A prompt or a compaction that fails because Claude Code's login cannot be used (Claude Code's own text, passed on by
  * the claude-sdk provider: "Failed to authenticate", "reached its time limit", "claude auth login") gets a notice below
- * the error that names `!!claude auth login`. The error itself stays as it is, also in the saved session. A branch
- * summary of /tree fails another way and gets no notice.
+ * the error that names /claude-login. One that fails because the account used up its plan limit ("You've hit your
+ * weekly limit · resets …", "out of usage credits") gets a notice that /claude-login signs in another account; while
+ * CLAUDE_CODE_OAUTH_TOKEN is set, it says that the prompts run on that token instead, which outranks any login. The
+ * error itself stays as it is, also in the saved session. A branch summary of /tree fails another way and gets no
+ * notice.
  *
  * Other extensions reach it through the event bus, whatever the load order: "claude-login:source" carries a
  * ClaudeLoginSource, at load and on every "claude-login:source-request". An extension that finds none reads Claude
  * Code's login itself, without the renewal and the account check.
  */
 
-import { type ExtensionAPI, getAgentDir } from "@earendil-works/pi-coding-agent";
-import { execFile, execFileSync } from "node:child_process";
+import {
+	copyToClipboard,
+	type ExtensionAPI,
+	type ExtensionCommandContext,
+	getAgentDir,
+	keyHint,
+	LoginDialogComponent,
+} from "@earendil-works/pi-coding-agent";
+import { type AutocompleteItem, hyperlink } from "@earendil-works/pi-tui";
+import { execFile, execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
@@ -65,7 +84,15 @@ const ORGANIZATION_RETRY_MS = 60_000;
 const ORGANIZATION_CACHE_SIZE = 16;
 /** Claude Code's answer to a login it cannot use, as the claude-sdk provider passes it on. */
 const LOGIN_FAILURE = /Failed to authenticate|reached its time limit|claude auth login|OAuth token has expired/i;
-const LOGIN_NOTICE = "Claude Code's login cannot be used: run !!claude auth login";
+const LOGIN_NOTICE = "Claude Code's login cannot be used: run /claude-login";
+/** Claude Code's answer once the account used up its plan limit or its usage credits. */
+const LIMIT_REACHED = /You['\u2019]ve hit your [^\n]*limit|out of (?:extra usage|usage credits)/i;
+const LIMIT_NOTICE =
+	"This Claude account has used up its limit: /claude-login signs Claude Code in with another one (Pi's /login does not reach the claude-sdk provider)";
+const LIMIT_TOKEN_NOTICE =
+	"This Claude account has used up its limit. The prompts run on CLAUDE_CODE_OAUTH_TOKEN, which outranks any login: start Pi with a token of another account, or without the variable after /claude-login";
+const LOGIN_COMMAND = "claude-login";
+const STATUS_TIMEOUT_MS = 15_000;
 
 /** What "claude-login:source" carries. */
 export interface ClaudeLoginSource {
@@ -221,17 +248,16 @@ async function claudeCodeLoginValid(): Promise<boolean> {
 	return (await claudeCodeLogin()).access !== undefined;
 }
 
-async function askClaudeCodeForUsage(): Promise<void> {
-	const sdkDir = claudeSdkDir();
-	if (!sdkDir) throw new Error("The Claude Agent SDK is not installed: `pi install npm:pi-claude-subscription` brings it (see the README).");
-	const sdk = (await import(pathToFileURL(path.join(sdkDir, "sdk.mjs")).href)) as ClaudeSdk;
-	const idle: AsyncIterable<never> = { [Symbol.asyncIterator]: () => ({ next: () => new Promise<IteratorResult<never>>(() => {}) }) };
-	const env: Record<string, string | undefined> = {
+/**
+ * The environment of a Claude Code process that works on its stored login: the subscription login, as the claude-sdk
+ * provider runs Claude Code, without CLAUDE_CODE_OAUTH_TOKEN, which outranks the stored login (it would then be neither
+ * used nor renewed); and usage counts as nonessential traffic.
+ */
+function storedLoginEnv(): Record<string, string | undefined> {
+	return {
 		...process.env,
-		// The subscription login, as the claude-sdk provider runs Claude Code; and usage counts as nonessential traffic.
 		ANTHROPIC_API_KEY: undefined,
 		ANTHROPIC_AUTH_TOKEN: undefined,
-		// It outranks the stored login, which would then be neither used nor renewed.
 		CLAUDE_CODE_OAUTH_TOKEN: undefined,
 		CLAUDE_CODE_USE_BEDROCK: undefined,
 		CLAUDE_CODE_USE_VERTEX: undefined,
@@ -240,6 +266,14 @@ async function askClaudeCodeForUsage(): Promise<void> {
 		CLAUDE_CODE_ENTRYPOINT: undefined,
 		CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: undefined,
 	};
+}
+
+async function askClaudeCodeForUsage(): Promise<void> {
+	const sdkDir = claudeSdkDir();
+	if (!sdkDir) throw new Error("The Claude Agent SDK is not installed: `pi install npm:pi-claude-subscription` brings it (see the README).");
+	const sdk = (await import(pathToFileURL(path.join(sdkDir, "sdk.mjs")).href)) as ClaudeSdk;
+	const idle: AsyncIterable<never> = { [Symbol.asyncIterator]: () => ({ next: () => new Promise<IteratorResult<never>>(() => {}) }) };
+	const env = storedLoginEnv();
 	const q = sdk.query({
 		prompt: idle,
 		options: { cwd: os.tmpdir(), tools: [], mcpServers: {}, settingSources: [], strictMcpConfig: true, persistSession: false, env, stderr: () => {} },
@@ -370,6 +404,234 @@ async function loginToken(renew: boolean): Promise<ClaudeLoginToken | ClaudeLogi
 	return { reason: "other-account" };
 }
 
+/**
+ * The Claude Code program for `claude auth`: the one the Claude Agent SDK brings, which the claude-sdk provider runs,
+ * looked up as the SDK does (on Linux the glibc build first, the musl one first without glibc), else `claude` on the
+ * PATH. Undefined without either.
+ */
+function claudeProgram(): string | undefined {
+	const exe = process.platform === "win32" ? ".exe" : "";
+	const sdkDir = claudeSdkDir();
+	if (sdkDir) {
+		const base = `claude-agent-sdk-${process.platform}-${process.arch}`;
+		let names = [base];
+		if (process.platform === "linux") {
+			const header = (process.report?.getReport() as { header?: { glibcVersionRuntime?: string } } | undefined)?.header;
+			names = header?.glibcVersionRuntime ? [base, `${base}-musl`] : [`${base}-musl`, base];
+		}
+		for (const name of names) {
+			for (const root of [path.join(sdkDir, "node_modules", "@anthropic-ai"), path.dirname(sdkDir)]) {
+				const file = path.join(root, name, `claude${exe}`);
+				if (existsSync(file)) return file;
+			}
+		}
+	}
+	for (const dir of (process.env.PATH ?? "").split(path.delimiter)) {
+		const file = dir ? path.join(dir, `claude${exe}`) : "";
+		if (file && existsSync(file)) return file;
+	}
+	return undefined;
+}
+
+/** The options of `claude auth login` that /claude-login passes on, or undefined for anything else. */
+function loginArguments(args: string): string[] | undefined {
+	const words = args.trim().split(/\s+/).filter(Boolean);
+	const out: string[] = [];
+	for (let i = 0; i < words.length; i++) {
+		if (words[i] === "--sso") out.push("--sso");
+		else if (words[i] === "--email" && words[i + 1] && !words[i + 1].startsWith("-")) out.push("--email", words[++i]);
+		else return undefined;
+	}
+	return out;
+}
+
+const LOGIN_OPTIONS: AutocompleteItem[] = [
+	{ value: "--sso", label: "--sso", description: "Sign in through your organization's single sign-on" },
+	{ value: "--email ", label: "--email", description: "Fill in the email address on the sign-in page" },
+];
+
+/** Who Claude Code is signed in as, from `claude auth status --json`; undefined when that cannot be told. */
+interface ClaudeAccount {
+	loggedIn: boolean;
+	email?: string;
+	organization?: string;
+	plan?: string;
+}
+
+async function claudeAccount(program: string): Promise<ClaudeAccount | undefined> {
+	let stdout: string;
+	try {
+		({ stdout } = await execFileAsync(program, ["auth", "status", "--json"], { env: storedLoginEnv(), timeout: STATUS_TIMEOUT_MS }));
+	} catch (e) {
+		// It exits with 1 while signed out, the answer on stdout all the same.
+		stdout = String((e as { stdout?: unknown }).stdout ?? "");
+	}
+	try {
+		const status = JSON.parse(stdout);
+		const text = (value: unknown) => (typeof value === "string" && value !== "" ? value : undefined);
+		return {
+			loggedIn: status.loggedIn === true,
+			email: text(status.email),
+			organization: text(status.orgName),
+			plan: text(status.subscriptionType),
+		};
+	} catch {
+		return undefined;
+	}
+}
+
+/** "name@example.com (Example, max)", as far as it is known. */
+function describeAccount(account: ClaudeAccount): string {
+	const details = [account.organization, account.plan].filter(Boolean).join(", ");
+	return `${account.email ?? "an account"}${details ? ` (${details})` : ""}`;
+}
+
+type SignInResult = { ok: true } | { ok: false; cancelled: boolean; error?: string };
+
+/** Text Claude Code printed, without its terminal sequences: hyperlinks, colours, carriage returns. */
+function plainOutput(text: string): string {
+	return text
+		.replace(/\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)/g, "")
+		.replace(/\u001b\[[0-9;?]*[A-Za-z]/g, "")
+		.replace(/\r/g, "");
+}
+
+/**
+ * Runs `claude auth login` in Pi's login dialog until it ends, or Esc ends it. Undefined where Pi cannot show the
+ * dialog.
+ */
+async function signIn(ctx: ExtensionCommandContext, program: string, args: string[]): Promise<SignInResult | undefined> {
+	return ctx.ui.custom<SignInResult>((tui, _theme, keybindings, done) => {
+		const child = spawn(program, ["auth", "login", ...args], { env: storedLoginEnv(), stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
+		let finished = false;
+		const stop = () => {
+			finished = true;
+			if (child.exitCode === null && child.signalCode === null) child.kill();
+		};
+		const finish = (result: SignInResult) => {
+			if (finished) return;
+			stop();
+			done(result);
+		};
+		const dialog = new LoginDialogComponent(
+			tui,
+			"claude-sdk",
+			(success) => {
+				if (!success) finish({ ok: false, cancelled: true });
+			},
+			"Claude Code",
+			"Sign in to Claude Code",
+		);
+		dialog.showDetails(["Claude Code opens its sign-in page in your browser: sign in there with the account to run on."]);
+
+		let output = "";
+		let errors = "";
+		let link: string | undefined;
+		let copied = false;
+		child.stdout.setEncoding("utf8").on("data", (chunk: string) => {
+			output += chunk;
+			if (link || finished) return;
+			// The link of the page that shows a code, for a browser that cannot reach this machine's localhost.
+			const found = output.match(/https:\/\/[^\s\u0007\u001b]+/)?.[0];
+			if (!found) return;
+			link = found;
+			dialog.showInfo("Browser didn't open, or it runs on another machine? Open this page, and paste the code it shows:", [
+				{ url: link },
+			]);
+			const clickHint = process.platform === "darwin" ? "Cmd+click to open" : "Ctrl+click to open";
+			dialog.showProgress(`${hyperlink(clickHint, link)} • ${keyHint("app.message.copy", "to copy")}`);
+			dialog
+				.showManualInput("Code:")
+				.then((code) => {
+					if (finished || !code.trim()) return;
+					dialog.showProgress("Checking the code…");
+					child.stdin.write(`${code.trim()}\n`);
+				})
+				.catch(() => {
+					// cancelled: the dialog's onComplete ends the sign-in
+				});
+		});
+		child.stderr.setEncoding("utf8").on("data", (chunk: string) => {
+			errors += chunk;
+		});
+		child.stdin.on("error", () => {
+			// the process ended before the code arrived; its exit tells
+		});
+		child.on("error", (error) => finish({ ok: false, cancelled: false, error: error.message }));
+		child.on("close", (code) => {
+			if (code === 0) return finish({ ok: true });
+			const said = plainOutput(errors || output)
+				.split("\n")
+				.map((line) => line.trim())
+				.filter((line) => line && !line.startsWith("Paste code here"));
+			finish({ ok: false, cancelled: false, error: said.at(-1) ?? `claude auth login ended with exit code ${code}` });
+		});
+
+		const handleInput = dialog.handleInput.bind(dialog);
+		return Object.assign(dialog, {
+			handleInput(data: string) {
+				if (link && keybindings.matches(data, "app.message.copy")) {
+					const url = link;
+					void copyToClipboard(url).then(
+						() => {
+							if (!copied && !finished) dialog.showProgress("Copied the link to the clipboard.");
+							copied = true;
+						},
+						(error: unknown) => {
+							if (!finished) dialog.showProgress(error instanceof Error ? error.message : String(error));
+						},
+					);
+					return;
+				}
+				handleInput(data);
+			},
+			// Pi closes the dialog (a /reload, the session's end): the sign-in ends with it.
+			dispose: stop,
+		});
+	});
+}
+
+/** /claude-login: signs Claude Code in, with another account if need be, and says who it is signed in as. */
+async function claudeLoginCommand(pi: ExtensionAPI, args: string, ctx: ExtensionCommandContext): Promise<void> {
+	if (!ctx.hasUI) return;
+	const options = loginArguments(args);
+	if (!options) {
+		ctx.ui.notify(`Usage: /${LOGIN_COMMAND} [--sso] [--email <address>]`, "warning");
+		return;
+	}
+	const program = claudeProgram();
+	if (!program) {
+		ctx.ui.notify(
+			"Neither the Claude Agent SDK nor Claude Code is installed: `pi install npm:pi-claude-subscription` brings the SDK (see the README).",
+			"error",
+		);
+		return;
+	}
+	const result = await signIn(ctx, program, options);
+	if (!result) {
+		ctx.ui.notify("Signing in needs Pi's interactive mode: run `claude auth login` in a shell.", "warning");
+		return;
+	}
+	if (!result.ok) {
+		if (result.cancelled) ctx.ui.notify("Sign-in cancelled: Claude Code's login stays as it was.", "info");
+		else ctx.ui.notify(`Claude Code: ${result.error ?? "the sign-in failed"} Its login stays as it was.`, "error");
+		return;
+	}
+	// A login that waits after a failed renewal is valid now.
+	gate.nextAt = 0;
+	gate.retryMs = RETRY_MS;
+	pi.events.emit("claude-login:changed", undefined);
+	const account = await claudeAccount(program);
+	const who = account?.loggedIn ? `Claude Code is signed in as ${describeAccount(account)}.` : "Claude Code is signed in.";
+	ctx.ui.notify(`${who} The claude-sdk sessions run on it from their next prompt.`, "info");
+	if (process.env.CLAUDE_CODE_OAUTH_TOKEN?.trim()) {
+		ctx.ui.notify(
+			"CLAUDE_CODE_OAUTH_TOKEN is set and outranks this login: the claude-sdk prompts keep running on its account until Pi starts without it.",
+			"warning",
+		);
+	}
+}
+
 export default function (pi: ExtensionAPI) {
 	const source: ClaudeLoginSource = {
 		renew: () => renewClaudeLogin().catch(() => false),
@@ -378,15 +640,33 @@ export default function (pi: ExtensionAPI) {
 	pi.events.on("claude-login:source-request", () => pi.events.emit("claude-login:source", source));
 	pi.events.emit("claude-login:source", source);
 
+	pi.registerCommand(LOGIN_COMMAND, {
+		description: "Sign Claude Code in, with another account if need be: the login the claude-sdk provider runs on",
+		getArgumentCompletions: (prefix) => {
+			const last = prefix.split(/\s+/).at(-1) ?? "";
+			const items = LOGIN_OPTIONS.filter((item) => item.label.startsWith(last) && !prefix.includes(item.label));
+			return items.length > 0 ? items : null;
+		},
+		handler: (args, ctx) => claudeLoginCommand(pi, args, ctx),
+	});
+
+	/** The notice for a prompt or compaction that failed with Claude Code's text, if it names a login or a limit. */
+	const notice = (error: string): string | undefined => {
+		if (LOGIN_FAILURE.test(error)) return LOGIN_NOTICE;
+		if (LIMIT_REACHED.test(error)) return process.env.CLAUDE_CODE_OAUTH_TOKEN?.trim() ? LIMIT_TOKEN_NOTICE : LIMIT_NOTICE;
+		return undefined;
+	};
+
 	pi.on("message_end", (event, ctx) => {
 		const message = event.message as { role?: string; stopReason?: string; provider?: string; errorMessage?: string };
 		if (message.role !== "assistant" || message.stopReason !== "error" || message.provider !== "claude-sdk") return;
-		if (!ctx.hasUI || !LOGIN_FAILURE.test(message.errorMessage ?? "")) return;
-		ctx.ui.notify(`${LOGIN_NOTICE}, then send the prompt again.`, "warning");
+		const text = ctx.hasUI ? notice(message.errorMessage ?? "") : undefined;
+		if (text) ctx.ui.notify(`${text}, then send the prompt again.`, "warning");
 	});
 
 	pi.on("session_compact_failed", (event, ctx) => {
-		if (!ctx.hasUI || ctx.model?.provider !== "claude-sdk" || !LOGIN_FAILURE.test(event.errorMessage ?? "")) return;
-		ctx.ui.notify(`${LOGIN_NOTICE}${event.reason === "manual" ? ", then /compact again" : ""}.`, "warning");
+		if (!ctx.hasUI || ctx.model?.provider !== "claude-sdk") return;
+		const text = notice(event.errorMessage ?? "");
+		if (text) ctx.ui.notify(`${text}${event.reason === "manual" ? ", then /compact again" : ""}.`, "warning");
 	});
 }

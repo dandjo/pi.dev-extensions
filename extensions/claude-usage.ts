@@ -19,9 +19,11 @@
  * from claude-login.ts ("claude-login:source" on the event bus): Claude Code's login, the one the claude-sdk provider
  * runs on (Pi's own /login is not used), renewed by Claude Code once it ran out after hours without a request, and
  * while CLAUDE_CODE_OAUTH_TOKEN is set only a login of that token's account, the one the claude-sdk provider's prompts
- * run on. Without a valid login the Limits row names `!!claude auth login`, the Pi command that signs Claude Code in
- * again (a login that reached its time limit always needs it). Without that extension the token is read here,
- * without renewal and account check, and the rows wait until a prompt renews it.
+ * run on. Without a valid login the Limits row names /claude-login, its command that signs Claude Code in again (a
+ * login that reached its time limit always needs it); after a sign-in there ("claude-login:changed" on the event bus)
+ * the limits of the new account are fetched at once, past the two-minute rule. Without that extension the token is
+ * read here, without renewal and account check, the row names `!!claude auth login`, and the rows wait until a prompt
+ * renews it.
  * It is never written to the cache and never refreshed here: rotating it would invalidate the refresh token behind
  * Claude Code's back.
  *
@@ -275,8 +277,8 @@ async function usageToken(login: ClaudeLoginSource | null): Promise<{ value: str
 	if (login) {
 		const token = await login.token();
 		if (!("reason" in token)) return { value: token.value };
-		if (token.reason === "ended") return { error: "login ended: !!claude auth login" };
-		return { error: token.reason === "other-account" ? "login: other account than CLAUDE_CODE_OAUTH_TOKEN" : "no valid login: !!claude auth login" };
+		if (token.reason === "ended") return { error: "login ended: /claude-login" };
+		return { error: token.reason === "other-account" ? "login: other account than CLAUDE_CODE_OAUTH_TOKEN" : "no valid login: /claude-login" };
 	}
 	const token = await readAccessToken();
 	return token ? { value: token } : { error: "no valid login: !!claude auth login" };
@@ -427,6 +429,8 @@ export default function (pi: ExtensionAPI) {
 	let claudeModel = false;
 	/** claude-login.ts, once it answered; without it a run-out login is not renewed here. */
 	let loginSource: ClaudeLoginSource | null = null;
+	/** Set once Claude Code was signed in anew: the next refresh asks past the two-minute rule. */
+	let accountChanged = false;
 
 	const changed = () => {
 		pi.events.emit("statusline:changed", undefined);
@@ -453,15 +457,16 @@ export default function (pi: ExtensionAPI) {
 			if (!login) return;
 			if (adopt(await readState())) changed();
 			if (process.env.PI_OFFLINE) return;
-			if (Date.now() - (state?.attemptAt ?? 0) < USAGE_TTL_MS) return;
+			if (!accountChanged && Date.now() - (state?.attemptAt ?? 0) < USAGE_TTL_MS) return;
 
 			lock = await acquireLock();
 			if (lock === "busy") return; // the other session's answer arrives through the cache
 			if (lock === "acquired") {
 				// Another session may have finished between the read above and the lock
 				if (adopt(await readState())) changed();
-				if (Date.now() - (state?.attemptAt ?? 0) < USAGE_TTL_MS) return;
+				if (!accountChanged && Date.now() - (state?.attemptAt ?? 0) < USAGE_TTL_MS) return;
 			}
+			accountChanged = false;
 
 			const save = async (next: Omit<UsageState, "updatedAt">) => {
 				state = { ...next, updatedAt: Date.now() };
@@ -569,6 +574,14 @@ export default function (pi: ExtensionAPI) {
 	};
 	pi.events.on("plan-usage:source-request", () => pi.events.emit("plan-usage:source", source));
 	pi.events.emit("plan-usage:source", source);
+
+	// The limits shown so far are another account's: none until the new account's arrive.
+	pi.events.on("claude-login:changed", () => {
+		accountChanged = true;
+		if (state) state = { ...state, snapshot: null, error: null };
+		changed();
+		void refreshUsage();
+	});
 
 	pi.events.on("claude-login:source", (data) => {
 		const offered = data as ClaudeLoginSource | undefined;

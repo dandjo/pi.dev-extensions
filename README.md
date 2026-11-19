@@ -59,7 +59,7 @@ active.
 | Extension                   | What it does                                                                              | Needs                                                            |
 | :-------------------------- | :---------------------------------------------------------------------------------------- | :--------------------------------------------------------------- |
 | `claude-usage.ts`           | Adds the Claude subscription limits and usage credits to the status line                  | `statusline.ts`, a Claude Code login                             |
-| `claude-login.ts`           | Hands out Claude Code's claude.ai login and renews it once it has run out                 | A Claude Code login                                              |
+| `claude-login.ts`           | Hands out and renews Claude Code's claude.ai login; `/claude-login` switches the account  | A Claude Code login                                              |
 | `claude-remote-control.ts`  | `/remote-control`: drive the session from the Claude app and claude.ai/code               | A Claude model on the Claude Code login                          |
 
 **The claude-sdk provider** (`claude-sdk-*`). They work on
@@ -479,6 +479,9 @@ without a prompt the token has run out. The extension then asks
 [claude-login](#claude-login) to have Claude Code renew it, and the limits come
 back with the next fetch. Without `claude-login.ts` the token is read here,
 without the account check, and the limits stay away until a prompt renews it.
+After [`/claude-login`](#claude-login) signed Claude Code in anew, the limits of
+the new account are fetched at once, past the two-minute rule; until they
+arrive, the `Limits` line says `loading…` instead of showing the old account's.
 
 Other extensions get the answer through Pi's event bus, in a protocol that
 names no provider: `plan-usage:source` carries a source with the plan's id
@@ -495,9 +498,10 @@ time of the next attempt.
 | :-------------------------- | :----------------------------------------- |
 | `loading…`                  | The first answer is on its way             |
 | `⚠ rate limited (HTTP 429)` | The endpoint turned the request away       |
-| `⚠ no valid login: !!claude auth login` | No Claude Code login, or its token ran out and Claude Code could not renew it. Or `claude-login.ts` is not loaded, and the login ran out while Pi idled |
-| `⚠ login ended: !!claude auth login` | Claude Code's login reached its time limit; no renewal helps |
-| `⚠ login: other account than CLAUDE_CODE_OAUTH_TOKEN` | Claude Code's login belongs to another account than `CLAUDE_CODE_OAUTH_TOKEN`, the one the `claude-sdk` prompts run on: run `!!claude auth login` with that account |
+| `⚠ no valid login: /claude-login` | No Claude Code login, or its token ran out and Claude Code could not renew it |
+| `⚠ login ended: /claude-login` | Claude Code's login reached its time limit; no renewal helps |
+| `⚠ login: other account than CLAUDE_CODE_OAUTH_TOKEN` | Claude Code's login belongs to another account than `CLAUDE_CODE_OAUTH_TOKEN`, the one the `claude-sdk` prompts run on: run `/claude-login` with that account |
+| `⚠ no valid login: !!claude auth login` | `claude-login.ts` is not loaded, and there is no valid login, or it ran out while Pi idled |
 | `⚠ HTTP 401`                | The endpoint rejected the token            |
 | `⚠ endpoint unreachable`    | Offline, or no answer within 10 seconds    |
 
@@ -512,12 +516,26 @@ does nothing — no request and no process until one of them asks.
 The token is Claude Code's login (`~/.claude/.credentials.json`, on macOS the
 login keychain), the one the `claude-sdk` provider runs on. Pi's own Anthropic
 login (`/login` in Pi, `~/.pi/agent/auth.json`) is not used, so there is one
-login to keep for the prompts and for these extensions. `!!claude auth login`
-in Pi signs Claude Code in (`claude auth login` in a shell): it opens the
-browser, and once you confirm there the login is stored without any input in
-Pi. Over SSH the browser cannot reach the machine's localhost; run
-`claude auth login` in a terminal there, which asks for the code the login
-page shows.
+login to keep for the prompts and for these extensions.
+
+`/claude-login` signs Claude Code in, with another account if need be — after
+one used up its limit, say. Pi's own `/login` cannot do that: it signs in only
+Pi's `anthropic` provider and never reaches `claude-sdk`. The command runs
+`claude auth login` in Pi's login dialog, with the Claude Code program the
+Claude Agent SDK brings, else `claude` on the `PATH`; `--sso` and
+`--email <address>` pass on. Claude Code opens its sign-in page in the browser
+and takes the answer on the machine's localhost, so nothing needs typing in Pi.
+Where the browser cannot reach that (over SSH), the dialog shows Claude Code's
+other link (`Ctrl+X` copies it), whose page shows a code to paste into the
+dialog. `Esc` cancels; a cancelled or failed sign-in leaves the login as it
+was. Afterwards the command names the account and plan, and the status line
+fetches the new account's limits at once. Running Claude Code processes notice
+the changed login and use it with their next request, so every `claude-sdk`
+session runs on the new account from its next prompt, without a restart. While
+`CLAUDE_CODE_OAUTH_TOKEN` is set, the prompts keep running on that token's
+account, which outranks any login, and the command says so.
+`!!claude auth login` (`claude auth login` in a shell) signs in as well,
+without the dialog.
 
 Claude Code renews its token only when it makes a request, and the
 `claude-sdk` provider ends idle Claude Code processes, so after about eight
@@ -530,8 +548,8 @@ its own lock before it sends that request. This needs the Claude Agent SDK that
 
 A login that reached its time limit cannot be renewed: Claude Code keeps it
 without a refresh token and marks it `loginEnded`. The extension then answers
-at once that the login ended, without starting a process, and the status line
-and Remote Control name `!!claude auth login`.
+at once that the login ended, without starting a process; the status line
+names `/claude-login`, and Remote Control `!!claude auth login`.
 
 The account: while `CLAUDE_CODE_OAUTH_TOKEN` is set (a token of
 `claude setup-token`), Claude Code runs the `claude-sdk` prompts on it, as it
@@ -556,10 +574,15 @@ start a Claude Code process, or ask the token endpoint, every few minutes.
 
 A prompt or a compaction (`/compact` or automatic) that fails because Claude
 Code cannot use its login gets a notice below the error:
-`Claude Code's login cannot be used: run !!claude auth login`. The error is
-Claude Code's own text, passed on by `claude-sdk` ("Failed to authenticate",
-"reached its time limit"), and stays as it is, also in the saved session. The
-summary of a branch in `/tree` fails another way and gets no notice.
+`Claude Code's login cannot be used: run /claude-login`. One that fails because
+the account used up its plan limit (`You've hit your weekly limit · resets …`,
+`out of usage credits`) gets a notice that `/claude-login` signs in another
+account and that Pi's `/login` does not reach `claude-sdk`; while
+`CLAUDE_CODE_OAUTH_TOKEN` is set, it says that the prompts run on that token
+instead. The error is Claude Code's own text, passed on by `claude-sdk`
+("Failed to authenticate", "reached its time limit"), and stays as it is, also
+in the saved session. The summary of a branch in `/tree` fails another way and
+gets no notice.
 
 Other extensions reach it through Pi's event bus, whatever the load order:
 `claude-login:source` carries a source with `token()` and `renew()`, at load
@@ -570,7 +593,8 @@ with the token to use (`value`, `source` `claude-code`, and whether it was
 answers a `reason`: `none`, `ended` (the login needs `/login`), or
 `other-account`. `renew()` only renews and answers whether the token is valid
 afterwards; it joins a renewal that is running, answers `false` at once while
-the wait lasts, and never rejects. Neither rejects.
+the wait lasts, and never rejects. Neither rejects. `claude-login:changed`
+follows every sign-in through `/claude-login`.
 
 ## compact-tools
 
