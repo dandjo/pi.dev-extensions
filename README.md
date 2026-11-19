@@ -8,10 +8,11 @@ lights up its tmux tab while it works, lets sessions message each other, runs
 Claude Code's hooks, brings over Claude Code's subagents, questions, side
 questions, goals, loops, scheduled prompts, diff view, agent panel, and Remote
 Control for the Claude app, reads and changes OpenProject and GitLab, reads
-and writes the clipboard, controls your Chrome, keeps requests alive through
-network trouble, keeps long conversations small, waits for pipelines and
-deploys without spending requests, keeps itself and the Claude Agent SDK
-current, and fixes how the provider resumes after edited history.
+and writes the clipboard, reads PDF and Office documents as Markdown, controls
+your Chrome, keeps requests alive through network trouble, keeps long
+conversations small, waits for pipelines and deploys without spending
+requests, keeps itself and the Claude Agent SDK current, and fixes how the
+provider resumes after edited history.
 
 Install it as a Pi package (step 3 of the setup below): its `package.json`
 names `extensions/`, which holds one file per extension.
@@ -24,6 +25,7 @@ names `extensions/`, which holds one file per extension.
 | `openproject.ts`            | Adds `openproject`: reads and changes OpenProject through its API v3, as you              | An OpenProject API token for each instance                       |
 | `gitlab.ts`                 | Adds `gitlab` and `gitlab_pipeline`: GitLab through its API, as you, and its CI in brief  | A GitLab personal access token for each instance                 |
 | `clipboard.ts`              | Adds `clipboard`: the model reads and writes the clipboard, text and images               | Linux: `wl-clipboard` (Wayland) or `xclip`                       |
+| `markitdown.ts`             | Adds `markitdown`: PDF, Office, EPUB, HTML, and CSV files as Markdown, through `read` too | `pdftotext` (Poppler) for PDF                                    |
 | `memory.ts`                 | Keeps a memory per project, shared with Claude Code's auto memory when it is there        | —                                                                |
 | `session-title.ts`          | Names each session after its first prompt and shows it in the terminal title              | —                                                                |
 | `tmux-tab-activity.ts`      | Swings a block over the number and name of its tmux tab while Pi or a subagent works      | tmux 3.2 or later, set up as its section describes               |
@@ -93,7 +95,7 @@ What differs is the tool around the model.
   panels, and dialogs, see and change what goes to the model, and react to
   every step of a session. Claude Code offers hooks, skills, MCP servers, and
   a status line script; its interface and agent loop stay closed. All
-  thirty extensions here are such files: the GitLab and OpenProject
+  thirty-one extensions here are such files: the GitLab and OpenProject
   tools, the plan limits in the status line, the diff panel, scheduled
   prompts, messages between sessions. Each can be read in one go, and a fix
   is a commit here, not a wait for the next Claude Code release.
@@ -127,9 +129,9 @@ Where Claude Code stays the better choice:
 ## Set up Pi
 
 Follow the steps in order — together they are the complete setup: Pi itself,
-the Claude subscription, all thirty extensions, and the browser connection.
-Every step except the Chrome switch in step 4 is a
-shell command, so an agent can carry them out as well.
+the Claude subscription, all thirty-one extensions, and the browser
+connection. Every step except the Chrome switch in step 4 is a shell command,
+so an agent can carry them out as well.
 
 What you need first:
 
@@ -194,12 +196,12 @@ Install this repository as a Pi package:
 pi install git:github.com/dandjo/pi.dev-extensions
 ```
 
-Pi clones it into `~/.pi/agent/git/` and loads all thirty extensions from
-there; `pi list` shows the package. [package-update](#package-update) brings
-new versions at every start, new and renamed extensions included, and reloads
-Pi once it is idle; `/update` fetches them at once. There is no build step
-and no `npm install`: the extensions import only packages Pi provides itself.
-Each file stands on its own; `pi config` turns single ones off.
+Pi clones it into `~/.pi/agent/git/` and loads all thirty-one extensions
+from there; `pi list` shows the package. [package-update](#package-update)
+brings new versions at every start, new and renamed extensions included, and
+reloads Pi once it is idle; `/update` fetches them at once. There is no build
+step and no `npm install`: the extensions import only packages Pi provides
+itself. Each file stands on its own; `pi config` turns single ones off.
 
 Then add web search, pinned to the tested version, and configure it as
 [Web search](#web-search) describes:
@@ -922,6 +924,43 @@ command for me".
   through OSC 52.
 - For yourself, Pi already has `/copy` and `Ctrl+X` (copy the last answer)
   and `Ctrl+V` (paste text or an image into the editor).
+
+## markitdown
+
+Adds the `markitdown` tool, with which the model reads a document as
+Markdown: "what does the offer in the PDF cost", "compare the two Word
+files". It follows Microsoft's
+[markitdown](https://github.com/microsoft/markitdown), written anew in
+TypeScript, without Python and without dependencies.
+
+- It reads PDF, Word (`.docx`), PowerPoint (`.pptx`), Excel (`.xlsx`), EPUB,
+  HTML, CSV and TSV, Jupyter notebooks, RSS and Atom feeds, and ZIP archives
+  of these, under a heading per file. `offset` and `limit` page through the
+  Markdown's lines as `read` pages through a file, cut at the same 2,000 lines
+  or 50 KB; `saveTo` writes the whole Markdown to a file instead, for grep and
+  `read`.
+- `read` returns PDF, Office, EPUB, and ZIP files as the same Markdown, with
+  `offset` and `limit` counting its lines, so the model gets text instead of
+  bytes whichever of the two tools it picks. Other files read as before.
+- The Markdown follows markitdown's, checked against its test files:
+  headings, lists, tables, links, footnotes, and equations (as LaTeX) of Word
+  documents; titles, text, tables, charts as tables, picture placeholders, and
+  notes of slides; a table per sheet; the article of a page saved from
+  Wikipedia or another MediaWiki site. Pictures stay placeholders; their bytes
+  are never read.
+- PDF goes through `pdftotext` from Poppler, which has to be on the `PATH`:
+  `poppler-utils` on Debian, Ubuntu, and Fedora, `brew install poppler` on
+  macOS. The text comes page by page, a marker before each page, and pages
+  laid out as forms or borderless tables become Markdown tables, as
+  markitdown finds them. A scan without a text layer has no text, and there
+  is no OCR; the tool then says so.
+- Not converted: the old binary Office formats (`.doc`, `.xls`, `.ppt`),
+  OpenDocument, and Outlook messages; the tool says how to save them in a
+  format it reads. Unlike markitdown, it reads no images, audio, or YouTube
+  videos and calls no cloud service.
+- Files up to 256 MB, ZIP archives that unpack to at most 512 MB, archives in
+  archives two levels deep, and two minutes of `pdftotext` per PDF. The last
+  eight documents stay converted while their size and time stay the same.
 
 ## memory
 
