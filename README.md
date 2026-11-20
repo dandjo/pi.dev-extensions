@@ -2094,7 +2094,9 @@ you send a prompt.
   stays active, and its next request waits until the reset. The working line
   shows the time,
   `Usage limit reached · continuing automatically at 19:01 (in 3h 29m)`, and
-  Esc ends the run as ever.
+  Esc ends the run as ever. Meanwhile a still ⧗ takes the place of the
+  spinner and the line changes once a minute, so the waiting session does not
+  redraw the screen many times a second for hours.
 - The reset time comes from what the provider says, the first found of:
   - the error text, in its common forms: a clock time in the time zone it
     names, else the local one (Claude Code, Codex's `try again at 4:12 PM`),

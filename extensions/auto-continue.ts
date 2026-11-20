@@ -7,7 +7,8 @@
  *   when the limit was reached and when it resets, and for the model to continue the task without repeating finished
  *   work. The run goes on at once, and its next request waits until the reset before it goes out. Meanwhile the
  *   working line reads "Usage limit reached · continuing automatically at 19:01 (in 3h 29m) · esc to cancel". Esc ends
- *   the run as ever.
+ *   the run as ever. While it waits, a still ⧗ stands in for Pi's spinner, and the line is drawn again only when its
+ *   text changes, once a minute: the spinner would redraw the screen twelve times a second for hours.
  * - The reset comes from what the provider says, the first found of:
  *   - the error text, in its common forms only: a clock time in the time zone it names, else the local one (Claude
  *     Code's "resets 12:50am (Europe/Vienna)" and "resets Nov 21, 7pm (Europe/Vienna)", Codex's "try again at
@@ -110,6 +111,8 @@ const RATE_ATTEMPTS = 10;
 /** How often the plan's limits are asked while a run waits; the source keeps its own pace on top. */
 const USAGE_ASK_MS = 2 * 60_000;
 const TICK_MS = 1000;
+/** Stands still in place of Pi's spinner while a run waits. */
+const WAIT_MARK = "⧗";
 
 const NOTE = "Continue the task you were working on when the limit was reached; do not repeat work that is already complete.";
 
@@ -449,7 +452,9 @@ export default function (pi: ExtensionAPI) {
 		const ui = ctx.hasUI ? ctx.ui : undefined;
 		const lead = wait.again ? "Usage limit reached again" : "Usage limit reached";
 		let asked = 0;
+		let shown: string | undefined;
 		setWaiting(true);
+		ui?.setWorkingIndicator({ frames: [WAIT_MARK] });
 		try {
 			while (!signal?.aborted) {
 				const now = Date.now();
@@ -473,13 +478,15 @@ export default function (pi: ExtensionAPI) {
 				const due = dueOf(wait);
 				if (now >= due) return true;
 				const next = wait.resetAt === undefined ? `no reset time named · trying again at ${when(due)}` : `continuing automatically at ${when(due)}`;
-				ui?.setWorkingMessage(`${lead} · ${next} (in ${left(due - now)}) · esc to cancel`);
+				const text = `${lead} · ${next} (in ${left(due - now)}) · esc to cancel`;
+				if (text !== shown) ui?.setWorkingMessage((shown = text));
 				await sleep(Math.min(TICK_MS, due - now), signal);
 			}
 			abortedAt = Date.now();
 			return false;
 		} finally {
 			ui?.setWorkingMessage();
+			ui?.setWorkingIndicator();
 			setWaiting(false);
 		}
 	}
