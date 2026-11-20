@@ -11,6 +11,8 @@
  * Sections come through the event bus, whatever the load order: an extension emits "statusline:section" with a
  * StatuslineSection at load and again on every "statusline:section-request"; "statusline:changed" asks for a render.
  * A section's render() runs at every render of the footer, so it must return at once and never wait for anything.
+ * The footer renders with every frame of the working spinner; context usage and cost walk the whole session, so they
+ * are kept until the session's leaf or the model changes, and at most TICK_MS.
  * In fullscreen mode a click on an extension status in the last line emits "statusline:status-click" with its key
  * ({ key }); the extension that set the status decides what happens (scheduled-tasks.ts opens its task manager).
  */
@@ -143,6 +145,20 @@ export default function (pi: ExtensionAPI) {
 			/** Where each extension status sits in the last render, for a click on it. */
 			let statusLine = -1;
 			let statusSpans: { key: string; from: number; to: number }[] = [];
+			/** Cost and context usage of the last walk over the session, and what they were taken for. */
+			let totals: { key: string; at: number; cost: number; usage: ReturnType<typeof ctx.getContextUsage> } | undefined;
+			const sessionTotals = () => {
+				const key = `${ctx.sessionManager.getLeafId()}|${ctx.model?.provider}/${ctx.model?.id}`;
+				if (totals?.key === key && Date.now() - totals.at < TICK_MS) return totals;
+				let cost = 0;
+				for (const e of ctx.sessionManager.getBranch()) {
+					if (e.type === "message" && e.message.role === "assistant") {
+						cost += (e.message as AssistantMessage).usage.cost.total;
+					}
+				}
+				totals = { key, at: Date.now(), cost, usage: ctx.getContextUsage() };
+				return totals;
+			};
 
 			return {
 				dispose() {
@@ -175,13 +191,7 @@ export default function (pi: ExtensionAPI) {
 					const lines = [`${modelFmt} 📂 ${dir}${branchFmt}`];
 
 					// --- Line 2: context bar, tokens, cost, time ------------------
-					let cost = 0;
-					for (const e of ctx.sessionManager.getBranch()) {
-						if (e.type === "message" && e.message.role === "assistant") {
-							cost += (e.message as AssistantMessage).usage.cost.total;
-						}
-					}
-					const ctxUsage = ctx.getContextUsage();
+					const { cost, usage: ctxUsage } = sessionTotals();
 					const tokens = ctxUsage?.tokens ?? null;
 					lines.push(
 						meter(theme, "Context", ctxUsage?.percent ?? null) +
