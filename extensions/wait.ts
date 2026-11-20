@@ -12,7 +12,8 @@
  *   shows the checks so far. When the user sends a message meanwhile, the wait goes on in the background with the
  *   checks it made, and the call returns at once with its id, so a long wait never shuts the user out.
  * - background: true (shell commands only) returns at once. When the condition holds or the wait gives up, a message
- *   brings the result into the conversation and starts a turn when Pi is idle. list: true and /waits list the
+ *   brings the result into the conversation: while Pi works, with its next step, so it is not stale by the time it
+ *   comes; when Pi is idle, it starts a turn. list: true and /waits list the
  *   background waits, gitlab_pipeline's too; cancel: "<id>" or /waits cancel <id> stops one.
  * - Background waits go on over /reload, and a result that comes while Pi reloads arrives once it has. Another session
  *   (/new, /resume, /fork) ends them, as they belong to the conversation that started them; the next session names
@@ -327,7 +328,7 @@ function deliver(held: Held): void {
 		try {
 			live.pi.sendMessage(
 				{ customType: MESSAGE_TYPE, content: held.content, display: true, details: held.details },
-				{ triggerTurn: true, deliverAs: "followUp" },
+				{ triggerTurn: true, deliverAs: "steer" },
 			);
 			return;
 		} catch {

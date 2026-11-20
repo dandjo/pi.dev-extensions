@@ -797,9 +797,10 @@ out.
 - `background: true`, with `wait` or with `wait: true`, returns at once with
   an id (`gp1`) and waits on its own, for at most `timeout` minutes (120
   there). Your messages do not stop it. When the job or pipeline settles or
-  the time is up, a message brings the result into the conversation and
-  starts a turn when Pi is idle. `/gitlab-waits` lists the background waits
-  with their last state, `/gitlab-waits stop <id>` ends one.
+  the time is up, a message brings the result into the conversation: while
+  Pi works, with its next step, so the result is not stale by the time it
+  comes; when Pi is idle, it starts a turn. `/gitlab-waits` lists the
+  background waits with their last state, `/gitlab-waits stop <id>` ends one.
 - Background waits go on over `/reload`, and a result that comes while Pi
   reloads arrives once it has. Another session (`/new`, `/resume`, `/fork`)
   ends them, as they belong to the conversation that started them, and names
@@ -1948,7 +1949,8 @@ is a request that reads the whole context.
   in, so a `/reload` ends it, and a message says so.
 - `background: true`, for shell commands, returns at once. When the condition
   holds or the wait gives up, a message brings the result into the
-  conversation and starts a turn when Pi is idle. `/waits` and the tool's
+  conversation: while Pi works, with its next step; when Pi is idle, it
+  starts a turn. `/waits` and the tool's
   `list: true` list the background waits, those of
   [`gitlab_pipeline`](#gitlab_pipeline) too; `/waits cancel <id>` or the
   tool's `cancel` stops one.

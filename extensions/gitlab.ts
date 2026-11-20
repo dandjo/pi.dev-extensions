@@ -929,7 +929,8 @@ function forgetToken(instance: ConfiguredInstance): boolean {
  *   section markers, and the lines a carriage return overwrote.
  * - play, retry, cancel, and run change state; with wait: true they wait for the job or pipeline afterwards.
  * - background: true (with wait, or with wait: true) returns at once with an id. The wait goes on without stopping for
- *   the user's messages, and a message brings its result into the conversation and starts a turn when Pi is idle.
+ *   the user's messages, and a message brings its result into the conversation: while Pi works, with its next step,
+ *   so it is not stale by the time it comes; when Pi is idle, it starts a turn.
  *   stop_wait (waitId) or /gitlab-waits stop <id> ends one; list and /gitlab-waits list them, those of the wait tool
  *   too. A check that fails on the network or with a server error is repeated, up to CI_RETRIES times in a row.
  * - Background waits go on over /reload, and a result that comes while Pi reloads arrives once it has; another session
@@ -1198,7 +1199,9 @@ const CiParams = {
 	wait: Type.Optional(Type.Boolean({ description: "play, retry, run: wait for the job or pipeline afterwards, as action wait does" })),
 	background: Type.Optional(
 		Type.Boolean({
-			description: "wait, or play/retry/run with wait: true: return at once and report the result by message later, as a turn of its own",
+			description:
+				"wait, or play/retry/run with wait: true: return at once and report the result by message later, " +
+				"with the next step or as a turn of its own",
 		}),
 	),
 	waitId: Type.Optional(Type.String({ description: "stop_wait: the id of the background wait, as gp1" })),
@@ -1313,7 +1316,7 @@ function ciDeliver(held: CiHeld): void {
 		try {
 			live.pi.sendMessage(
 				{ customType: CI_MESSAGE_TYPE, content: held.content, display: true, details: held.details },
-				{ triggerTurn: true, deliverAs: "followUp" },
+				{ triggerTurn: true, deliverAs: "steer" },
 			);
 			return;
 		} catch {
@@ -1569,7 +1572,8 @@ export default function (pi: ExtensionAPI) {
 			"lines matching grep, without colour codes and timestamps. play starts a manual job (with variables), retry runs " +
 			"a job again (without job: the failed jobs of the pipeline), cancel stops a job or the pipeline, run starts a " +
 			"pipeline for ref (with variables); with wait: true they wait afterwards. background: true (with wait) returns at " +
-			"once with an id, and a message brings the result later as a turn of its own; it goes on over /reload. stop_wait " +
+			"once with an id, and a message brings the result later, with your next step or as a turn of its own; it goes " +
+			"on over /reload. stop_wait " +
 			"with waitId ends such a wait, the pipeline itself goes on; list lists the background waits, the wait tool's too. " +
 			"The project defaults to the one of " +
 			"the working directory's origin remote; the pipeline is pipeline (its id), the head pipeline of mr, or the " +
