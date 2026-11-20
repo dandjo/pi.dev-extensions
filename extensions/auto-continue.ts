@@ -26,7 +26,7 @@
  *   A reset named as a clock time is waited for plus a minute (the provider counts in minutes) and up to half a minute
  *   more, so the sessions of one account do not all start at the same second; an exact one plus two seconds and up to
  *   a tenth of the wait, half a minute at most.
- * - While the run waits, the plan's limits are asked again every two minutes: a window shown used up that is free again
+ * - While the run waits, the plan's limits are asked again every five minutes: a window shown used up that is free again
  *   lets the run continue early. It continues at once after "claude-login:changed" (/claude-login signed Claude Code
  *   in, with another account if need be).
  * - Without a reset time, a usage limit or quota ("usage limit", "quota", "per day", "exhausted your capacity", …) is
@@ -112,7 +112,7 @@ const MAX_HITS = 3;
 /** The tries without a reset time, in minutes after each failed one; the last repeats. */
 const PROBE_MINUTES = [2, 5, 10, 15, 30, 60];
 /** How often the plan's limits are asked while a run waits; the source keeps its own pace on top. */
-const USAGE_ASK_MS = 2 * 60_000;
+const USAGE_ASK_MS = 5 * 60_000;
 const TICK_MS = 1000;
 
 /** How the notices of a wait that ends name what waited, and what to do instead. */

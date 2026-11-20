@@ -21,7 +21,7 @@
  * while CLAUDE_CODE_OAUTH_TOKEN is set only a login of that token's account, the one the claude-sdk provider's prompts
  * run on. Without a valid login the Limits row names /claude-login, its command that signs Claude Code in again (a
  * login that reached its time limit always needs it); after a sign-in there ("claude-login:changed" on the event bus)
- * the limits of the new account are fetched at once, past the two-minute rule. Without that extension the token is
+ * the limits of the new account are fetched at once, past the five-minute rule. Without that extension the token is
  * read here, without renewal and account check, the row names `!!claude auth login`, and the rows wait until a prompt
  * renews it.
  * It is never written to the cache and never refreshed here: rotating it would invalidate the refresh token behind
@@ -44,7 +44,7 @@ import { promisify } from "node:util";
 
 const SECTION_ID = "claude-usage";
 const POLL_MS = 10_000;
-const USAGE_TTL_MS = 120_000;
+const USAGE_TTL_MS = 300_000;
 const USAGE_STALE_MS = 600_000;
 const USAGE_MAX_AGE_MS = 3_600_000;
 const LOCK_STALE_MS = 30_000;
@@ -423,7 +423,7 @@ export default function (pi: ExtensionAPI) {
 	let claudeModel = false;
 	/** claude-login.ts, once it answered; without it a run-out login is not renewed here. */
 	let loginSource: ClaudeLoginSource | null = null;
-	/** Set once Claude Code was signed in anew: the next refresh asks past the two-minute rule. */
+	/** Set once Claude Code was signed in anew: the next refresh asks past the five-minute rule. */
 	let accountChanged = false;
 
 	const changed = () => {

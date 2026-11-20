@@ -349,7 +349,7 @@ Claude Code's `/usage` dialog, asked in the background and only while the
 status line shows them or [Remote Control](#claude-remote-control) needs
 them. The endpoint is rate-limited per account, so all Pi
 sessions share one answer through `~/.cache/pi-statusline/usage.json`: one
-session at a time asks, at most every two minutes, and the others read the
+session at a time asks, at most every five minutes, and the others read the
 file, so a new session shows the limits right away. The access token comes
 from [claude-login](#claude-login): Claude Code's login in
 `~/.claude/.credentials.json` (on macOS the login keychain item
@@ -376,13 +376,13 @@ without a prompt the token has run out. The extension then asks
 back with the next fetch. Without `claude-login.ts` the token is read here,
 without the account check, and the limits stay away until a prompt renews it.
 After [`/claude-login`](#claude-login) signed Claude Code in anew, the limits of
-the new account are fetched at once, past the two-minute rule; until they
+the new account are fetched at once, past the five-minute rule; until they
 arrive, the `Limits` line says `loading…` instead of showing the old account's.
 
 Other extensions get the answer through Pi's event bus, in a protocol that
 names no provider: `plan-usage:source` carries a source with the plan's id
 (`claude`), the models its limits apply to, the latest answer, and a refresh
-under the same two-minute rule; `plan-usage:changed` with the id follows every
+under the same five-minute rule; `plan-usage:changed` with the id follows every
 new one. `claude-remote-control.ts` hands the limits to the Claude app that
 way, and an extension for another subscription's limits can offer them alike.
 
@@ -1835,7 +1835,7 @@ you send a prompt.
   Credit and billing errors (`insufficient credits`, `payment required`,
   OpenAI's `You exceeded your current quota`) do not reset by themselves and
   stand as they are.
-- While the run waits, the plan's limits are asked every two minutes, and
+- While the run waits, the plan's limits are asked every five minutes, and
   once a used-up window is free again, the run continues early. After a
   sign-in with [`/claude-login`](#claude-login) it continues at once, on the
   account just signed in.

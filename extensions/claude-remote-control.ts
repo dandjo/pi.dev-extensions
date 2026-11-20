@@ -2437,7 +2437,7 @@ export default function (pi: ExtensionAPI) {
 
 	/**
 	 * The app's usage card (SDKControlGetUsageResponse): Pi's totals of the session and the plan limits, asked afresh
-	 * unless the shared answer is younger than two minutes. Without claude-usage.ts, or while the endpoint fails for an
+	 * unless the shared answer is younger than five minutes. Without claude-usage.ts, or while the endpoint fails for an
 	 * hour, rate_limits is null. behaviors, Claude Code's scan of its local transcripts, stays null.
 	 */
 	async function onGetUsage(): Promise<Json> {
