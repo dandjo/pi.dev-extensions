@@ -43,6 +43,9 @@
  *   report, a background wait's result, a message from another session, a scheduled prompt, and /loop. A
  *   subagent's own Pi process loads this extension as well, so the subagent waits and continues by itself. While a
  *   run waits, messages that arrive are queued as they are during any run, and go to the model when it continues.
+ * - In RPC mode, where Pi draws no working line, the wait is a status entry ("auto-continue:wait", without the
+ *   countdown, cleared when the run goes on): subagents.ts reads it from a subagent's process and shows the subagent
+ *   waiting.
  * - A compaction that fails on a limit (/compact, or Pi's own when the context fills up or overflows) is tried again
  *   once the limit resets, worked out the same way: Pi itself tries a failed one again only before the next request of
  *   a run. The retry waits until Pi is idle, as a compaction ends a running run, and goes as /compact with the
@@ -71,6 +74,8 @@ const STATE = "auto-continue:state";
 const STATE_REQUEST = "auto-continue:state-request";
 /** The status line entry of a compaction that waits for a limit to reset. */
 const STATUS_KEY = "auto-continue";
+/** The status entry of a run that waits, in RPC mode only (subagents.ts reads it). */
+const WAIT_STATUS_KEY = "auto-continue:wait";
 /** Carries a compaction's wait over /reload to the extension instance that follows. */
 const HANDOVER = Symbol.for("auto-continue:compaction");
 
@@ -544,6 +549,9 @@ export default function (pi: ExtensionAPI) {
 		const lead = wait.again ? "Usage limit reached again" : "Usage limit reached";
 		let asked = 0;
 		let shown: string | undefined;
+		// RPC mode has no working line (Pi ignores setWorkingMessage there): a status entry tells the client.
+		const relay = ctx.mode === "rpc" ? ui : undefined;
+		let relayed: string | undefined;
 		setWaiting(true);
 		// No frames: the working line shows the message alone, and nothing redraws it.
 		ui?.setWorkingIndicator({ frames: [] });
@@ -572,6 +580,7 @@ export default function (pi: ExtensionAPI) {
 				const next = wait.resetAt === undefined ? `no reset time named · trying again at ${when(due)}` : `continuing automatically at ${when(due)}`;
 				const text = `${lead} · ${next} (in ${left(due - now)}) · esc to cancel`;
 				if (text !== shown) ui?.setWorkingMessage((shown = text));
+				if (relay && `${lead} · ${next}` !== relayed) relay.setStatus(WAIT_STATUS_KEY, (relayed = `${lead} · ${next}`));
 				await sleep(Math.min(TICK_MS, due - now), signal);
 			}
 			abortedAt = Date.now();
@@ -579,6 +588,7 @@ export default function (pi: ExtensionAPI) {
 		} finally {
 			ui?.setWorkingMessage();
 			ui?.setWorkingIndicator();
+			if (relayed) relay?.setStatus(WAIT_STATUS_KEY, undefined);
 			setWaiting(false);
 		}
 	}

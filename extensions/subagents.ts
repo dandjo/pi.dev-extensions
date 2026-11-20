@@ -62,6 +62,10 @@
  * behave as Claude Code does inside a subagent, and PI_SUBAGENT_QUESTIONS, which tells ask-user-question.ts that this
  * session takes its questions as one request.
  *
+ * A subagent whose run waits for a usage limit to reset (auto-continue.ts in its process) says so with the status entry
+ * "auto-continue:wait"; the subagent then counts as waiting (waiting "limit", the entry's text in limit) until the
+ * entry is cleared, so the panel shows the wait and tmux-tab-activity.ts rests the tab meanwhile.
+ *
  * Other extensions follow the subagents through the event bus: "subagents:state" carries a SubagentView[] of the
  * running and recently finished ones whenever something changes, "subagents:request" asks for it, "subagents:stop"
  * with an agentId stops a running one, "subagents:interrupt" with an agentId interrupts it, "subagents:message" with
@@ -122,6 +126,8 @@ const UPDATE_INTERVAL_MS = 250;
 const HANDOVER_KEY = Symbol.for("pi.subagents.handover.v1");
 /** Parked subagents no runtime takes over within this time (the extension is gone after /reload) are ended. */
 const HANDOVER_TIMEOUT_MS = 60_000;
+/** auto-continue.ts's status entry while a run waits for a usage limit, in a subagent's process (RPC mode). */
+const LIMIT_STATUS_KEY = "auto-continue:wait";
 /** The events of a watched subagent that go out as they come ("subagents:event"). */
 const LIVE_EVENTS = new Set([
 	"message_start",
@@ -194,8 +200,13 @@ interface RunDetails {
 	type: string;
 	description: string;
 	status: "running" | "completed" | "failed" | "aborted" | "background";
-	/** While running: the user interrupted it and it waits for an instruction, or one of its dialogs is open. */
-	waiting?: "instruction" | "answer";
+	/**
+	 * While running: the user interrupted it and it waits for an instruction, one of its dialogs is open, or its run
+	 * waits for a usage limit to reset.
+	 */
+	waiting?: "instruction" | "answer" | "limit";
+	/** While it waits for a usage limit: what its auto-continue.ts says, e.g. "Usage limit reached · continuing …". */
+	limit?: string;
 	/** What started the run: a task of the agent tool (also when absent), a message of the user, or the subagent. */
 	origin?: "task" | "user" | "self";
 	/** What the user wrote to the subagent during the run. */
@@ -320,8 +331,13 @@ export interface SubagentView {
 	type: string;
 	description: string;
 	status: "running" | "completed" | "failed" | "aborted";
-	/** While running: the user interrupted it and it waits for an instruction, or one of its dialogs is open. */
-	waiting?: "instruction" | "answer";
+	/**
+	 * While running: the user interrupted it and it waits for an instruction, one of its dialogs is open, or its run
+	 * waits for a usage limit to reset.
+	 */
+	waiting?: "instruction" | "answer" | "limit";
+	/** While it waits for a usage limit: what its auto-continue.ts says, e.g. "Usage limit reached · continuing …". */
+	limit?: string;
 	background: boolean;
 	model: string;
 	startedAt: number;
@@ -835,6 +851,22 @@ function prompt(child: Child, message: string, images: unknown, starts: boolean)
 	send(child, { id, type: "prompt", message, ...(Array.isArray(images) && images.length ? { images } : {}), streamingBehavior: "steer" });
 }
 
+/** The subagent's run waits for a usage limit (text, its auto-continue.ts's status entry), or no longer does. */
+function limitWait(child: Child, text: unknown): void {
+	const run = child.run;
+	if (!run) return;
+	const details = run.details;
+	if (typeof text === "string" && text) {
+		if (details.waiting && details.waiting !== "limit") return;
+		details.waiting = "limit";
+		details.limit = text;
+	} else if (details.waiting === "limit") {
+		details.waiting = undefined;
+		details.limit = undefined;
+	} else return;
+	progress(run, true);
+}
+
 function progress(run: Run, force = false): void {
 	const now = Date.now();
 	if (!force && now - run.lastEmit < UPDATE_INTERVAL_MS) {
@@ -895,6 +927,7 @@ function settle(child: Child, how: "settled" | "rejected" | "stopped" | "abandon
 	child.dialogs = new AbortController();
 	const details = run.details;
 	details.waiting = undefined;
+	details.limit = undefined;
 	details.durationMs = Date.now() - details.startedAt;
 	details.output = run.lastText;
 	const limit = child.meta.maxTurns;
@@ -959,7 +992,8 @@ function record(child: Child, line: string, hooks: ChildHooks): void {
 		return;
 	}
 	if (event.type === "extension_ui_request") {
-		hooks.dialog(child, event);
+		if (event.method === "setStatus" && event.statusKey === LIMIT_STATUS_KEY) limitWait(child, event.statusText);
+		else hooks.dialog(child, event);
 		return;
 	}
 	if (event.type === "response") {
@@ -1463,6 +1497,7 @@ export default function (pi: ExtensionAPI) {
 			description: d.description,
 			status: d.status === "background" ? "running" : d.status,
 			waiting: d.status === "running" ? d.waiting : undefined,
+			limit: d.status === "running" && d.waiting === "limit" ? d.limit : undefined,
 			background,
 			model: d.model,
 			startedAt: d.startedAt,

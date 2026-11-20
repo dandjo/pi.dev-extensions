@@ -926,15 +926,15 @@ While Pi or one of its subagents works, or a background wait runs, Pi's
 spinner turns in its tmux tab in place of the window number, so the tab bar
 shows which sessions are busy. The spinners of all tabs turn in step.
 
-- Pi shows the session in the terminal title, `π - <name> - <directory>`.
-  During a run, a compaction, while a subagent works (one that waits for your
-  instruction or an answer does not count), or while a background wait of
-  [wait](#wait) or [`gitlab_pipeline`](#gitlab_pipeline) runs, the extension
-  writes it as `π - ␟⠹ <name> - <directory>` (an unnamed session's directory
-  as its name): `␟` marks the title of a working session, and the spinner's
-  frame follows it, which the tab formats below put in place of the number.
-  The frames are Pi's own, `⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏`, one every 80 ms, each taken from
-  the clock, so all tabs show the same frame.
+- Pi shows the session in the terminal title, `π - <name> - <directory>`. During
+  a run, a compaction, while a subagent works (one that waits for your
+  instruction, an answer, or a usage limit does not count), or while a
+  background wait of [wait](#wait) or [`gitlab_pipeline`](#gitlab_pipeline)
+  runs, the extension writes it as `π - ␟⠹ <name> - <directory>` (an unnamed
+  session's directory as its name): `␟` marks the title of a working session,
+  and the spinner's frame follows it, which the tab formats below put in place
+  of the number. The frames are Pi's own, `⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏`, one every 80 ms, each
+  taken from the clock, so all tabs show the same frame.
 - It pauses while an `ask_user_question` dialog waits, when the tab's bell takes
   over, and while a run waits for a usage limit to reset
   ([auto-continue](#auto-continue)). It puts Pi's own title back when Pi
@@ -1235,17 +1235,17 @@ moves into it, Enter shows an agent's live transcript in place of the
 conversation, and Ctrl+B moves a foreground agent to the background. Beyond
 Claude Code, the prompt writes to the agent shown, and Esc interrupts it.
 
-- The panel appears under the editor as soon as a subagent runs: a
-  `main` row, then one row per agent, `type › description`, with its state,
-  elapsed time, and tokens at the end, and a dimmed rule that sets it apart
-  from the status line below. At most five rows are visible; the
-  window follows the selection, with `↑ N more` and `↓ N more` for the rest.
-  The state carries the colour: an agent that asks you or waits for your
-  instruction in the warning colour, a completed one in green and dimmed, a
-  failed or stopped one in red. Finished agents stay 30 seconds, then
-  disappear. The footer reads `↓ to manage` while the panel exists.
-  The selected row has an arrow (`→`), the accent colour, and the selection
-  background, as in Pi's own lists and the `ask_user_question` dialog.
+- The panel appears under the editor as soon as a subagent runs: a `main` row,
+  then one row per agent, `type › description`, with its state, elapsed time,
+  and tokens at the end, and a dimmed rule that sets it apart from the status
+  line below. At most five rows are visible; the window follows the selection,
+  with `↑ N more` and `↓ N more` for the rest. The state carries the colour: an
+  agent that asks you, waits for your instruction, or waits for a usage limit in
+  the warning colour, a completed one in green and dimmed, a failed or stopped
+  one in red. Finished agents stay 30 seconds, then disappear. The footer reads
+  `↓ to manage` while the panel exists. The selected row has an arrow (`→`), the
+  accent colour, and the selection background, as in Pi's own lists and the
+  `ask_user_question` dialog.
 - ↓ on the last line of the prompt (not while browsing history or with the
   autocomplete open) selects the `main` row; the footer then says what the
   keys do. ↑/↓ move, ↑ from `main` returns to the prompt, Enter opens the
@@ -1280,8 +1280,11 @@ Claude Code, the prompt writes to the agent shown, and Esc interrupts it.
   waiting. Esc again stops it. Esc on an agent that does not work shows the
   conversation again. The line under the agent's state says what the prompt
   and Esc do right now.
-- A row reads `asks you` while one of the agent's dialogs is open and
-  `waits for you` after an interrupt. The agent's report arrives in the
+- A row reads `asks you` while one of the agent's dialogs is open,
+  `waits for you` after an interrupt, and
+  `usage limit · continuing automatically at 19:01` while its run waits for a
+  usage limit to reset ([auto-continue](#auto-continue)); Esc interrupts that
+  wait as it interrupts work. The agent's report arrives in the
   conversation when it finishes.
 - Foreground subagents (without `run_in_background`) are listed too; their
   tool call still shows their progress in the conversation. Ctrl+B moves them
@@ -1847,8 +1850,13 @@ you send a prompt.
   first failed request: a subagent's report, the result of a background
   wait, a message from another session, a scheduled prompt, and `/loop`.
   Subagents load the extension in their own Pi process, so they wait
-  and continue by themselves. Messages that arrive during the wait are queued
-  and reach the model when the run continues.
+  and continue by themselves, also while the main session is idle. Their row
+  in the [agent panel](#background-agents) shows the wait, and the tmux tab
+  rests meanwhile ([tmux-tab-activity](#tmux-tab-activity)): in RPC mode,
+  where Pi draws no working line, the wait is the status entry
+  `auto-continue:wait`, which [subagents](#subagents) reads. Messages that
+  arrive during the wait are queued and reach the model when the run
+  continues.
 - A request that hits the limit again right after the wait waits again, at
   least two minutes. After three such hits in a row the named reset is no
   longer trusted (Gemini names one of seconds for a used-up daily quota), and

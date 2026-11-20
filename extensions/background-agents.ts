@@ -6,7 +6,9 @@
  *
  * - The panel shows a `main` row and one row per agent: name, description, elapsed time, tokens. At most five rows
  *   are visible; the window follows the selection. Finished agents stay listed for 30 seconds, failed or stopped
- *   ones with a red mark. The footer reads "↓ to manage" while the panel exists.
+ *   ones with a red mark. An agent whose run waits for a usage limit to reset reads "usage limit · continuing
+ *   automatically at 19:01" in the warning colour instead of its time. The footer reads "↓ to manage" while the panel
+ *   exists.
  * - ↓ on the last line of the prompt, outside history browsing and autocomplete, selects the panel. Then ↑/↓ move
  *   (↑ from the first row returns to the prompt), Enter opens the selected agent (on `main` it shows the
  *   conversation again and returns to the prompt), x stops a running agent or clears a finished one, Esc returns to
@@ -719,8 +721,13 @@ interface SubagentView {
 	type: string;
 	description: string;
 	status: "running" | "completed" | "failed" | "aborted";
-	/** While running: the user interrupted it and it waits for an instruction, or one of its dialogs is open. */
-	waiting?: "instruction" | "answer";
+	/**
+	 * While running: the user interrupted it and it waits for an instruction, one of its dialogs is open, or its run
+	 * waits for a usage limit to reset.
+	 */
+	waiting?: "instruction" | "answer" | "limit";
+	/** While it waits for a usage limit: what its auto-continue.ts says, e.g. "Usage limit reached · continuing …". */
+	limit?: string;
 	background: boolean;
 	model: string;
 	startedAt: number;
@@ -1014,7 +1021,8 @@ export default function (pi: ExtensionAPI) {
 
 	function statusText(row: Row): string {
 		const parts: string[] = [];
-		if (row.status === "running") parts.push(row.waiting === "instruction" ? "waits for you" : `${row.waiting === "answer" ? "asks you · " : ""}${elapsed(Date.now() - row.startedAt)}`);
+		if (row.status === "running" && row.waiting === "limit") parts.push(limitText(row));
+		else if (row.status === "running") parts.push(row.waiting === "instruction" ? "waits for you" : `${row.waiting === "answer" ? "asks you · " : ""}${elapsed(Date.now() - row.startedAt)}`);
 		else parts.push(row.status === "completed" ? `done ${elapsed(row.durationMs ?? 0)}` : row.status === "aborted" ? "stopped" : "failed");
 		if (row.tokens > 0) parts.push(`${row.status === "running" && row.toolCount === 0 ? "↑" : "↓"} ${compact(row.tokens)} tokens`);
 		return parts.join(" · ");
@@ -1207,8 +1215,15 @@ export default function (pi: ExtensionAPI) {
 		else pi.events.emit(row.waiting === "instruction" ? "subagents:stop" : "subagents:interrupt", agentId);
 	}
 
+	/** A row's words for an agent that waits for a usage limit: "usage limit · continuing automatically at 19:01". */
+	function limitText(row: Row): string {
+		const said = (row.limit ?? "").replace(/^Usage limit reached( again)?(?: · )?/, "");
+		return said ? `usage limit · ${said}` : "usage limit";
+	}
+
 	function stateLine(current: Row, theme: Theme): string {
 		if (current.status === "running" && current.waiting === "instruction") return theme.fg("warning", "interrupted · waits for your instruction");
+		if (current.status === "running" && current.waiting === "limit") return theme.fg("warning", `${current.limit ?? "Usage limit reached"} · ${elapsed(Date.now() - current.startedAt)}`);
 		if (current.status === "running") return theme.fg("warning", `${current.waiting === "answer" ? "asks you" : "running"} · ${elapsed(Date.now() - current.startedAt)}`);
 		if (current.status === "completed") return theme.fg("success", `✓ completed · ${elapsed(current.durationMs ?? 0)}`);
 		return theme.fg("error", `${current.status === "aborted" ? "stopped" : "✗ failed"}${current.error ? ` · ${current.error.split("\n")[0]}` : ""}`);

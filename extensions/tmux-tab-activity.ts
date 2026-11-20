@@ -4,8 +4,8 @@
  *
  * Pi shows the session in the terminal title, "π - <name> - <directory>", or "π - <directory>" while the session has
  * no name. During a run, a compaction, while a subagent works (subagents.ts, "subagents:state" on the event bus; not
- * one that waits for an instruction or an answer), or while a background wait runs (wait.ts and gitlab.ts,
- * "background-waits:state"), this extension writes it as "π - ␟⠹ <name> - <directory>" (an unnamed session's
+ * one that waits for an instruction, an answer, or a usage limit), or while a background wait runs (wait.ts and
+ * gitlab.ts, "background-waits:state"), this extension writes it as "π - ␟⠹ <name> - <directory>" (an unnamed session's
  * directory as its name): ␟ marks the title of a working session, and the spinner's frame follows it, which the tab
  * formats below put in place of the window number. The frames are those of Pi's own spinner (pi-tui's Loader),
  * ⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏, one every 80 ms, each taken from the clock, so all tabs show the same frame. It stops when Pi settles,
@@ -108,7 +108,7 @@ export default function (pi: ExtensionAPI) {
 	/** The run waits for a usage limit to reset. */
 	let limitWait = false;
 	let compacting = false;
-	/** The subagents that work now: running, and not waiting for an instruction or an answer. */
+	/** The subagents that work now: running, and not waiting for an instruction, an answer, or a usage limit. */
 	let agents = 0;
 	/** The background waits running now, by the tool that waits. */
 	const waits = new Map<string, number>();
