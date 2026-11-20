@@ -1157,7 +1157,7 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	/** Pi's document container: header, loaded resources, and the conversation, in that order. */
-	type DocumentContainer = Component & { children: Component[]; mouseLayout?: unknown };
+	type DocumentContainer = Component & { children: Component[]; childLines?: unknown };
 
 	interface Swap {
 		agentId: string;
@@ -1343,7 +1343,7 @@ export default function (pi: ExtensionAPI) {
 		const current = swap;
 		current.agentId = row.agentId;
 		current.component = component;
-		current.doc.mouseLayout = undefined;
+		current.doc.childLines = undefined;
 		if (current.timer) clearInterval(current.timer);
 		current.timer = setInterval(() => {
 			if (swap === current && current.component === component && component.transcript.read()) tui.requestRender();
@@ -1366,7 +1366,7 @@ export default function (pi: ExtensionAPI) {
 		if (watched?.transcript === current.component.transcript) watch(null);
 		const added = current.doc.children.filter((child) => child !== current.component);
 		current.doc.children = [...current.saved, ...added];
-		current.doc.mouseLayout = undefined;
+		current.doc.childLines = undefined;
 		const { scroll, scrollState } = current;
 		if (scroll && scrollState) {
 			if (scrollState.following) scroll.scrollToEnd();
