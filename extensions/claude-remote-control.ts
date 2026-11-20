@@ -11,7 +11,8 @@
  * - A session that was connected when Pi closed connects again when it is opened (startup, /resume, and /reload while
  *   not connected), once Remote Control was enabled here: the session records whether it is connected (a
  *   remote-control-state entry, not shown). Quitting Pi keeps the record; disconnecting, or a connection that ends
- *   while Pi runs, clears it.
+ *   while Pi runs, clears it, and so does a reconnect the server refuses (a plan or policy without Remote Control) or
+ *   that ends on a login rejected twice in a row, so the session does not fail the same way at every /reload.
  * - A connect Pi makes by itself tries again after RETRY_DELAYS_MS when it fails for a reason that may pass (no
  *   answer, a failed lookup or connection, HTTP 408, 429, 5xx), and once after a rejected login (HTTP 401): right
  *   after a renewal the server can refuse the new token for a few seconds, as it did for several sessions that renewed
@@ -602,6 +603,9 @@ class PassingFailure extends Error {}
 
 /** A connect the server refused the login for (HTTP 401): a new token it does not know yet, or a login to renew. */
 class RejectedLogin extends Error {}
+
+/** A connect the server refused for good (a 4xx other than 401, 408, 429): a plan or policy without Remote Control. */
+class RefusedConnect extends Error {}
 
 /** How a connect that came after a rejected login names that failure in the session log. */
 const REJECTED_REASON = "the server rejected the claude.ai login (HTTP 401)";
@@ -3036,7 +3040,7 @@ export default function (pi: ExtensionAPI) {
 				if (module.isCreateSessionFailure(created)) {
 					const r = created as Json;
 					const detail = typeof r.detail === "string" && r.detail ? `: ${r.detail}` : "";
-					throw new Error(`Session creation failed (server ${r.status}${detail}). Remote Control needs a Pro, Max, Team, or Enterprise claude.ai account with Remote Control allowed.`);
+					throw new RefusedConnect(`Session creation failed (server ${r.status}${detail}). Remote Control needs a Pro, Max, Team, or Enterprise claude.ai account with Remote Control allowed.`);
 				}
 				throw new PassingFailure(`Could not create the remote session: ${watch.reason() ?? "the Remote Control server was not reached"}.`);
 			}
@@ -3046,7 +3050,7 @@ export default function (pi: ExtensionAPI) {
 			if (!("worker_jwt" in credentials)) {
 				archiveUnused(sessionId);
 				if (credentials.passing) throw new PassingFailure(credentials.error);
-				throw credentials.rejected ? new RejectedLogin(credentials.error) : new Error(credentials.error);
+				throw credentials.rejected ? new RejectedLogin(credentials.error) : new RefusedConnect(credentials.error);
 			}
 			const credentialsAt = Date.now();
 
@@ -3108,8 +3112,13 @@ export default function (pi: ExtensionAPI) {
 			}
 			setStatus(undefined);
 			const tries = attempt > 0 ? ` after ${attempt + 1} attempts` : "";
-			note(`Remote Control failed${tries}: ${text}`);
-			notify(tries ? `Remote Control failed${tries}: ${text}` : `Remote Control: ${text}`, "error");
+			// Refused for good: the session stops connecting by itself, at every /reload or start.
+			const forget =
+				automatic && (error instanceof RefusedConnect || rejected) && alive && ctx !== null && sessionConnected(ctx);
+			if (forget) recordConnected(false);
+			const after = forget ? " This session no longer connects by itself; /rc connects it." : "";
+			note(`Remote Control failed${tries}: ${text}${after}`);
+			notify(tries ? `Remote Control failed${tries}: ${text}${after}` : `Remote Control: ${text}${after}`, "error");
 		} finally {
 			s.connecting = false;
 		}

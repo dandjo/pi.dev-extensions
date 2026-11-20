@@ -1460,12 +1460,15 @@ and you can work on from there while Pi keeps running on your machine.
   the server can refuse the new token for a few seconds, as it did for several
   sessions that renewed the login together after a reboot. A second rejection in
   a row, and any other failure that will not pass (plan, policy), ends it, and
-  `/rc` typed by hand tries once. A failure names the step, creating the remote
-  session or fetching its credentials, and the reason, which the extension reads
-  from Node's HTTP diagnostics channels, since the bridge returns none. When a
-  later try succeeds, the session log notes the first failure. A remote session
-  that was created but could not be used is archived, and once more after five
-  seconds when the server refuses that too.
+  `/rc` typed by hand tries once. When the server refuses a reconnect (plan,
+  policy) or a login is rejected twice in a row, the session's record is cleared
+  too, so it stops connecting by itself at every `/reload` or start. A failure
+  names the step, creating the remote session or fetching its credentials, and
+  the reason, which the extension reads from Node's HTTP diagnostics channels,
+  since the bridge returns none. When a later try succeeds, the session log
+  notes the first failure. A remote session that was created but could not be
+  used is archived, and once more after five seconds when the server refuses
+  that too.
 - The session title is the name given to `/rc`, else the session's name (the
   one [session-title](#session-title) generates follows a little later), else
   the last prompt, else `<hostname>-<adjective>-<noun>`. A rename on either
