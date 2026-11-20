@@ -13,6 +13,11 @@
  *   is trusted).
  * `disableAllHooks: true` in one of the settings files turns them all off.
  *
+ * Under the claude-sdk provider, the Claude Code process behind it runs SessionStart, UserPromptSubmit, and Stop hooks
+ * itself, those of the plugins the managed settings enable. Pi leaves out each of its handlers that this process runs
+ * the same (same plugin, event, matcher, and handler), so their output reaches the model once. SessionStart hooks still
+ * run in Pi; their context only stays out of the system prompt while the model is on claude-sdk.
+ *
  * Events, and the Pi event each one runs at:
  * - SessionStart (startup, resume, clear, fork, compact): session_start and after compaction. Plain stdout and
  *   additionalContext go into the system prompt, so they hold for the whole session and survive compaction.
@@ -65,6 +70,8 @@ const SUPPORTED_EVENTS = new Set([
 ]);
 const SUPPORTED_TYPES = new Set(["command", "http"]);
 const TOOL_EVENTS = new Set(["PreToolUse", "PostToolUse", "PostToolUseFailure"]);
+/** The events the Claude Code process of the claude-sdk provider fires itself with the same effect as Pi. */
+const CLAUDE_CODE_EVENTS = new Set(["SessionStart", "UserPromptSubmit", "Stop"]);
 const CLAUDE_EFFORT = new Set(["low", "medium", "high", "xhigh", "max"]);
 
 interface Handler {
@@ -96,6 +103,8 @@ interface Config {
 	all: Hook[];
 	disabledBy?: string;
 	files: string[];
+	/** handlerKey() of every plugin handler that the Claude Code process of the claude-sdk provider runs itself. */
+	claudeCode: Set<string>;
 }
 
 interface RunResult {
@@ -194,6 +203,51 @@ function claudePlugins(cwd: string, trusted: boolean): { name: string; root: str
 	return [...plugins].map(([name, root]) => ({ name, root }));
 }
 
+/** The managed settings files: the server-managed ones Claude Code cached, then the file-based ones of the system. */
+function managedSettingsFiles(): string[] {
+	const dir =
+		process.platform === "darwin"
+			? "/Library/Application Support/ClaudeCode"
+			: process.platform === "win32"
+				? path.join(process.env.ProgramFiles || "C:\\Program Files", "ClaudeCode")
+				: "/etc/claude-code";
+	const files = [path.join(claudeDir(), "remote-settings.json"), path.join(dir, "managed-settings.json")];
+	try {
+		const dropIns = path.join(dir, "managed-settings.d");
+		for (const name of readdirSync(dropIns).filter((n) => n.endsWith(".json")).sort()) files.push(path.join(dropIns, name));
+	} catch {
+		// no such folder
+	}
+	return files;
+}
+
+function handlerKey(pluginName: string, event: string, matcher: string, handler: Handler): string {
+	return `${pluginName}\0${event}\0${matcher}\0${JSON.stringify(handler)}`;
+}
+
+/**
+ * The plugin handlers the Claude Code process of the claude-sdk provider runs itself. pi-claude-subscription starts
+ * it without user and project settings (settingSources: []), but the managed settings still apply: it runs the hooks
+ * of the plugins they enable, from the copy Claude Code installed for them (scope managed in installed_plugins.json).
+ * Under a login without managed settings, none.
+ */
+function claudeCodeHandlers(): Set<string> {
+	const keys = new Set<string>();
+	const enabled: Record<string, unknown> = {};
+	for (const file of managedSettingsFiles()) Object.assign(enabled, readJson(file)?.enabledPlugins ?? {});
+	const installed = readJson(path.join(claudeDir(), "plugins", "installed_plugins.json"))?.plugins ?? {};
+	for (const [id, value] of Object.entries(enabled)) {
+		if (value !== true || !Array.isArray(installed[id])) continue;
+		const entry = installed[id].find((e: any) => e?.scope === "managed" && typeof e.installPath === "string");
+		if (!entry) continue;
+		const name = id.split("@")[0];
+		for (const hook of hooksFrom(readJson(path.join(entry.installPath, "hooks", "hooks.json")), "")) {
+			keys.add(handlerKey(name, hook.event, hook.matcher, hook.handler));
+		}
+	}
+	return keys;
+}
+
 function hooksFrom(config: any, source: string, plugin?: { pluginRoot: string; pluginName: string }): Hook[] {
 	const out: Hook[] = [];
 	const hooks = config?.hooks;
@@ -241,7 +295,7 @@ function loadConfig(cwd: string, trusted: boolean): Config {
 		files.push(file);
 		all.push(...hooksFrom(json, `plugin:${name}`, { pluginRoot: root, pluginName: name }));
 	}
-	return { hooks: disabledBy ? [] : all, all, disabledBy, files };
+	return { hooks: disabledBy ? [] : all, all, disabledBy, files, claudeCode: claudeCodeHandlers() };
 }
 
 /** Claude Code's matcher rules: "", "*" match all; letters, digits, _ - space , | are an exact list; else a regex. */
@@ -757,9 +811,9 @@ async function showText(
 export default function (pi: ExtensionAPI) {
 	const depth = Number(process.env.PI_SUBAGENT_DEPTH || 0);
 	const subagent = depth > 0 ? { id: process.env.PI_SUBAGENT_ID ?? "", type: process.env.PI_SUBAGENT_TYPE ?? "" } : null;
-	let config: Config = { hooks: [], all: [], files: [] };
+	let config: Config = { hooks: [], all: [], files: [], claudeCode: new Set() };
 	let projectDir = process.cwd();
-	let sessionContext: string[] = [];
+	let sessionContext: Array<{ hook: Hook; text: string }> = [];
 	let sessionStartRun: Promise<void> | null = null;
 	let promptContext: string[] = [];
 	let stopHookActive = false;
@@ -779,6 +833,19 @@ export default function (pi: ExtensionAPI) {
 
 	function hooksFor(event: string): Hook[] {
 		return config.hooks.filter((hook) => hook.event === event && SUPPORTED_TYPES.has(hook.handler.type));
+	}
+
+	/** Whether the Claude Code process of the claude-sdk provider runs this handler as well (claudeCodeHandlers). */
+	function claudeCodeRuns(hook: Hook): boolean {
+		if (!hook.pluginName || !CLAUDE_CODE_EVENTS.has(hook.event)) return false;
+		// That process starts or resumes its own sessions: SessionStart fires there for startup and resume only.
+		if (hook.event === "SessionStart" && !matcherMatches(hook.matcher, "startup")) return false;
+		return config.claudeCode.has(handlerKey(hook.pluginName, hook.event, hook.matcher, hook.handler));
+	}
+
+	/** A handler Pi leaves to Claude Code now: the current model runs on claude-sdk, and Claude Code runs it there. */
+	function leftToClaudeCode(hook: Hook, ctx: ExtensionContext): boolean {
+		return ctx.model?.provider === "claude-sdk" && claudeCodeRuns(hook);
 	}
 
 	/** my-plugin:my-skill -> my-plugin-my-skill, for every plugin-scoped skill Pi knows under the dashed name. */
@@ -840,9 +907,11 @@ export default function (pi: ExtensionAPI) {
 		fields: Record<string, unknown>,
 		options: { defaultTimeoutS?: number; toolName?: string; toolInput?: Record<string, unknown>; budgetMs?: number } = {},
 	): Promise<Outcome[]> {
+		// SessionStart hooks run in any case: their context waits for a switch to another provider (before_agent_start).
 		const hooks = hooksFor(event).filter(
 			(hook) =>
 				matcherMatches(hook.matcher, matchValue) &&
+				(event === "SessionStart" || !leftToClaudeCode(hook, ctx)) &&
 				ifMatches(hook.handler.if, TOOL_EVENTS.has(event) ? options.toolName : undefined, options.toolInput ?? {}, ctx.cwd),
 		);
 		if (hooks.length === 0) return [];
@@ -916,11 +985,11 @@ export default function (pi: ExtensionAPI) {
 		const fields = subagent ? {} : { source, model: ctx.model?.id, ...(pi.getSessionName() ? { session_title: pi.getSessionName() } : {}) };
 		const outcomes = await fire(ctx, event, subagent ? subagent.type : source, fields);
 		if (gen !== generation) return;
-		const contexts: string[] = [];
+		const contexts: Array<{ hook: Hook; text: string }> = [];
 		for (const outcome of outcomes) {
 			if (outcome.blocking && outcome.stderr) notify(ctx, `${event} hook error: [${outcome.label}]: ${firstLine(outcome.stderr)}`);
 			const text = outcome.text ?? additionalContext(outcome);
-			if (text) contexts.push(capped(text, ctx, event));
+			if (text) contexts.push({ hook: outcome.hook, text: capped(text, ctx, event) });
 			const title = outcome.json?.hookSpecificOutput?.sessionTitle;
 			if (typeof title === "string" && title.trim() && !pi.getSessionName() && source !== "compact") pi.setSessionName(title.trim());
 		}
@@ -950,10 +1019,12 @@ export default function (pi: ExtensionAPI) {
 		}
 		reload(ctx);
 		const sections = event.systemPromptOptions.sections as Record<string, string | undefined>;
-		if (sessionContext.length > 0) {
+		// What the Claude Code process of the claude-sdk provider puts into its context itself stays out of Pi's.
+		const contexts = sessionContext.filter((c) => !leftToClaudeCode(c.hook, ctx)).map((c) => c.text);
+		if (contexts.length > 0) {
 			sections.claude_hooks = [
 				`Context from Claude Code ${subagent ? "SubagentStart" : "SessionStart"} hooks, read at the start of this session:`,
-				...sessionContext,
+				...contexts,
 			].join("\n\n");
 		} else {
 			delete sections.claude_hooks;
@@ -1274,7 +1345,11 @@ export default function (pi: ExtensionAPI) {
 					lines.push(theme.bold(event) + (supported ? "" : theme.fg("warning", "  (never fires in Pi)")));
 					for (const hook of config.all.filter((h) => h.event === event)) {
 						const type = hook.handler.type;
-						const note = SUPPORTED_TYPES.has(type) ? "" : theme.fg("warning", ` (${type} hooks are skipped)`);
+						const note = !SUPPORTED_TYPES.has(type)
+							? theme.fg("warning", ` (${type} hooks are skipped)`)
+							: claudeCodeRuns(hook)
+								? theme.fg("muted", " (under claude-sdk, Claude Code runs it instead)")
+								: "";
 						const matcher = hook.matcher ? `[${hook.matcher}] ` : "";
 						const cond = typeof hook.handler.if === "string" ? ` if ${hook.handler.if}` : "";
 						lines.push(`  ${theme.fg("accent", hook.source)} ${matcher}${handlerLabel(hook.handler).replace(hook.pluginRoot ?? "\0", "${CLAUDE_PLUGIN_ROOT}")}${cond}${note}`);

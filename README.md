@@ -1291,6 +1291,14 @@ no Claude model: the hooks run whichever model answers.
   `PostCompact`, `SessionEnd`, `Notification` (`idle_prompt` after 60 seconds
   idle), and inside subagents `SubagentStart` and `SubagentStop`. Other events
   never fire in Pi.
+- Under the `claude-sdk` provider, the Claude Code process behind it runs
+  `SessionStart`, `UserPromptSubmit`, and `Stop` hooks itself: those of the
+  plugins your managed settings enable (an organization's server-managed
+  settings, or `managed-settings.json` of the system), from the copy Claude
+  Code installed for them. Pi leaves out every handler of its own that this
+  copy has the same, so its output reaches the model once. `SessionStart`
+  hooks still run in Pi; their context goes into the system prompt only
+  while the model is on another provider. `/hooks` marks these handlers.
 - Handler types `command` and `http`, with `matcher`, `if`, `timeout`,
   `async`, `asyncRewake`, and `onFailure`. `prompt`, `agent`, and `mcp_tool`
   hooks are skipped. A command runs in `bash`, or with `"shell": "powershell"`
