@@ -5,8 +5,8 @@
  * - Agent types: the built-ins general-purpose, Explore, and Plan (read-only: no edit/write), plus definitions in
  *   Claude Code's format (Markdown with name, description, tools, disallowedTools, model, effort, maxTurns, skills,
  *   omitClaudeMd, background) from <project>/.pi/agents (walking up from the working directory, only once the project
- *   is trusted) and ~/.pi/agent/agents, plus the directories providers add (below). Project beats user beats plugin;
- *   a user or project agent named like a built-in replaces it.
+ *   is trusted) and ~/.pi/agent/agents, plus the directories providers add (below). Project beats user; a user or
+ *   project agent named like a built-in replaces it.
  * - Tools: the parent's active tools, narrowed by the definition, whose entries name Pi tools unless a provider
  *   translates them. A subagent never gets ask_user_question, the cron and loop tools, or cross-session messaging;
  *   agent only up to three levels deep. MCP servers start only when the subagent's tools name an MCP tool.
@@ -340,8 +340,6 @@ export type Tier = (typeof TIERS)[number] | "inherit";
 export interface SubagentsProvider {
 	/** Providers apply in the order of their ids; one emitted again under the same id replaces the earlier one. */
 	id: string;
-	/** Directories of plugin agents, which are named <plugin>:<name> and rank below every user and project agent. */
-	pluginAgentDirs?: () => { plugin: string; dir: string }[];
 	/** User agent directories, ranking above ~/.pi/agent/agents. */
 	userAgentDirs?: () => string[];
 	/** Project agent directories at one level of the walk up from the working directory, below its .pi/agents. */
@@ -524,7 +522,7 @@ function markdownFiles(dir: string): string[] {
 	return out.sort();
 }
 
-function loadDir(dir: string, source: string, plugin?: string): AgentDef[] {
+function loadDir(dir: string, source: string): AgentDef[] {
 	const defs: AgentDef[] = [];
 	for (const file of markdownFiles(dir)) {
 		let parsed: { frontmatter: Record<string, unknown>; body: string };
@@ -534,17 +532,12 @@ function loadDir(dir: string, source: string, plugin?: string): AgentDef[] {
 			continue;
 		}
 		const fm = parsed.frontmatter;
-		let name = typeof fm.name === "string" ? fm.name.trim() : "";
-		if (plugin) {
-			const sub = path.relative(dir, path.dirname(file)).split(path.sep).filter(Boolean);
-			name = [plugin, ...sub, name || path.basename(file, ".md")].join(":");
-		} else if (!name || name.startsWith("-") || name.includes(":") || name.length > 256) {
-			continue;
-		}
-		if (typeof fm.description !== "string" && !plugin) continue;
+		const name = typeof fm.name === "string" ? fm.name.trim() : "";
+		if (!name || name.startsWith("-") || name.includes(":") || name.length > 256) continue;
+		if (typeof fm.description !== "string") continue;
 		defs.push({
 			name,
-			description: typeof fm.description === "string" ? fm.description : "",
+			description: fm.description,
 			prompt: parsed.body.trim(),
 			tools: list(fm.tools),
 			disallowedTools: list(fm.disallowedTools),
@@ -554,7 +547,7 @@ function loadDir(dir: string, source: string, plugin?: string): AgentDef[] {
 			skills: list(fm.skills),
 			omitClaudeMd: fm.omitClaudeMd === true,
 			background: fm.background === true,
-			mcpServers: plugin ? undefined : fm.mcpServers,
+			mcpServers: fm.mcpServers,
 			source,
 			file,
 		});
@@ -569,7 +562,6 @@ function discoverAgents(cwd: string, trusted: boolean): Map<string, AgentDef> {
 		for (const def of defs) byName.set(def.name, def);
 	};
 	add(BUILT_INS);
-	for (const { plugin, dir } of provided((p) => p.pluginAgentDirs?.())) add(loadDir(dir, `plugin:${plugin}`, plugin));
 	add(loadDir(path.join(getAgentDir(), "agents"), "user"));
 	for (const dir of provided((p) => p.userAgentDirs?.())) add(loadDir(dir, "user"));
 	if (trusted) {
@@ -589,9 +581,7 @@ function findAgent(agents: Map<string, AgentDef>, name: string): AgentDef | unde
 	if (exact) return exact;
 	const lower = name.toLowerCase();
 	for (const def of agents.values()) if (def.name.toLowerCase() === lower) return def;
-	// A plugin agent may be named without its plugin prefix.
-	const scoped = [...agents.values()].filter((def) => def.name.split(":").at(-1)?.toLowerCase() === lower);
-	return scoped.length === 1 ? scoped[0] : undefined;
+	return undefined;
 }
 
 // --- Resolution ------------------------------------------------------------------------------------------------------
@@ -1337,9 +1327,8 @@ Usage notes:
 }
 
 /**
- * Framed, scrollable boxes for the extensions that show more than a notification can hold: overlays for /hooks,
- * /agents, /cron, and /memory, and the frame and scrolling of the boxes /btw and the /diff dialog show above the
- * prompt.
+ * Framed, scrollable boxes for the extensions that show more than a notification can hold: overlays for /agents,
+ * /cron, and /memory, and the frame and scrolling of the boxes /btw and the /diff dialog show above the prompt.
  *
  * background-agents.ts, btw.ts, claude-remote-control.ts, diff.ts, memory.ts, scheduled-tasks.ts carry a copy of this
  * block, or of a part of it: change them alike.
@@ -1487,12 +1476,11 @@ export default function (pi: ExtensionAPI) {
 
 	function publish(): void {
 		if (!active) return;
-		const count = [...running.values()].filter((r) => r.background).length;
-		pi.events.emit("subagents:running", count);
 		pi.events.emit("subagents:state", [
 			...[...running.values()].map((r) => view(r.details, r.background)),
 			...finished.map((d) => view(d, backgroundIds.has(d.agentId))),
 		]);
+		const count = [...running.values()].filter((r) => r.background).length;
 		if (currentCtx?.hasUI) currentCtx.ui.setStatus("subagents", count > 0 ? `⧗ ${count} background agent${count === 1 ? "" : "s"}` : undefined);
 	}
 

@@ -63,7 +63,7 @@ import {
 	LoginDialogComponent,
 } from "@earendil-works/pi-coding-agent";
 import { type AutocompleteItem, hyperlink } from "@earendil-works/pi-tui";
-import { execFile, execFileSync, spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
@@ -168,30 +168,10 @@ async function claudeCodeCredentials(): Promise<any> {
 	}
 }
 
-/** Where npm keeps global packages (Pi's legacy installs), asked once; undefined without npm. */
-let npmGlobalRoot: string | null | undefined;
-function globalNpmRoot(): string | undefined {
-	if (npmGlobalRoot === undefined) {
-		const windows = process.platform === "win32";
-		try {
-			npmGlobalRoot =
-				execFileSync(windows ? "npm.cmd" : "npm", ["root", "-g"], {
-					encoding: "utf8",
-					timeout: 10_000,
-					stdio: ["ignore", "pipe", "ignore"],
-					shell: windows,
-				}).trim() || null;
-		} catch {
-			npmGlobalRoot = null;
-		}
-	}
-	return npmGlobalRoot ?? undefined;
-}
-
 /**
  * The Claude Agent SDK that pi-claude-subscription brings, wherever Pi installed that package: in the user scope
- * (~/.pi/agent/npm), the project scope (.pi/npm), or npm's global root (Pi's legacy installs); hoisted, or below the
- * package itself. Undefined when it is in none of them.
+ * (~/.pi/agent/npm) or the project scope (.pi/npm); hoisted, or below the package itself. Undefined when it is in
+ * neither.
  * claude-remote-control.ts carries a copy of this function: change them alike.
  */
 function claudeSdkDir(): string | undefined {
@@ -205,10 +185,7 @@ function claudeSdkDir(): string | undefined {
 		}
 		return undefined;
 	};
-	const local = find([path.join(getAgentDir(), "npm", "node_modules"), path.join(process.cwd(), ".pi", "npm", "node_modules")]);
-	if (local) return local;
-	const global = globalNpmRoot();
-	return global ? find([global]) : undefined;
+	return find([path.join(getAgentDir(), "npm", "node_modules"), path.join(process.cwd(), ".pi", "npm", "node_modules")]);
 }
 
 /** The part of the Agent SDK's query that a renewal uses. */

@@ -7,8 +7,8 @@
  *   when the limit was reached and when it resets, and for the model to continue the task without repeating finished
  *   work. The run goes on at once, and its next request waits until the reset before it goes out. Meanwhile the
  *   working line reads "Usage limit reached · continuing automatically at 19:01 (in 3h 29m) · esc to cancel". Esc ends
- *   the run as ever. While it waits, a still ⧗ stands in for Pi's spinner, and the line is drawn again only when its
- *   text changes, once a minute: the spinner would redraw the screen twelve times a second for hours.
+ *   the run as ever. While it waits, Pi's spinner is hidden, and the line is drawn again only when its text changes,
+ *   once a minute: the spinner would redraw the screen twelve times a second for hours.
  * - The reset comes from what the provider says, the first found of:
  *   - the error text, in its common forms only: a clock time in the time zone it names, else the local one (Claude
  *     Code's "resets 12:50am (Europe/Vienna)" and "resets Nov 21, 7pm (Europe/Vienna)", Codex's "try again at
@@ -31,16 +31,15 @@
  *   in, with another account if need be).
  * - Without a reset time, a usage limit or quota ("usage limit", "quota", "per day", "exhausted your capacity", …) is
  *   tried again after 2, 5, 10, 15, and 30 minutes, then every hour. A plain rate limit ("rate limit", "too many
- *   requests", 429) is left to Pi's retry and network-resilience.ts, which retry within minutes, until ten requests in
- *   a row have failed on it; then it is tried again the same way. So is a rate limit whose reset is less than a minute
- *   away. Credit and billing errors without a reset time ("insufficient credits", "payment required", OpenAI's
+ *   requests", 429) is Pi's own retry's first (retry.maxRetries); once Pi gives up on it, it is tried again the same
+ *   way, or waited for when it names a reset. Credit and billing errors without a reset time ("insufficient credits", "payment required", OpenAI's
  *   insufficient_quota, "You exceeded your current quota") never reset by themselves and stand as they are.
  * - A reset more than eight days away, or tries over more than eight days, end the waiting with a notice. A request
  *   that hits the limit again right after a reset waits again, at least two minutes; after three such hits in a row
  *   the named reset is no longer trusted (Gemini names one of seconds for a used-up daily quota), and the run tries
  *   again at intervals as without one.
  * - Whatever starts a run while the limit holds waits the same way after its first failed request: a subagent's
- *   report, a background wait's result, a message from another session, a scheduled prompt, /loop and /goal. A
+ *   report, a background wait's result, a message from another session, a scheduled prompt, and /loop. A
  *   subagent's own Pi process loads this extension as well, so the subagent waits and continues by itself. While a
  *   run waits, messages that arrive are queued as they are during any run, and go to the model when it continues.
  * - Pi ended during the wait (a signal at reboot, /quit, or a crash): when the session starts or is resumed before the
@@ -53,8 +52,7 @@
  *
  * The wait happens in the context event of the request that follows the failed one. Handlers of that event run in
  * load order, which is the order of the file names: this file's name sorts before network-resilience.ts, whose
- * request timers start in its own handler, so they do not count the wait. network-resilience.ts leaves a failed
- * request alone that this extension took out of the context already.
+ * request timers start in its own handler, so they do not count the wait.
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -67,9 +65,6 @@ const STATE_REQUEST = "auto-continue:state-request";
 /** Errors of a used-up limit: plan and usage limits, quotas, and rate limits. */
 const LIMIT =
 	/hit your [^\n]*?limit|reached your [^\n]*?limit|usage[ _-]?limit|limit (?:reached|exceeded|exhausted)|quota|resource[ _-]?exhausted|exhausted your capacity|rate[ _-]?limit|too many (?:requests|tokens)|(?<![\w.])429(?![\w.])|retry delay|UsageLimitError/i;
-/** Of those, the ones that are more than a rate limit: windows of hours or days, quotas, plans. */
-const USAGE =
-	/hit your [^\n]*?limit|usage[ _-]?limit|quota|exhausted your capacity|per[ _-]?(?:day|hour|week|month)|daily|weekly|monthly|UsageLimitError|subscription/i;
 /** Credit and billing errors: without a reset time they never reset by themselves. */
 const BILLING =
 	/insufficient[ _-]?(?:credit|balance|funds|quota)|credit[ _-]?balance|out of (?:usage )?credits|payment required|(?<![\w.])402(?![\w.])|spend(?:ing)?[ _-]?limit|top[ -]?up|recharge|exceeded your current quota|plan and billing details/i;
@@ -89,8 +84,6 @@ const DURATION_TEXT = new RegExp(
 /** Pi's own words when a server asks for a longer retry delay than it waits, and Gemini's RetryInfo. */
 const DELAY_TEXT = /requested\s+(\d+(?:\.\d+)?)s\s+retry delay|"retryDelay"\s*:\s*"(\d+(?:\.\d+)?)s"/i;
 
-/** A reset in less than this is left to Pi's retry and network-resilience.ts. */
-const SHORT_MS = 60_000;
 /** A reset further out, or tries for longer, end the waiting. */
 const MAX_WAIT_MS = 8 * 86_400_000;
 /**
@@ -106,13 +99,9 @@ const REPEAT_MS = 2 * 60_000;
 const MAX_HITS = 3;
 /** The tries without a reset time, in minutes after each failed one; the last repeats. */
 const PROBE_MINUTES = [2, 5, 10, 15, 30, 60];
-/** Failed requests in a row on a plain rate limit after which it is tried again like a usage limit. */
-const RATE_ATTEMPTS = 10;
 /** How often the plan's limits are asked while a run waits; the source keeps its own pace on top. */
 const USAGE_ASK_MS = 2 * 60_000;
 const TICK_MS = 1000;
-/** Stands still in place of Pi's spinner while a run waits. */
-const WAIT_MARK = "⧗";
 
 const NOTE = "Continue the task you were working on when the limit was reached; do not repeat work that is already complete.";
 
@@ -400,8 +389,6 @@ export default function (pi: ExtensionAPI) {
 	/** Tries without a reset time so far, and when the first request of this limit failed. */
 	let probes = 0;
 	let firstAt = 0;
-	/** Failed requests in a row on a limit, Pi's retries included. */
-	let failures = 0;
 	/** Set when a wait let its request go, until that request ends. */
 	let released = false;
 	/** The wait the run's next request makes. */
@@ -454,7 +441,8 @@ export default function (pi: ExtensionAPI) {
 		let asked = 0;
 		let shown: string | undefined;
 		setWaiting(true);
-		ui?.setWorkingIndicator({ frames: [WAIT_MARK] });
+		// No frames: the working line shows the message alone, and nothing redraws it.
+		ui?.setWorkingIndicator({ frames: [] });
 		try {
 			while (!signal?.aborted) {
 				const now = Date.now();
@@ -545,7 +533,6 @@ export default function (pi: ExtensionAPI) {
 		hitAgain = false;
 		hits = 0;
 		probes = 0;
-		failures = 0;
 		released = false;
 	};
 
@@ -620,14 +607,12 @@ export default function (pi: ExtensionAPI) {
 		refused = undefined;
 		const text = message.errorMessage ?? "";
 		if (message.stopReason === "error" && LIMIT.test(text)) {
-			failures++;
 			hitAgain ||= again;
 			lastLimit = { text, at: Date.now(), headers: response?.status === 429 ? response.headers : undefined };
 			return;
 		}
 		lastLimit = undefined;
 		hitAgain = false;
-		failures = 0;
 		if (message.stopReason !== "aborted") {
 			hits = 0;
 			probes = 0;
@@ -650,18 +635,13 @@ export default function (pi: ExtensionAPI) {
 			const plan = usage(ctx.model, 0);
 			if (plan?.usedUp && plan.resetAt !== undefined) found = { at: plan.resetAt, minute: true };
 		}
-		const rateOnly = !USAGE.test(hit.text);
 		if (found) {
-			// Pi's retry and network-resilience.ts wait out a short rate limit by themselves.
-			if (found.at - hit.at < SHORT_MS && rateOnly) return undefined;
 			if (found.at - hit.at > MAX_WAIT_MS) {
 				notify(ctx, `The limit resets at ${when(found.at)}, more than eight days away, so the run does not wait: send a prompt then.`, "warning");
 				return undefined;
 			}
 		} else {
 			if (BILLING.test(hit.text)) return undefined;
-			// A rate limit is left to the retries first; once this extension waited for it, it keeps the run.
-			if (rateOnly && failures < RATE_ATTEMPTS && !again) return undefined;
 		}
 
 		// Omit the failed attempt from the model's context, as Pi's own retry does, so the run can continue.
@@ -695,7 +675,6 @@ export default function (pi: ExtensionAPI) {
 			wait = { hitAt: hit.at, minute: false, notBefore: hit.at + minutes * 60_000, spread: 0, again: probes > 1, sawUsedUp: false };
 		}
 		armed = wait;
-		failures = 0;
 		const details: NoteDetails = { hitAt: hit.at, error: hit.text, resetAt: wait.resetAt, firstAt: wait.resetAt === undefined ? firstAt : undefined };
 		return {
 			entries: [

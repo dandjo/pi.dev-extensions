@@ -4,8 +4,8 @@
  * Claude Code keeps a request alive through network trouble. After 20 s without stream data it shows "Waiting for API
  * response · check your network"; it aborts a stream that went silent or outlived a system suspend and retries on a
  * fresh connection; it names the cause of a connection error ("No internet route — check your connection or VPN");
- * and it retries ten times with a backoff that doubles from 0.5 s to 32 s. Pi retries three times within 14 s and
- * shows nothing while a request hangs. Through pi-claude-subscription, Claude Code's own retries stay invisible as
+ * and it retries ten times with a backoff that doubles from 0.5 s to 32 s. Pi retries three times within 14 s unless
+ * its retry settings say otherwise, and shows nothing while a request hangs. Through pi-claude-subscription, Claude Code's own retries stay invisible as
  * well: the provider drops their messages, so Pi shows "Working…" for as long as Claude Code retries, which with
  * connects that time out takes twenty minutes and more. This extension adds Claude Code's behaviour on top of Pi's,
  * with documented extension events only:
@@ -25,10 +25,8 @@
  * - Waiting for the network: before every request that follows a connection error, Pi's own retries included, the
  *   API host is probed. While it does not answer, Pi waits and probes every 3 s instead of spending its retries, for
  *   up to 30 min per outage. Esc interrupts the wait.
- * - More attempts: when Pi gives up on a transient error, the run continues with Claude Code's backoff (4 s, 8 s,
- *   16 s, then 32 s, plus up to 25 % jitter) until ten requests have failed in a row. Usage limits, login, request,
- *   and context errors are never retried. A failed request that an earlier handler of agent_before_settle took out of
- *   the context already is left to it: auto-continue.ts waits out a rate limit whose reset is a minute or more away.
+ * - More attempts are Pi's own: retry.maxRetries 10 and retry.maxAgentDelayMs 32000 in Pi's settings come close to
+ *   Claude Code's ten retries; auto-continue.ts takes over a rate limit once Pi gives up on it.
  * - While the host does not answer, the footer shows "⚠ offline".
  * - When the API delivers data while the probe fails, the probe does not reflect this network (a proxy Pi does not
  *   see, for example). Probing then stops until Pi restarts; restarts after a disruption follow the grace alone.
@@ -37,10 +35,9 @@
  *   probeHost for it), and its restarts follow the grace alone.
  *
  * Optional settings in ~/.pi/agent/network-resilience.json: noticeSeconds (20), graceSeconds (10), stallSeconds
- * (300, 0 turns the silence restart off), maxRestarts (3), maxAttempts (10), offlineWaitMinutes (30, 0 turns the
- * waiting off), cacheWarmMinutes (how long the provider's prompt cache lives: 5, Anthropic's default; 60 for the
- * claude-sdk provider, whose cache lives an hour), and probeHost ("host:port" to probe instead of the model's API
- * host). Under "providers", every key can be set for one provider ({"providers": {"openai": {"cacheWarmMinutes": 10}}});
+ * (300, 0 turns the silence restart off), maxRestarts (3), offlineWaitMinutes (30, 0 turns the waiting off),
+ * cacheWarmMinutes (how long the provider's prompt cache lives: 5, Anthropic's default; 60 for the claude-sdk
+ * provider, whose cache lives an hour), and probeHost ("host:port" to probe instead of the model's API host). Under "providers", every key can be set for one provider ({"providers": {"openai": {"cacheWarmMinutes": 10}}});
  * a key set there wins over the same key at the top, which wins over the built-in values.
  */
 
@@ -92,7 +89,6 @@ interface Config {
 	graceSeconds: number;
 	stallSeconds: number;
 	maxRestarts: number;
-	maxAttempts: number;
 	offlineWaitMinutes: number;
 	/** A response this recent leaves the prompt cache warm. */
 	cacheWarmMinutes: number;
@@ -104,7 +100,6 @@ const DEFAULTS: Config = {
 	graceSeconds: 10,
 	stallSeconds: 300,
 	maxRestarts: 3,
-	maxAttempts: 10,
 	offlineWaitMinutes: 30,
 	cacheWarmMinutes: 5,
 };
@@ -240,38 +235,6 @@ function isTransient(text: string): boolean {
 	return TRANSIENT.test(text) && !PERMANENT.test(text);
 }
 
-/** One line for the working message, Claude Code's wording when the error names a known code. */
-function shortError(text: string): string {
-	const code = text.match(/\b(E[A-Z]{3,}|UND_ERR_[A-Z_]+)\b/)?.[1];
-	switch (code) {
-		case "ECONNRESET":
-		case "EPIPE":
-		case "ECONNABORTED":
-		case "UND_ERR_SOCKET":
-			return `Connection dropped (${code})`;
-		case "ECONNREFUSED":
-			return `Connection refused (${code})`;
-		case "ENOTFOUND":
-		case "EAI_AGAIN":
-			return `Can't reach the API server (${code})`;
-		case "ENETUNREACH":
-		case "ENETDOWN":
-		case "EHOSTUNREACH":
-		case "EHOSTDOWN":
-			return `No internet route (${code})`;
-		case "ETIMEDOUT":
-			return `Request timed out (${code})`;
-	}
-	const line = text.split("\n").find((l) => l.trim())?.trim() ?? "Request failed";
-	return line.length > 80 ? `${line.slice(0, 79)}…` : line;
-}
-
-/** Claude Code's backoff: 0.5 s doubling per attempt up to 32 s, plus up to 25 % jitter. */
-function backoff(attempt: number): number {
-	const base = Math.min(32_000, 500 * 2 ** Math.max(0, attempt - 1));
-	return Math.round(base * (1 + 0.25 * Math.random()));
-}
-
 // --- Helpers --------------------------------------------------------------------------------------------------------
 
 function clock(ms: number): string {
@@ -372,12 +335,6 @@ interface Request {
 	gaveUp: boolean;
 }
 
-interface Retry {
-	attempt: number;
-	delayMs: number;
-	error: string;
-}
-
 export default function (pi: ExtensionAPI): void {
 	/** The settings for the provider of the request under way, read again at every request. */
 	let config = loadConfig();
@@ -386,15 +343,12 @@ export default function (pi: ExtensionAPI): void {
 	let ticker: NodeJS.Timeout | undefined;
 	let lastWall = Date.now();
 	let lastMono = performance.now();
-	/** Failed requests in a row, Pi's own retries included. */
-	let failures = 0;
-	let lastError: { text: string; transient: boolean } | undefined;
+	/** The last request failed with a connection or server error, so the next one checks the network first. */
+	let lastErrorTransient = false;
 	/** Restarts in a row without a response in between. */
 	let restarts = 0;
 	/** Set while this extension aborts a run, so the settled run resumes. */
 	let restartReason: string | undefined;
-	/** The continuation after Pi gave up waits this long before its request. */
-	let retry: Retry | undefined;
 	/** Start of an outage the waiting saw, monotonic; its budget is offlineWaitMinutes. */
 	let outageSince: number | undefined;
 	/** Data arrived while a probe failed: the probe target does not reflect this network, so probing stops. */
@@ -588,10 +542,10 @@ export default function (pi: ExtensionAPI): void {
 	}
 
 	/**
-	 * Runs before a request that follows a failure: waits while the API host does not answer, then waits out the
-	 * backoff of a continuation. Esc aborts the run's signal and with it the wait.
+	 * Runs before a request that follows a connection error: waits while the API host does not answer. Esc aborts the
+	 * run's signal and with it the wait.
 	 */
-	async function gate(ctx: ExtensionContext, pending: Retry | undefined): Promise<void> {
+	async function gate(ctx: ExtensionContext): Promise<void> {
 		const signal = ctx.signal;
 		const u = ctx.hasUI ? ctx.ui : undefined;
 		const target = probeTarget(ctx, config);
@@ -615,13 +569,6 @@ export default function (pi: ExtensionAPI): void {
 				return;
 			}
 			if (result?.ok) outageSince = undefined;
-			if (pending) {
-				const until = performance.now() + pending.delayMs;
-				while (!signal?.aborted && performance.now() < until) {
-					u?.setWorkingMessage(`${pending.error} · retrying in ${Math.ceil((until - performance.now()) / 1000)}s · attempt ${pending.attempt}/${config.maxAttempts}`);
-					await sleep(Math.min(1000, until - performance.now()), signal);
-				}
-			}
 		} finally {
 			u?.setWorkingMessage();
 			setStatus(undefined);
@@ -648,7 +595,6 @@ export default function (pi: ExtensionAPI): void {
 		ctxRef = ctx;
 		// A new prompt from the user starts the counting afresh; the resume note of a restart does not.
 		if (event.messageType === "user") {
-			failures = 0;
 			restarts = 0;
 			outageSince = undefined;
 		}
@@ -657,9 +603,7 @@ export default function (pi: ExtensionAPI): void {
 	pi.on("context", async (_event, ctx) => {
 		ctxRef = ctx;
 		config = loadConfig(ctx.model?.provider);
-		const pending = retry;
-		retry = undefined;
-		if (pending || lastError?.transient) await gate(ctx, pending);
+		if (lastErrorTransient) await gate(ctx);
 		startRequest();
 		return undefined;
 	});
@@ -682,51 +626,19 @@ export default function (pi: ExtensionAPI): void {
 		if (message.role !== "assistant") return undefined;
 		endRequest();
 		if (message.stopReason === "error") {
-			failures++;
-			const text = message.errorMessage ?? "";
-			lastError = { text, transient: isTransient(text) };
+			lastErrorTransient = isTransient(message.errorMessage ?? "");
 		} else if (message.stopReason !== "aborted") {
-			failures = 0;
 			restarts = 0;
-			lastError = undefined;
+			lastErrorTransient = false;
 			outageSince = undefined;
 		}
 		return undefined;
-	});
-
-	pi.on("agent_before_settle", (event, ctx) => {
-		ctxRef = ctx;
-		if (event.outcome !== "error" || !lastError?.transient) return undefined;
-		if (outageSince !== undefined && performance.now() - outageSince >= config.offlineWaitMinutes * 60_000) return undefined;
-		const messages = event.context.contextMessages;
-		const last = messages[messages.length - 1];
-		if (!last || last.role !== "assistant" || last.stopReason !== "error") return undefined;
-		const same = (m: (typeof messages)[number]) => m === last || (m.role === "assistant" && m.timestamp === last.timestamp && m.stopReason === "error");
-		const entry = [...event.context.contextEntries].reverse().find((e) => e.messages.some(same));
-		if (!entry) return undefined;
-		// An earlier handler took the attempt out already and continues the run its own way (auto-continue.ts): its
-		// wait ends the series of failures.
-		if (event.entries.some((e) => e.type === "context_edit" && e.targetId === entry.sourceEntry.id)) {
-			failures = 0;
-			return undefined;
-		}
-		if (failures >= config.maxAttempts) {
-			if (ctx.hasUI) ctx.ui.notify(`network-resilience: ${failures} failed requests in a row, giving up`, "warning");
-			return undefined;
-		}
-		// Omit the failed attempt from the model's context, as Pi's own retry does, so the run can continue.
-		retry = { attempt: failures + 1, delayMs: backoff(failures), error: shortError(lastError.text) };
-		return {
-			entries: [...event.entries, { type: "context_edit", targetId: entry.sourceEntry.id, replacement: null }],
-			continue: true,
-		};
 	});
 
 	pi.on("agent_settled", (event, ctx) => {
 		ctxRef = ctx;
 		endRequest();
 		ui()?.setWorkingMessage();
-		retry = undefined;
 		const reason = restartReason;
 		restartReason = undefined;
 		if (reason === undefined || !event.aborted) return;

@@ -633,9 +633,8 @@ class Transcript {
 // --- Extension -----------------------------------------------------------------------------------------------------------------
 
 /**
- * Framed, scrollable boxes for the extensions that show more than a notification can hold: overlays for /hooks,
- * /agents, /cron, and /memory, and the frame and scrolling of the boxes /btw and the /diff dialog show above the
- * prompt.
+ * Framed, scrollable boxes for the extensions that show more than a notification can hold: overlays for /agents,
+ * /cron, and /memory, and the frame and scrolling of the boxes /btw and the /diff dialog show above the prompt.
  *
  * btw.ts, claude-remote-control.ts, diff.ts, memory.ts, scheduled-tasks.ts, subagents.ts carry a copy of this block, or
  * of a part of it: change them alike.
@@ -1138,11 +1137,10 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		private atPromptEnd(): boolean {
-			const self = this as unknown as { historyIndex?: number; isOnLastVisualLine?: () => boolean };
+			const self = this as unknown as { historyIndex: number; isOnLastVisualLine(): boolean };
 			if (this.isShowingAutocomplete()) return false;
-			if ((self.historyIndex ?? -1) > -1) return false;
-			if (typeof self.isOnLastVisualLine === "function") return self.isOnLastVisualLine();
-			return this.getCursor().line === this.getLines().length - 1;
+			if (self.historyIndex > -1) return false;
+			return self.isOnLastVisualLine();
 		}
 	}
 

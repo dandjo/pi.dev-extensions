@@ -302,9 +302,8 @@ function loopFile(cwd: string): { file: string; text: string } | undefined {
 // --- Extension ---------------------------------------------------------------------------------------------------
 
 /**
- * Framed, scrollable boxes for the extensions that show more than a notification can hold: overlays for /hooks,
- * /agents, /cron, and /memory, and the frame and scrolling of the boxes /btw and the /diff dialog show above the
- * prompt.
+ * Framed, scrollable boxes for the extensions that show more than a notification can hold: overlays for /agents,
+ * /cron, and /memory, and the frame and scrolling of the boxes /btw and the /diff dialog show above the prompt.
  *
  * background-agents.ts, btw.ts, claude-remote-control.ts, diff.ts, memory.ts, subagents.ts carry a copy of this block,
  * or of a part of it: change them alike.

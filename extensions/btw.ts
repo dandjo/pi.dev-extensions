@@ -26,7 +26,6 @@ import {
 	type Theme,
 } from "@earendil-works/pi-coding-agent";
 import { Key, Markdown, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
-import type { AgentMessage } from "@earendil-works/pi-agent-core";
 
 const MAX_EXCHANGES = 20;
 const SHOWN_EARLIER = 5;
@@ -51,9 +50,8 @@ interface Exchange {
 }
 
 /**
- * Framed, scrollable boxes for the extensions that show more than a notification can hold: overlays for /hooks,
- * /agents, /cron, and /memory, and the frame and scrolling of the boxes /btw and the /diff dialog show above the
- * prompt.
+ * Framed, scrollable boxes for the extensions that show more than a notification can hold: overlays for /agents,
+ * /cron, and /memory, and the frame and scrolling of the boxes /btw and the /diff dialog show above the prompt.
  *
  * background-agents.ts, claude-remote-control.ts, diff.ts, memory.ts, scheduled-tasks.ts, subagents.ts carry a copy of
  * this block, or of a part of it: change them alike.
@@ -98,7 +96,7 @@ function viewport(lines: string[], offset: number, rows: number): string[] {
  * Bedrock), only models of the current maker qualify. A current model without a price (local, unknown) is kept.
  * PI_SMALL_MODEL=<provider>/<model-id> overrides the choice.
  *
- * goal.ts, session-title.ts, web-tools.ts carry a copy of this block, or of a part of it: change them alike.
+ * session-title.ts, web-tools.ts carry a copy of this block, or of a part of it: change them alike.
  */
 /**
  * Side requests to the claude-sdk provider run one at a time, across every extension that loads this file: it runs one
@@ -119,18 +117,14 @@ function oneAtATime<T>(model: Model<Api>, run: () => Promise<T>): Promise<T> {
 }
 
 /**
- * The current conversation as plain text, for side requests that must not touch the conversation itself (/btw, the
- * /goal evaluator). A request without tools cannot carry tool-call blocks, so the transcript goes in as text.
- *
- * goal.ts carries a copy of this block, or of a part of it: change them alike.
+ * The current conversation as plain text, for side requests that must not touch the conversation itself (/btw). A
+ * request without tools cannot carry tool-call blocks, so the transcript goes in as text.
  */
 interface TranscriptOptions {
 	/** Characters kept of each tool result. */
 	toolResultChars: number;
 	/** Characters kept of the whole transcript; the oldest part goes first. */
 	maxChars: number;
-	/** Messages to use instead of the session's current context. */
-	messages?: AgentMessage[];
 }
 
 function text(content: Message["content"]): string {
@@ -147,8 +141,7 @@ function cut(value: string, max: number): string {
 
 /** The conversation the model currently sees (compaction summary included), as `[Role]: …` blocks. */
 function conversationText(ctx: ExtensionContext, options: TranscriptOptions): string {
-	const messages =
-		options.messages ?? buildSessionContext(ctx.sessionManager.getEntries(), ctx.sessionManager.getLeafId()).messages;
+	const { messages } = buildSessionContext(ctx.sessionManager.getEntries(), ctx.sessionManager.getLeafId());
 	const parts: string[] = [];
 	for (const message of convertToLlm(messages)) {
 		if (message.role === "user") {

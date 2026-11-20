@@ -21,7 +21,7 @@
  *   in another resource or a list becomes "Name (@username, id N)"; an object of zeros only (time_stats) is dropped;
  *   and a description in a list is cut. The pagination headers become a line above the body. File contents and
  *   GraphQL answers are returned as they are, job logs without their colour codes (unless raw is set), and binary
- *   content (artifacts, archives) is saved to a temp file. A cut job log keeps its end.
+ *   content (artifacts, archives) is saved to a temp file, removed when the session ends. A cut job log keeps its end.
  * - files uploads local files as multipart/form-data (a project avatar, a markdown upload); the fields of body go
  *   along as form fields. Files go, like the token, only to the instance of the call.
  * - Requests go through the proxy Pi uses for its own HTTP (its httpProxy setting, applied as HTTPS_PROXY and
@@ -31,7 +31,7 @@
  */
 
 import { randomBytes } from "node:crypto";
-import { mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { type ClientRequest, type IncomingMessage, request as httpRequest } from "node:http";
 import { Agent as HttpsAgent, request as httpsRequest } from "node:https";
 import os from "node:os";
@@ -438,10 +438,20 @@ async function readLimited(response: Response): Promise<Uint8Array> {
 	return data;
 }
 
+/** The temp dirs of this session's downloads and long responses, removed when the session ends. */
+const tempDirs = new Set<string>();
+
 function tempFile(name: string, data: string | Uint8Array): string {
-	const file = path.join(mkdtempSync(path.join(os.tmpdir(), "pi-gitlab-")), name);
+	const dir = mkdtempSync(path.join(os.tmpdir(), "pi-gitlab-"));
+	tempDirs.add(dir);
+	const file = path.join(dir, name);
 	writeFileSync(file, data, { mode: 0o600 });
 	return file;
+}
+
+function removeTempDirs(): void {
+	for (const dir of tempDirs) rmSync(dir, { recursive: true, force: true });
+	tempDirs.clear();
 }
 
 function downloadName(response: Response, url: URL): string {
@@ -1391,7 +1401,7 @@ export default function (pi: ExtensionAPI) {
 			"e.g. a project avatar (PUT /projects/{id}, files {\"avatar\": path}) or an image for markdown (POST " +
 			"/projects/{id}/uploads, files {\"file\": path}). Output over " +
 			`${formatSize(DEFAULT_MAX_BYTES)} is truncated (a job log keeps its end) and the full response saved to a ` +
-			"temp file.",
+			"temp file. Temp files are removed when the session ends.",
 		promptSnippet:
 			"Read and change GitLab issues, merge requests, pipelines, jobs, and repositories (REST v4, GraphQL)" +
 			(several ? ` on ${names.join(", ")}` : ""),
@@ -1522,6 +1532,7 @@ export default function (pi: ExtensionAPI) {
 		}, 0);
 	});
 	pi.on("session_shutdown", (event) => {
+		removeTempDirs();
 		if (ciShared.live?.pi === pi) ciShared.live = undefined;
 		if (event.reason === "reload") return;
 		// Another session or the end of Pi: the waits belong to the conversation that started them.

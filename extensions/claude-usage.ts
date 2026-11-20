@@ -246,12 +246,6 @@ function parseUsage(json: any): UsageSnapshot {
 			else if (l.kind === "weekly_scoped") label = l.scope?.model?.display_name ?? null;
 			if (label) limits.push({ label, percent: l.percent, resetsAt: l.resets_at ?? null });
 		}
-	} else {
-		// Older response shape
-		for (const [key, label] of [["five_hour", "5h"], ["seven_day", "7d"]] as const) {
-			const w = json?.[key];
-			if (typeof w?.utilization === "number") limits.push({ label, percent: w.utilization, resetsAt: w.resets_at ?? null });
-		}
 	}
 
 	let credits: Credits | null = null;

@@ -5,13 +5,13 @@ what Claude Code does: Pi runs Claude models on your Claude subscription, shows
 a status line with the subscription limits, searches and reads the web, keeps a
 memory per project as Claude Code does, titles every session and lights up its
 tmux tab while it works, lets sessions message each other, brings over Claude
-Code's subagents, questions, side questions, goals, loops, scheduled prompts,
-diff view, agent panel, and Remote Control for the Claude app, reads and changes
-OpenProject and GitLab, reads and writes the clipboard, controls your Chrome,
-keeps requests alive through network trouble, continues after a usage limit
-resets, keeps long conversations small, waits for pipelines and deploys without
-spending requests, keeps itself and the Claude Agent SDK current, and fixes how
-the provider resumes after edited history.
+Code's subagents, questions, side questions, loops, scheduled prompts, diff
+view, agent panel, and Remote Control for the Claude app, reads and changes
+OpenProject and GitLab, controls your Chrome, keeps requests alive through
+network trouble, continues after a usage limit resets, keeps long conversations
+small, waits for pipelines and deploys without spending requests, keeps itself
+and the Claude Agent SDK current, and fixes how the provider resumes after
+edited history.
 
 Install it as a Pi package (step 3 of the setup below): its `package.json`
 names `extensions/`, which holds one file per extension.
@@ -23,7 +23,6 @@ names `extensions/`, which holds one file per extension.
 | `web-tools.ts`              | Adds `web_fetch`: reads a page locally and lets a small model answer from it              | —                                                                |
 | `openproject.ts`            | Adds `openproject`: reads and changes OpenProject through its API v3, as you              | An OpenProject API token for each instance                       |
 | `gitlab.ts`                 | Adds `gitlab` and `gitlab_pipeline`: GitLab through its API, as you, and its CI in brief  | A GitLab personal access token for each instance                 |
-| `clipboard.ts`              | Adds `clipboard`: the model reads and writes the clipboard, text and images               | Linux: `wl-clipboard` (Wayland) or `xclip`                       |
 | `memory.ts`                 | Keeps a memory per project, shared with Claude Code's auto memory when it is there        | —                                                                |
 | `session-title.ts`          | Names each session after its first prompt and shows it in the terminal title              | —                                                                |
 | `tmux-tab-activity.ts`      | Turns Pi's spinner in its tmux tab while Pi, a subagent, or a background wait works       | tmux 3.2 or later, set up as its section describes               |
@@ -31,7 +30,6 @@ names `extensions/`, which holds one file per extension.
 | `ask-user-question.ts`      | Adds `ask_user_question`, Claude Code's multiple-choice questions                         | —                                                                |
 | `subagents.ts`              | Adds the `agent` tool: subagents in their own Pi process, on a tier or a model of choice  | —                                                                |
 | `btw.ts`                    | `/btw`: a side question about the session that stays out of the conversation              | —                                                                |
-| `goal.ts`                   | `/goal`: keeps working until an evaluator model judges a condition met                    | —                                                                |
 | `scheduled-tasks.ts`        | `/loop`, `/cron`, and the cron tools: prompts on a schedule within the session            | —                                                                |
 | `diff.ts`                   | `/diff`: a panel beside the conversation with the changes and each turn's edits           | git                                                              |
 | `background-agents.ts`      | The agent panel below the prompt: ↓ to the agents, Enter opens one, Ctrl+B to background  | `subagents.ts`                                                   |
@@ -91,7 +89,7 @@ What differs is the tool around the model.
   panels, and dialogs, see and change what goes to the model, and react to
   every step of a session. Claude Code offers hooks, skills, MCP servers, and
   a status line script; its interface and agent loop stay closed. All
-  twenty-nine extensions here are such files: the GitLab and OpenProject
+  twenty-seven extensions here are such files: the GitLab and OpenProject
   tools, the plan limits in the status line, the diff panel, scheduled
   prompts, messages between sessions. Each can be read in one go, and a fix
   is a commit here, not a wait for the next Claude Code release.
@@ -125,7 +123,7 @@ Where Claude Code stays the better choice:
 ## Set up Pi
 
 Follow the steps in order — together they are the complete setup: Pi itself,
-the Claude subscription, all twenty-nine extensions, and the browser
+the Claude subscription, all twenty-seven extensions, and the browser
 connection. Every step except the Chrome switch in step 4 is a shell command,
 so an agent can carry them out as well.
 
@@ -166,7 +164,8 @@ in `~/.pi/agent/settings.json`, next to the `packages` entry the install wrote:
   "defaultProvider": "claude-sdk",
   "defaultModel": "claude-opus-5-5",
   "packages": ["npm:pi-claude-subscription"],
-  "compaction": { "reserveTokens": 32768 }
+  "compaction": { "reserveTokens": 32768 },
+  "retry": { "maxRetries": 10, "maxAgentDelayMs": 32000 }
 }
 ```
 
@@ -178,6 +177,13 @@ context window minus 23k tokens, so at 977k for a 1M model, and answers
 "Prompt is too long". Pi's default reserve of 16384 tokens would only start
 compacting at 983,616. Pi does recover from the error by compacting and
 retrying, but the turn fails first.
+
+The `retry` values let Pi retry a dropped connection or an overloaded server
+ten times, after 2, 4, 8, 16, then 32 seconds, as Claude Code retries ten
+times; Pi's default gives up after three tries within 14 seconds.
+[network-resilience](#network-resilience) adds what Pi lacks: the notice
+while a response hangs, the restart of a silent request, and the wait while
+the network is down.
 
 The package brings the Claude Agent SDK, and with it Claude Code, at the
 version of its first install, and `pi update` does not move it.
@@ -192,7 +198,7 @@ Install this repository as a Pi package:
 pi install git:github.com/dandjo/pi.dev-extensions
 ```
 
-Pi clones it into `~/.pi/agent/git/` and loads all twenty-nine extensions
+Pi clones it into `~/.pi/agent/git/` and loads all twenty-seven extensions
 from there; `pi list` shows the package. [package-update](#package-update)
 brings new versions at every start, new and renamed extensions included, and
 reloads Pi once it is idle; `/update` fetches them at once. There is no build
@@ -315,23 +321,22 @@ needs nothing. What changes with a provider other than Claude:
 
 ## package-update
 
-Keeps this package of extensions current, and the packages other extensions
-ask for. It needs nothing from any provider.
+Keeps this package of extensions current. It needs nothing from any provider.
 
 - The package is the one `pi install` put this file in. Every other installed
   package stays as it is until `pi update` by hand; `pi-web-access` is pinned
   on purpose, and [claude-sdk-update](#claude-sdk-update) keeps the Claude
   Agent SDK of `pi-claude-subscription` current.
-- At every Pi start (not with `PI_OFFLINE` set), each of these packages from
-  git or npm is brought up to date in the background with
+- At every Pi start (not with `PI_OFFLINE` set), the package is brought up to
+  date in the background with
   `pi update <package>`, as by hand, but in a separate process, so its output
   stays out of the terminal, and git never asks for a password: SSH runs in
   batch mode. One Pi process updates at a time; one started meanwhile waits
   for it and uses its result. A local folder is not updated, and subagent
   processes ([subagents](#subagents)) update nothing.
-- When an update changed what a package loads into Pi (`package.json` and the
-  extensions, skills, prompts, and themes it names, and the paths an asking
-  extension names), Pi reloads by itself, so the new extensions and skills
+- When an update changed what the package loads into Pi (`package.json` and
+  the extensions, skills, prompts, and themes it names), Pi reloads by itself,
+  so the new extensions and skills
   apply without a restart. Commits that change only other files update the
   package without a reload.
 - The reload waits until Pi is at rest in the terminal: no response or
@@ -341,11 +346,7 @@ ask for. It needs nothing from any provider.
   `<package> updated <old> -> <new>; Pi reloads once it is idle.` tells that
   the previous version is still loaded. Outside the terminal (RPC mode) the
   notice asks for `/reload` instead.
-- `/update` updates the packages and reloads at once.
-- Another extension asks over Pi's event bus: it sends `package-update:packages`
-  with an id and its packages (source, folder, a label, and the paths whose
-  change needs a reload) at load and whenever `package-update:request` comes;
-  a request sent again under the same id replaces the earlier one.
+- `/update` updates the package and reloads at once.
 
 ## statusline
 
@@ -775,7 +776,7 @@ written with your permissions.
   it keeps its end, where the failure is.
 - Output over 50 KB is cut and the full response saved to a temp file. Binary
   content, such as artifacts and archives, is saved to a temp file (mode 600)
-  up to 100 MB.
+  up to 100 MB. The temp files of a session are removed when it ends.
 - GraphQL is there for what REST lacks: an issue's iteration, for one, can
   only be set through `issueSetIteration`. A GraphQL answer with `errors`
   counts as failed. The tool description names `/api/graphql` as the
@@ -864,37 +865,6 @@ out.
   lists the names it has.
 - The guidelines tell the model to play, retry, cancel, and run only what you
   asked for, and a deploy job only on your word for that deploy.
-
-## clipboard
-
-Adds the `clipboard` tool, with which the model reads and writes the system
-clipboard on Linux and macOS: "look at the screenshot I copied", "copy the
-command for me".
-
-- `read` returns what the clipboard holds: text, an image, and on macOS the
-  paths of files copied in Finder. An image comes as PNG, JPEG, WebP, or GIF
-  (other formats are converted to PNG) and is scaled down as Pi's
-  `images.autoResize` says, as with the `read` tool. `format` `text` or
-  `image` asks for one of them only. Text beyond 50 KB or 2,000 lines is cut,
-  the full text saved to a private temp file that goes when the session ends.
-- `write` puts text on the clipboard with Pi's own copy routine, the one
-  behind `/copy`: `wl-copy`, `xclip`, or `xsel` on Linux, the native helper or
-  `pbcopy` on macOS, and over SSH OSC 52 to the terminal of your own machine.
-  Writing never asks.
-- Reading asks first: what the model reads goes to its provider, a password
-  just copied from a password manager as much as anything else. The question
-  names what the clipboard holds — text with its length, an image with its
-  format and size — never the content. `{"confirmRead": false}` in
-  `~/.pi/agent/clipboard.json` reads without asking. Without a UI (`pi -p`,
-  subagents), reading is refused unless that is set.
-- Linux reads through `wl-paste` on Wayland, else `xclip` on X11 (XWayland
-  included), else Pi's native X11 helper with `xsel` for text; `wl-clipboard`
-  or `xclip` covers everything. macOS needs nothing: Pi's native helper reads
-  text, images, and files, and `pbpaste` stands in for text. Over SSH, the
-  clipboard of the machine in front of you cannot be read; writing reaches it
-  through OSC 52.
-- For yourself, Pi already has `/copy` and `Ctrl+X` (copy the last answer)
-  and `Ctrl+V` (paste text or an image into the editor).
 
 ## memory
 
@@ -1418,31 +1388,6 @@ without adding anything to it, like Claude Code's
   and are answered the same way, with the app's own earlier side questions;
   they do not join the terminal's thread.
 
-## goal
-
-`/goal <condition>` keeps the agent working, turn after turn, until a separate
-evaluator judges the condition met — Claude Code's
-[`/goal`](https://code.claude.com/docs/en/goal).
-
-- Setting a goal starts a turn with the condition as the instruction. `/goal`
-  alone shows the status: condition, running time, evaluated turns, tokens,
-  and the last reason. `/goal clear` (also `stop`, `off`, `reset`, `none`,
-  `cancel`) removes it.
-- After every run that ends normally, the [small model](#small-model) reads
-  the condition and the conversation and answers met, not met, or impossible,
-  with a reason. Not met continues the run with the reason as guidance; met
-  and impossible clear the goal. Every verdict shows in the transcript.
-- The evaluator runs no commands, so a condition should name a check whose
-  output appears in the conversation: "all tests in test/auth pass (`npm test`
-  exits 0)".
-- The loop pauses, with the goal still set, after three evaluated turns
-  without a tool call, after an error, or when you interrupt it; your next
-  message resumes it. While background subagents run, evaluation waits for
-  their reports.
-- The goal is stored in the session and restored on resume. The footer shows
-  `◎ /goal active` and how long it has run. `pi -p "/goal …"` runs the loop to
-  the end.
-
 ## scheduled-tasks
 
 Claude Code's
@@ -1643,8 +1588,8 @@ and you can work on from there while Pi keeps running on your machine.
   does it ([background-agents](#background-agents)).
 - Transport: the Claude Agent SDK's bridge module
   (`@anthropic-ai/claude-agent-sdk/bridge`, marked alpha), which
-  `pi-claude-subscription` installs: under `~/.pi/agent/npm`, in a project's
-  `.pi/npm`, or in npm's global root, wherever Pi put that package. It creates the
+  `pi-claude-subscription` installs: under `~/.pi/agent/npm` or in a project's
+  `.pi/npm`, wherever Pi put that package. It creates the
   session, mints a four-hour worker credential, and runs the event stream,
   heartbeats, and reconnects; the extension renews the credential five minutes
   before it expires and reconnects on its own after an outage. A new
@@ -1863,16 +1808,14 @@ time out.
   included, the host is checked. While it does not answer, Pi waits and checks
   every 3 seconds instead of spending its retries, for up to 30 minutes per
   outage; Esc interrupts the wait.
-- When Pi gives up on a transient error, the run continues with Claude Code's
-  backoff (4, 8, 16, then 32 seconds) until ten requests in a row have failed,
-  with the attempt and the countdown in the working message. Usage limits,
-  login, request, and context errors are never retried;
-  [auto-continue](#auto-continue) waits out a usage limit, and a rate limit
-  once ten requests have failed on it. A failed request that auto-continue
-  took over is left to it, and its wait ends the series of failures.
+- The attempts themselves are Pi's: with `retry.maxRetries` 10 and
+  `retry.maxAgentDelayMs` 32000 in `~/.pi/agent/settings.json` (step 2 of the
+  setup) Pi retries a transient error ten times with a backoff from 2 up to
+  32 seconds, close to Claude Code's ten. [auto-continue](#auto-continue)
+  waits out a usage limit, and a rate limit once Pi gives up on it.
 - Settings, all optional, go into `~/.pi/agent/network-resilience.json`:
   `noticeSeconds` (20), `graceSeconds` (10), `stallSeconds` (300; 0 turns
-  the silence restart off), `maxRestarts` (3), `maxAttempts` (10),
+  the silence restart off), `maxRestarts` (3),
   `offlineWaitMinutes` (30; 0 turns the waiting off), `cacheWarmMinutes`
   (5, Anthropic's default; 60 on `claude-sdk`, whose cache lives an hour),
   and `probeHost` (`host:port` to check instead of the API host). Under
@@ -1887,9 +1830,9 @@ time out.
 
 Waits out a used-up usage limit, quota, or rate limit and continues the run
 after the reset, as Claude Code does with `autoContinueAtUsageLimit`, for any
-provider. Without it, a request that hits such a limit ends the run: Pi and
-[network-resilience](#network-resilience) retry a rate limit for a few
-minutes, but not a limit of hours or days — Claude Code's
+provider. Without it, a request that hits such a limit ends the run: Pi
+retries a rate limit a few times, but does not wait out a limit of hours or
+days — Claude Code's
 `You've hit your session limit · resets 7pm (Europe/Vienna)`, Codex's
 `You have hit your ChatGPT usage limit (plus plan). Try again in ~123 min.`,
 a daily quota of Gemini or Groq — and nothing goes on after the reset until
@@ -1901,9 +1844,9 @@ you send a prompt.
   stays active, and its next request waits until the reset. The working line
   shows the time,
   `Usage limit reached · continuing automatically at 19:01 (in 3h 29m)`, and
-  Esc ends the run as ever. Meanwhile a still ⧗ takes the place of the
-  spinner and the line changes once a minute, so the waiting session does not
-  redraw the screen many times a second for hours.
+  Esc ends the run as ever. Meanwhile the spinner is hidden and the line
+  changes once a minute, so the waiting session does not redraw the screen
+  many times a second for hours.
 - The reset time comes from what the provider says, the first found of:
   - the error text, in its common forms: a clock time in the time zone it
     names, else the local one (Claude Code, Codex's `try again at 4:12 PM`),
@@ -1929,9 +1872,9 @@ you send a prompt.
   same second.
 - Without a reset time, a usage limit or quota is tried again after 2, 5, 10,
   15, and 30 minutes, then every hour. A plain rate limit (`429`,
-  `rate limit`, `too many requests`) is left to Pi's retry and
-  network-resilience first, and so is one whose reset is less than a minute
-  away; after ten failed requests in a row it is tried again the same way.
+  `rate limit`, `too many requests`) is left to Pi's own retry first; once Pi
+  gives up on it, it is tried again the same way, or waited for when it names
+  a reset.
   Credit and billing errors (`insufficient credits`, `payment required`,
   OpenAI's `You exceeded your current quota`) do not reset by themselves and
   stand as they are.
@@ -1941,8 +1884,8 @@ you send a prompt.
   account just signed in.
 - Whatever starts a run while the limit holds waits the same way after its
   first failed request: a subagent's report, the result of a background
-  wait, a message from another session, a scheduled prompt, `/loop`, and
-  `/goal`. Subagents load the extension in their own Pi process, so they wait
+  wait, a message from another session, a scheduled prompt, and `/loop`.
+  Subagents load the extension in their own Pi process, so they wait
   and continue by themselves. Messages that arrive during the wait are queued
   and reach the model when the run continues.
 - A request that hits the limit again right after the wait waits again, at
@@ -2060,9 +2003,9 @@ is a request that reads the whole context.
 
 ## Small model
 
-`session-title.ts`, `web-tools.ts`, and `goal.ts` carry the same code that
-picks the model for side tasks — session titles, `web_fetch` answers, and the
-`/goal` evaluator — for whatever provider and model are in use:
+`session-title.ts` and `web-tools.ts` carry the same code that picks the
+model for side tasks — session titles and `web_fetch` answers — for whatever
+provider and model are in use:
 
 - Among the models of the current model's provider that have working
   credentials and read text, it takes the one with the lowest list price (input

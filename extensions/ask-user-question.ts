@@ -20,7 +20,6 @@
  *   ("ask-user-question:asker" on the event bus carries the Asker that subagents.ts calls for it, at load and on every
  *   "ask-user-question:asker-request"). Otherwise it asks as any RPC client does. Whether a subagent has the tool at
  *   all is decided in subagents.ts.
- * - `answers` (question -> answer), as a PreToolUse hook can supply it through updatedInput, skips the dialog.
  * - Answers from elsewhere: while the dialog is open, the event ask-user-question:open (QuestionsOpen) offers the
  *   questions to other extensions — claude-remote-control.ts puts them in the Claude app. The first answer wins, from
  *   the terminal or from there, and closes the other side; ask-user-question:close (QuestionsClose) tells how the
@@ -123,11 +122,6 @@ const QuestionSchema = Type.Object({
 
 const Params = Type.Object({
 	questions: Type.Array(QuestionSchema, { minItems: 1, maxItems: 4, description: "Questions to ask the user (1-4 questions)." }),
-	answers: Type.Optional(
-		Type.Record(Type.String(), Type.String(), {
-			description: "Filled in by hooks to answer programmatically. Leave it out.",
-		}),
-	),
 });
 
 interface QuestionOption {
@@ -771,12 +765,9 @@ export default function (pi: ExtensionAPI) {
 
 		async execute(toolCallId, params, signal, _onUpdate, ctx) {
 			const questions = params.questions as Question[];
-			const preset = params.answers && Object.keys(params.answers).length > 0 ? params.answers : undefined;
 			let answers: Map<number, Answer> | undefined;
 			let message: string | undefined;
-			if (preset) {
-				answers = new Map(questions.map((q, i) => [i, { labels: [], custom: preset[q.question] ?? "" }]));
-			} else if (ctx.hasUI) {
+			if (ctx.hasUI) {
 				({ answers, message } = await ask(pi, ctx, toolCallId, questions, signal));
 			} else {
 				throw new Error(
@@ -795,7 +786,7 @@ export default function (pi: ExtensionAPI) {
 			questions.forEach((q, i) => {
 				const answer = answers.get(i) ?? { labels: [] };
 				details.answers[q.question] = answerText(answer);
-				if (answer.custom && !preset) details.custom.push(q.question);
+				if (answer.custom) details.custom.push(q.question);
 			});
 			return { content: [{ type: "text", text: resultText(details) }], details };
 		},

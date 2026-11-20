@@ -117,7 +117,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Key, matchesKey, Text, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { createHash, randomUUID } from "node:crypto";
-import { execFile, execFileSync } from "node:child_process";
+import { execFile } from "node:child_process";
 import { subscribe, unsubscribe } from "node:diagnostics_channel";
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
@@ -184,7 +184,6 @@ interface BridgeHandle {
 	sessionId: string;
 	/** The sequence number of the last event the read stream got. */
 	getSequenceNum(): number;
-	getEpoch(): number | undefined;
 	isConnected(): boolean;
 	write(message: Json): void;
 	sendControlRequest(request: Json): void;
@@ -305,30 +304,10 @@ async function claudeCodeCredentials(): Promise<any> {
 	}
 }
 
-/** Where npm keeps global packages (Pi's legacy installs), asked once; undefined without npm. */
-let npmGlobalRoot: string | null | undefined;
-function globalNpmRoot(): string | undefined {
-	if (npmGlobalRoot === undefined) {
-		const windows = process.platform === "win32";
-		try {
-			npmGlobalRoot =
-				execFileSync(windows ? "npm.cmd" : "npm", ["root", "-g"], {
-					encoding: "utf8",
-					timeout: 10_000,
-					stdio: ["ignore", "pipe", "ignore"],
-					shell: windows,
-				}).trim() || null;
-		} catch {
-			npmGlobalRoot = null;
-		}
-	}
-	return npmGlobalRoot ?? undefined;
-}
-
 /**
  * The Claude Agent SDK that pi-claude-subscription brings, wherever Pi installed that package: in the user scope
- * (~/.pi/agent/npm), the project scope (.pi/npm), or npm's global root (Pi's legacy installs); hoisted, or below the
- * package itself. Undefined when it is in none of them.
+ * (~/.pi/agent/npm) or the project scope (.pi/npm); hoisted, or below the package itself. Undefined when it is in
+ * neither.
  * claude-login.ts carries a copy of this function: change them alike.
  */
 function claudeSdkDir(): string | undefined {
@@ -342,10 +321,7 @@ function claudeSdkDir(): string | undefined {
 		}
 		return undefined;
 	};
-	const local = find([path.join(getAgentDir(), "npm", "node_modules"), path.join(process.cwd(), ".pi", "npm", "node_modules")]);
-	if (local) return local;
-	const global = globalNpmRoot();
-	return global ? find([global]) : undefined;
+	return find([path.join(getAgentDir(), "npm", "node_modules"), path.join(process.cwd(), ".pi", "npm", "node_modules")]);
 }
 
 /**
@@ -695,6 +671,8 @@ interface ToolCallInfo {
 
 class Translator {
 	readonly toolCalls = new Map<string, ToolCallInfo>();
+	/** Whether the file of a write call existed when it ran, by tool call id; only live calls have one (tool_call). */
+	readonly existedBefore = new Map<string, boolean>();
 
 	constructor(
 		readonly sessionId: string,
@@ -750,11 +728,13 @@ class Translator {
 	toolResult(message: ToolResultMessage, uuid: string): Json {
 		const blocks: Json[] = message.content.map((part) => (part.type === "text" ? { type: "text", text: part.text } : imageBlock(part)));
 		const call = this.toolCalls.get(message.toolCallId);
+		const existed = this.existedBefore.get(message.toolCallId);
 		this.toolCalls.delete(message.toolCallId);
+		this.existedBefore.delete(message.toolCallId);
 		let toolUseResult: unknown;
 		if (call && !message.isError) {
 			const claudeInput = toClaudeInput(call.piName, call.args, this.cwd);
-			toolUseResult = toClaudeResponse(call.piName, claudeInput, textOf(message.content), message.details, undefined, undefined);
+			toolUseResult = toClaudeResponse(call.piName, claudeInput, textOf(message.content), message.details, existed);
 		}
 		return {
 			type: "user",
@@ -1141,26 +1121,16 @@ interface BtwAsk {
 	reply?: (result: { answer?: string; error?: string }) => void;
 }
 
-// A copy of PlanUsageSource, UsageSnapshot from claude-usage.ts, the event-bus contract between the two: change
-// both alike.
+// A copy of PlanUsageSource, UsageSnapshot from claude-usage.ts, the event-bus contract between the two, the part
+// read here: change both alike.
 interface LimitRow {
 	label: string;
 	percent: number;
 	resetsAt: string | null;
 }
 
-interface Credits {
-	enabled: boolean;
-	used: number;
-	limit: number;
-	places: number;
-	currency: string;
-}
-
 interface UsageSnapshot {
-	fetchedAt: number;
 	limits: LimitRow[];
-	credits: Credits | null;
 	/**
 	 * The plan's own answer, for consumers that speak its format: here the endpoint's windows, limit rows and extra usage
 	 * as it sent them (ANSWER_KEYS).
@@ -1183,15 +1153,14 @@ interface PlanUsageSource {
 	refresh(): Promise<void>;
 }
 
-// A copy of SubagentView from subagents.ts, the event-bus contract between the two: change both alike.
+// A copy of SubagentView from subagents.ts, the event-bus contract between the two, the part read here: change both
+// alike.
 /** What other extensions see of a subagent ("subagents:state" on the event bus). */
 interface SubagentView {
 	agentId: string;
 	type: string;
 	description: string;
 	status: "running" | "completed" | "failed" | "aborted";
-	/** While running: the user interrupted it and it waits for an instruction, or one of its dialogs is open. */
-	waiting?: "instruction" | "answer";
 	background: boolean;
 	model: string;
 	startedAt: number;
@@ -1334,7 +1303,6 @@ function toClaudeResponse(
 	claudeInput: Input,
 	text: string,
 	details: unknown,
-	structured: unknown,
 	existedBefore: boolean | undefined,
 ): unknown {
 	switch (piName) {
@@ -1361,14 +1329,13 @@ function toClaudeResponse(
 		case "read":
 			return { type: "text", file: { filePath: claudeInput.file_path, content: text } };
 		default:
-			return structured ?? text;
+			return text;
 	}
 }
 
 /**
- * Framed, scrollable boxes for the extensions that show more than a notification can hold: overlays for /hooks,
- * /agents, /cron, and /memory, and the frame and scrolling of the boxes /btw and the /diff dialog show above the
- * prompt.
+ * Framed, scrollable boxes for the extensions that show more than a notification can hold: overlays for /agents,
+ * /cron, and /memory, and the frame and scrolling of the boxes /btw and the /diff dialog show above the prompt.
  *
  * background-agents.ts, btw.ts, diff.ts, memory.ts, scheduled-tasks.ts, subagents.ts carry a copy of this block, or of
  * a part of it: change them alike.
@@ -2236,21 +2203,11 @@ export default function (pi: ExtensionAPI) {
 
 	/** Pi's startup thinking level for the current model: modelThinkingLevels, else defaultThinkingLevel, else medium. */
 	function startupThinkingLevel(): string {
+		const settings = pi.getSettings() as Json;
 		const key = ctx?.model ? `${ctx.model.provider}/${ctx.model.id}` : "";
-		let level = "medium";
-		const files = [path.join(getAgentDir(), "settings.json")];
-		if (ctx?.isProjectTrusted()) files.push(path.join(ctx.cwd, ".pi", "settings.json"));
-		for (const file of files) {
-			try {
-				const settings = JSON.parse(readFileSync(file, "utf8")) as Json;
-				const perModel = (settings.modelThinkingLevels as Json | undefined)?.[key];
-				if (typeof perModel === "string") level = perModel;
-				else if (typeof settings.defaultThinkingLevel === "string") level = settings.defaultThinkingLevel;
-			} catch {
-				// no such settings file
-			}
-		}
-		return level;
+		const perModel = (settings.modelThinkingLevels as Json | undefined)?.[key];
+		if (typeof perModel === "string") return perModel;
+		return typeof settings.defaultThinkingLevel === "string" ? settings.defaultThinkingLevel : "medium";
 	}
 
 	/** The app's effort control: a level sets Pi's thinking level of the same name, null (auto) Pi's startup level. */
@@ -3397,6 +3354,15 @@ export default function (pi: ExtensionAPI) {
 		c.runStartedAt = Date.now();
 		c.runMessages = [];
 		c.handle.reportState("running");
+	});
+
+	// A write reports "update" or "create" as in Claude Code, so the file is checked before the write runs.
+	pi.on("tool_call", (event) => {
+		const c = connection;
+		if (!c || event.toolName !== "write") return undefined;
+		const file = absolute(c.translator.cwd, (event.input as Json).path);
+		if (file) c.translator.existedBefore.set(event.toolCallId, existsSync(file));
+		return undefined;
 	});
 
 	pi.on("message_end", (event) => {

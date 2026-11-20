@@ -62,7 +62,7 @@ function cleanTitle(reply: string): string {
  * Bedrock), only models of the current maker qualify. A current model without a price (local, unknown) is kept.
  * PI_SMALL_MODEL=<provider>/<model-id> overrides the choice.
  *
- * btw.ts, goal.ts, web-tools.ts carry a copy of this block, or of a part of it: change them alike.
+ * btw.ts, web-tools.ts carry a copy of this block, or of a part of it: change them alike.
  */
 const REQUEST_TIMEOUT_MS = 120_000;
 

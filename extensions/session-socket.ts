@@ -63,7 +63,6 @@ const SENDER_WINDOW_MS = 60_000;
 const SENDER_MAX = 10;
 const BURST_WINDOW_MS = 10_000;
 const BURST_MAX = 5;
-const NAME_POLL_MS = 3_000;
 const MESSAGE_TYPE = "cross-session-message";
 const NOTICE_TYPE = "cross-session-notice";
 const ENVELOPE = "cross-session-message";
@@ -683,7 +682,6 @@ export default function (pi: ExtensionAPI) {
 	let record: SessionRecord | null = null;
 	let peerSecret = "";
 	let childSecret = "";
-	let nameTimer: NodeJS.Timeout | null = null;
 	let lastFinishedAt = 0;
 	let queued = 0;
 	let reviewing = false;
@@ -1050,13 +1048,6 @@ export default function (pi: ExtensionAPI) {
 		} finally {
 			process.umask(umask);
 		}
-		let lastName = pi.getSessionName();
-		nameTimer = setInterval(() => {
-			if (pi.getSessionName() === lastName) return;
-			lastName = pi.getSessionName();
-			writeRecord();
-		}, NAME_POLL_MS);
-		nameTimer.unref?.();
 	}
 
 	async function stopInbox(): Promise<void> {
@@ -1064,8 +1055,6 @@ export default function (pi: ExtensionAPI) {
 		for (const entry of held.splice(0)) receipt(entry.item, "expired");
 		for (const subscription of subscriptions.values()) clearTimeout(subscription.timer);
 		subscriptions.clear();
-		if (nameTimer) clearInterval(nameTimer);
-		nameTimer = null;
 		server?.close();
 		server = null;
 		if (record) {
@@ -1281,6 +1270,11 @@ export default function (pi: ExtensionAPI) {
 		if (process.env.PI_SUBAGENT_DEPTH) return;
 		ctx = context;
 		if (!server) startInbox(context);
+	});
+
+	// /name, session-title.ts, and every other pi.setSessionName(): the registry carries the name peers address.
+	pi.on("session_info_changed", () => {
+		writeRecord();
 	});
 
 	pi.on("agent_start", () => {

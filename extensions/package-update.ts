@@ -1,19 +1,16 @@
 /**
- * Package update: keeps Pi packages current. At every Pi start it updates the package this extension comes from and
- * the packages other extensions ask for, and reloads Pi once it is at rest when an update changed what Pi loads. It
- * needs nothing from any provider.
+ * Package update: keeps the package of this extension current. At every Pi start it updates the package, and reloads
+ * Pi once it is at rest when the update changed what Pi loads. It needs nothing from any provider.
  *
  * - The package of this file is the user package (pi install, not --local) whose folder holds it. Loaded another way
- *   (with -e, say) it has none, and only the packages other extensions ask for are updated.
- * - Other extensions ask over the event bus, whatever the load order: "package-update:packages" carries a
- *   PackageUpdateRequest, at load and on every "package-update:request"; a request sent again under the same id
- *   replaces the earlier one. Every other installed package stays as it is until `pi update` by hand.
- * - On every Pi start, `pi update <source>` brings each of these git or npm packages up to date in the background, as
- *   by hand, but in a child process whose output stays out of the terminal, and git never prompts
- *   (GIT_TERMINAL_PROMPT=0, SSH in batch mode). One Pi process updates at a time; one starting meanwhile waits and uses
- *   the result. Local folders are not updated, and subagent processes and Pi with PI_OFFLINE set update nothing.
- * - When an update changed what a package loads into Pi (package.json and the extensions, skills, prompts, and themes
- *   it names, and the paths the asking extension named), Pi reloads by itself as soon as it is at rest in the terminal:
+ *   (with -e, say) it has none and updates nothing. Every other installed package stays as it is until `pi update` by
+ *   hand.
+ * - On every Pi start, `pi update <source>` brings the git or npm package up to date in the background, as by hand,
+ *   but in a child process whose output stays out of the terminal, and git never prompts (GIT_TERMINAL_PROMPT=0, SSH
+ *   in batch mode). One Pi process updates at a time; one starting meanwhile waits and uses the result. A local folder
+ *   is not updated, and subagent processes and Pi with PI_OFFLINE set update nothing.
+ * - When the update changed what the package loads into Pi (package.json and the extensions, skills, prompts, and
+ *   themes it names), Pi reloads by itself as soon as it is at rest in the terminal:
  *   no run or compaction, nothing queued, no prompt just submitted, and the empty prompt editor in focus, so no
  *   selector or dialog is open and no typing is lost. Until then what was loaded before stays active. A change found by
  *   an update of another Pi process counts too. /update updates and reloads right away.
@@ -60,30 +57,12 @@ const INPUT_GRACE_MS = 5_000;
 
 const run = promisify(execFile);
 
-/** What "package-update:packages" carries: the packages an extension wants kept current. */
-export interface PackageUpdateRequest {
-	/** The extension that asks; a request sent again under the same id replaces the earlier one. */
-	id: string;
-	packages: PackageUpdateEntry[];
-}
-
-export interface PackageUpdateEntry {
+/** The package this extension keeps current: the one it came with. */
+interface Own {
 	/** The package source in Pi's settings, as `pi update` takes it. */
 	source: string;
 	/** The package folder. */
 	repo: string;
-	/** What notices call it; default the name in its package.json, else the folder name. */
-	label?: string;
-	/** Paths relative to repo whose change needs a reload as well, besides package.json and what it names. */
-	reloadPaths?: string[];
-}
-
-/** A package this extension keeps current. */
-interface Kept {
-	source: string;
-	repo: string;
-	label?: string;
-	reloadPaths: string[];
 	/** Whether `pi update` moves it: a git or npm package, not a local folder. */
 	updatable: boolean;
 }
@@ -108,7 +87,7 @@ function isLocalSource(source: string): boolean {
 }
 
 /** The user package this file came with; null when none holds it. */
-function ownPackage(packages: ConfiguredPackage[]): PackageUpdateEntry | null {
+function ownPackage(packages: ConfiguredPackage[]): Own | null {
 	let self: string;
 	try {
 		self = realpathSync(fileURLToPath(import.meta.url));
@@ -118,24 +97,14 @@ function ownPackage(packages: ConfiguredPackage[]): PackageUpdateEntry | null {
 	for (const pkg of packages) {
 		if (pkg.scope !== "user" || !pkg.installedPath) continue;
 		try {
-			if (self.startsWith(realpathSync(pkg.installedPath) + path.sep)) return { source: pkg.source, repo: path.resolve(pkg.installedPath) };
+			if (self.startsWith(realpathSync(pkg.installedPath) + path.sep)) {
+				return { source: pkg.source, repo: path.resolve(pkg.installedPath), updatable: !isLocalSource(pkg.source) };
+			}
 		} catch {
 			// not installed (yet)
 		}
 	}
 	return null;
-}
-
-/** An entry from the event bus, checked; null when it is not one. */
-function entryOf(value: unknown): PackageUpdateEntry | null {
-	const e = value as Partial<PackageUpdateEntry> | null;
-	if (!e || typeof e.source !== "string" || !e.source.trim() || typeof e.repo !== "string" || !e.repo) return null;
-	return {
-		source: e.source,
-		repo: path.resolve(e.repo),
-		label: typeof e.label === "string" && e.label ? e.label : undefined,
-		reloadPaths: Array.isArray(e.reloadPaths) ? e.reloadPaths.filter((p): p is string => typeof p === "string" && p !== "") : [],
-	};
 }
 
 async function git(args: string[], cwd?: string): Promise<string> {
@@ -245,9 +214,8 @@ async function takeLock(): Promise<(() => void) | null> {
 	}
 }
 
-/** The label the asking extension gave, else the package's name, else its folder. */
-function label(m: Kept): string {
-	if (m.label) return m.label;
+/** The package's name, else its folder. */
+function label(m: Own): string {
 	try {
 		const name = JSON.parse(readFileSync(path.join(m.repo, "package.json"), "utf8"))?.name;
 		if (typeof name === "string" && name) return name;
@@ -258,11 +226,11 @@ function label(m: Kept): string {
 }
 
 /**
- * What of a package needs a reload when it changes: the paths the asking extension named, package.json, and the
- * folders of the extensions, skills, prompts, and themes it names (Pi's default folders without a pi entry).
+ * What of the package needs a reload when it changes: package.json and the folders of the extensions, skills, prompts,
+ * and themes it names (Pi's default folders without a pi entry).
  */
-function reloadPaths(m: Kept): string[] {
-	const paths = [...m.reloadPaths, "package.json"];
+function reloadPaths(m: Own): string[] {
+	const paths = ["package.json"];
 	let manifest: Record<string, unknown> | undefined;
 	try {
 		const pi = JSON.parse(readFileSync(path.join(m.repo, "package.json"), "utf8"))?.pi;
@@ -287,8 +255,8 @@ function reloadPaths(m: Kept): string[] {
 	return paths;
 }
 
-/** Whether what needs a reload differs between two revisions of a package; when in doubt, yes. */
-async function reloadNeeded(m: Kept, from: string | null, to: string | null): Promise<boolean> {
+/** Whether what needs a reload differs between two revisions of the package; when in doubt, yes. */
+async function reloadNeeded(m: Own, from: string | null, to: string | null): Promise<boolean> {
 	if (from === to) return false;
 	if (!from || !to) return true;
 	try {
@@ -299,38 +267,29 @@ async function reloadNeeded(m: Kept, from: string | null, to: string | null): Pr
 	}
 }
 
-type UpdateResult = { m: Kept; from: string | null; to: string | null } | { m: Kept; error: string };
+type UpdateResult = { from: string | null; to: string | null } | { error: string };
 
 /**
  * The update in flight, shared by the session runtimes of this process: /reload loads this file afresh, and a session
  * started with /new or /resume while the startup update still runs must see it too. null: another Pi process did it.
  */
-const shared = globalThis as typeof globalThis & Record<symbol, Promise<UpdateResult[] | null> | undefined>;
+const shared = globalThis as typeof globalThis & Record<symbol, Promise<UpdateResult | null> | undefined>;
 const UPDATE = Symbol.for("pi.package-update.update");
 
 /**
- * Updates every git and npm package of the list with `pi update`, one failing not holding up the others; concurrent
- * callers in this process share a run, and another Pi process updating meanwhile makes this one wait and skip it
- * (null).
+ * Updates the package with `pi update`; concurrent callers in this process share a run, and another Pi process
+ * updating meanwhile makes this one wait and skip it (null).
  */
-function update(kept: Kept[]): Promise<UpdateResult[] | null> {
+function update(m: Own): Promise<UpdateResult | null> {
 	shared[UPDATE] ??= (async () => {
-		const updatable = kept.filter((m) => m.updatable);
-		if (updatable.length === 0) return [];
 		const release = await takeLock();
 		if (!release) return null;
 		try {
-			const results: UpdateResult[] = [];
-			for (const m of updatable) {
-				try {
-					const from = await revision(m.repo);
-					await piUpdate(m.source);
-					results.push({ m, from, to: await revision(m.repo) });
-				} catch (error) {
-					results.push({ m, error: error instanceof Error ? error.message.split("\n")[0] : String(error) });
-				}
-			}
-			return results;
+			const from = await revision(m.repo);
+			await piUpdate(m.source);
+			return { from, to: await revision(m.repo) };
+		} catch (error) {
+			return { error: error instanceof Error ? error.message.split("\n")[0] : String(error) };
 		} finally {
 			release();
 		}
@@ -341,44 +300,14 @@ function update(kept: Kept[]): Promise<UpdateResult[] | null> {
 }
 
 export default function (pi: ExtensionAPI) {
-	let own: PackageUpdateEntry | null = null;
+	let own: Own | null = null;
 	try {
 		own = ownPackage(configuredPackages());
 	} catch {
 		// Pi reports unreadable settings itself.
 	}
-	/** The entries of every asking extension, by its id. */
-	const requests = new Map<string, PackageUpdateEntry[]>();
-	/** The revision per package folder whose resources this runtime loaded, taken when the package was first named. */
-	const loaded = new Map<string, string | null>();
-	const remember = (repo: string) => {
-		if (!loaded.has(repo)) loaded.set(repo, revisionSync(repo));
-	};
-	if (own) remember(own.repo);
-
-	pi.events.on("package-update:packages", (data) => {
-		const request = data as Partial<PackageUpdateRequest> | undefined;
-		if (!request || typeof request.id !== "string" || !Array.isArray(request.packages)) return;
-		const entries = request.packages.map(entryOf).filter((e): e is PackageUpdateEntry => e !== null);
-		requests.set(request.id, entries);
-		for (const e of entries) remember(e.repo);
-	});
-	pi.events.emit("package-update:request", undefined);
-
-	/** This package and the requested ones, one entry per folder, in that order. */
-	function kept(): Kept[] {
-		const byRepo = new Map<string, Kept>();
-		for (const e of [...(own ? [own] : []), ...[...requests.values()].flat()]) {
-			const known = byRepo.get(e.repo);
-			if (known) {
-				known.reloadPaths.push(...(e.reloadPaths ?? []));
-				known.label ??= e.label;
-				continue;
-			}
-			byRepo.set(e.repo, { source: e.source, repo: e.repo, label: e.label, reloadPaths: [...(e.reloadPaths ?? [])], updatable: !isLocalSource(e.source) });
-		}
-		return [...byRepo.values()];
-	}
+	/** The package's revision whose resources this runtime loaded. */
+	const loaded = own?.updatable ? revisionSync(own.repo) : null;
 
 	// State of this session runtime; Pi may reuse the loaded module for the next one.
 	let ctx: ExtensionContext | null = null;
@@ -441,18 +370,11 @@ export default function (pi: ExtensionAPI) {
 		poll.unref?.();
 	}
 
-	/** Schedules a reload when a package now holds resources that differ from those this runtime loaded. */
-	async function checkPackages(): Promise<void> {
-		const changes: string[] = [];
-		for (const m of kept()) {
-			if (!m.updatable || !loaded.has(m.repo)) continue;
-			const before = loaded.get(m.repo) ?? null;
-			const current = await revision(m.repo);
-			if (!(await reloadNeeded(m, before, current))) continue;
-			changes.push(before ? `${label(m)} updated ${before} -> ${current}` : `${label(m)} installed (${current})`);
-		}
-		if (changes.length === 0 || !ctx || due !== null) return;
-		const what = changes.join("; ");
+	/** Schedules a reload when the package now holds resources that differ from those this runtime loaded. */
+	async function checkPackage(m: Own): Promise<void> {
+		const current = await revision(m.repo);
+		if (!(await reloadNeeded(m, loaded, current)) || !ctx || due !== null) return;
+		const what = loaded ? `${label(m)} updated ${loaded} -> ${current}` : `${label(m)} installed (${current})`;
 		if (ctx.mode === "tui") scheduleReload(what);
 		else if (ctx.hasUI) ctx.ui.notify(`${what}; /reload loads them.`, "info");
 	}
@@ -463,20 +385,18 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("session_start", (event, context) => {
 		ctx = context;
-		if (process.env.PI_SUBAGENT_DEPTH || process.env.PI_OFFLINE) return;
+		const m = own;
+		if (!m?.updatable || process.env.PI_SUBAGENT_DEPTH || process.env.PI_OFFLINE) return;
 		// Only the start updates; a later session waits for an update still running, or finds one finished since its
 		// resources were loaded. The check waits for the resources and then for the next macrotask, so it never runs
 		// inside the start or reload that is still under way.
-		const updating = event.reason === "startup" ? update(kept()) : shared[UPDATE];
+		const updating = event.reason === "startup" ? update(m) : shared[UPDATE];
 		Promise.all([updating, discovered])
-			.then(([results]) => {
-				const failed = (results ?? []).filter((r): r is Extract<UpdateResult, { error: string }> => "error" in r);
-				if (failed.length > 0 && ctx?.hasUI) {
-					ctx.ui.notify(`Package update failed: ${failed.map((r) => `${label(r.m)}: ${r.error}`).join("; ")}`, "warning");
-				}
+			.then(([result]) => {
+				if (result && "error" in result && ctx?.hasUI) ctx.ui.notify(`Package update failed: ${label(m)}: ${result.error}`, "warning");
 			})
 			.then(() => new Promise((resolve) => setTimeout(resolve, 0)))
-			.then(checkPackages)
+			.then(() => checkPackage(m))
 			.catch((error) => {
 				if (ctx?.hasUI) ctx.ui.notify(`Package update failed: ${error instanceof Error ? error.message : error}`, "warning");
 			});
@@ -497,29 +417,32 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand(COMMAND, {
-		description: "Update this package of extensions and the packages other extensions keep current, and reload",
+		description: "Update this package of extensions and reload",
 		handler: async (args, command) => {
 			if (args === RELOAD_MARK) {
 				await command.reload();
 				return;
 			}
-			const results = await update(kept());
-			if (results === null || results.length === 0) {
-				command.ui.notify(results === null ? "Another Pi process has just updated the packages." : "No package to update: local folders load as they are.", "info");
+			const result = own?.updatable ? await update(own) : undefined;
+			if (!own || !result) {
+				command.ui.notify(
+					result === null
+						? "Another Pi process has just updated the package."
+						: "No package to update: this file was not installed with pi install, or from a local folder, which loads as it is.",
+					"info",
+				);
 				stopWaiting();
 				await command.reload();
 				return;
 			}
-			const lines = results.map((r) =>
-				"error" in r
-					? `${label(r.m)}: update failed (${r.error})`
-					: r.from === r.to
-						? `${label(r.m)}: already current (${r.to})`
-						: `${label(r.m)}: updated ${r.from ?? "none"} -> ${r.to}`,
+			if ("error" in result) {
+				command.ui.notify(`${label(own)}: update failed (${result.error})`, "error");
+				return;
+			}
+			command.ui.notify(
+				result.from === result.to ? `${label(own)}: already current (${result.to})` : `${label(own)}: updated ${result.from ?? "none"} -> ${result.to}`,
+				"info",
 			);
-			const ok = results.some((r) => !("error" in r));
-			command.ui.notify(lines.join("\n"), ok ? "info" : "error");
-			if (!ok) return;
 			stopWaiting();
 			await command.reload();
 		},

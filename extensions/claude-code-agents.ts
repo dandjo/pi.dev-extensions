@@ -80,8 +80,6 @@ function piToolNames(entry: string): string[] {
 interface SubagentsProvider {
 	/** Providers apply in the order of their ids; one emitted again under the same id replaces the earlier one. */
 	id: string;
-	/** Directories of plugin agents, which are named <plugin>:<name> and rank below every user and project agent. */
-	pluginAgentDirs?: () => { plugin: string; dir: string }[];
 	/** User agent directories, ranking above ~/.pi/agent/agents. */
 	userAgentDirs?: () => string[];
 	/** Project agent directories at one level of the walk up from the working directory, below its .pi/agents. */
