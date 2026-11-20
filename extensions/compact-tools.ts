@@ -61,8 +61,8 @@ interface Slot {
 /** The lines of a row at one width: those the call's component draws and those the result's draws. */
 interface Layout {
 	width: number;
-	call: string[];
-	result: string[];
+	call: readonly string[];
+	result: readonly string[];
 }
 
 /**
@@ -86,7 +86,7 @@ class Part implements Component {
 		readonly row: Row,
 		readonly part: "call" | "result",
 	) {}
-	render(width: number): string[] {
+	render(width: number): readonly string[] {
 		return layout(this.row, Math.max(1, width))[this.part];
 	}
 	invalidate(): void {
@@ -114,7 +114,7 @@ function isTimer(line: string): boolean {
 }
 
 /** The lines a component draws. A tool with a box of its own loses its padding and background, which are the row's. */
-function linesOf(component: Component | undefined, width: number, ownShell: boolean): string[] {
+function linesOf(component: Component | undefined, width: number, ownShell: boolean): readonly string[] {
 	if (!component) return [];
 	const lines = component.render(width);
 	if (!ownShell) return lines;
@@ -138,7 +138,7 @@ function full(slot: Slot | undefined): Component | undefined {
 
 function layout(row: Row, width: number): Layout {
 	if (row.layout?.width === width) return row.layout;
-	const done = (call: string[], result: string[]): Layout => {
+	const done = (call: readonly string[], result: readonly string[]): Layout => {
 		row.layout = { width, call, result };
 		return row.layout;
 	};
@@ -154,7 +154,7 @@ function layout(row: Row, width: number): Layout {
 	const compactCall = call.filter((line) => !isBlank(line));
 	const compactResult = result.filter((line) => !isBlank(line));
 	const timer = compactResult.filter(isTimer);
-	const content = (from: string[]) => from.filter((line) => !isBlank(line) && !isTimer(line));
+	const content = (from: readonly string[]) => from.filter((line) => !isBlank(line) && !isTimer(line));
 	let callLines = content(compactCall);
 	let resultLines = content(compactResult);
 	if (callLines.length + resultLines.length <= MAX_LINES) return done(callLines, [...resultLines, ...timer]);
