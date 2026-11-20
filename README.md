@@ -520,8 +520,9 @@ the account used up its plan limit (`You've hit your weekly limit · resets …`
 account and that Pi's `/login` does not reach `claude-sdk`; while
 `CLAUDE_CODE_OAUTH_TOKEN` is set, it says that the prompts run on that token
 instead. With [auto-continue](#auto-continue), which keeps the run waiting
-for the reset, it says that the waiting run continues at once on the account
-`/claude-login` signs in, and asks for no new prompt. The error is Claude
+for the reset and tries a compaction again after it, it says that the waiting
+run or compaction goes on at once on the account `/claude-login` signs in,
+and asks for no new prompt or `/compact`. The error is Claude
 Code's own text, passed on by `claude-sdk` ("Failed to authenticate", "reached
 its time limit"), and stays as it is, also in the saved session. The summary
 of a branch in `/tree` fails another way and gets no notice.

@@ -45,8 +45,8 @@
  * weekly limit · resets …", "out of usage credits") gets a notice that /claude-login signs in another account; while
  * CLAUDE_CODE_OAUTH_TOKEN is set, it says that the prompts run on that token instead, which outranks any login. While
  * auto-continue.ts is loaded (it answers "auto-continue:state-request"), the run waits for the reset instead of ending,
- * so that notice says a waiting run continues at once on the account /claude-login signs in, and asks for no new
- * prompt. The error itself stays as it is, also in the saved session. A branch summary of /tree fails another way and
+ * and a compaction is tried again after it, so that notice says a waiting run or compaction goes on at once on the
+ * account /claude-login signs in, and asks for no new prompt or /compact. The error itself stays as it is, also in the saved session. A branch summary of /tree fails another way and
  * gets no notice.
  *
  * Other extensions reach it through the event bus, whatever the load order: "claude-login:source" carries a
@@ -96,6 +96,9 @@ const LIMIT_TOKEN_NOTICE =
 /** LIMIT_NOTICE while auto-continue.ts holds the run until the reset. */
 const LIMIT_WAIT_NOTICE =
 	"This Claude account has used up its limit: /claude-login signs Claude Code in with another one, and a run waiting for the reset continues on it at once (Pi's /login does not reach the claude-sdk provider)";
+/** LIMIT_NOTICE for a compaction while auto-continue.ts tries it again after the reset. */
+const LIMIT_COMPACT_NOTICE =
+	"This Claude account has used up its limit: /claude-login signs Claude Code in with another one, and the compaction waiting for the reset runs on it at once (Pi's /login does not reach the claude-sdk provider)";
 const LOGIN_COMMAND = "claude-login";
 const STATUS_TIMEOUT_MS = 15_000;
 
@@ -661,6 +664,11 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_compact_failed", (event, ctx) => {
 		if (!ctx.hasUI || ctx.model?.provider !== "claude-sdk") return;
 		const text = notice(event.errorMessage ?? "");
-		if (text) ctx.ui.notify(`${text}${event.reason === "manual" ? ", then /compact again" : ""}.`, "warning");
+		if (!text) return;
+		if (autoContinue && text !== LOGIN_NOTICE) {
+			ctx.ui.notify(`${text === LIMIT_NOTICE ? LIMIT_COMPACT_NOTICE : text}.`, "warning");
+			return;
+		}
+		ctx.ui.notify(`${text}${event.reason === "manual" ? ", then /compact again" : ""}.`, "warning");
 	});
 }
