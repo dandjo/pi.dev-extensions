@@ -32,8 +32,9 @@
  * - Without a reset time, a usage limit or quota ("usage limit", "quota", "per day", "exhausted your capacity", …) is
  *   tried again after 2, 5, 10, 15, and 30 minutes, then every hour. A plain rate limit ("rate limit", "too many
  *   requests", 429) is Pi's own retry's first (retry.maxRetries); once Pi gives up on it, it is tried again the same
- *   way, or waited for when it names a reset. Credit and billing errors without a reset time ("insufficient credits", "payment required", OpenAI's
- *   insufficient_quota, "You exceeded your current quota") never reset by themselves and stand as they are.
+ *   way, or waited for when it names a reset. Credit and billing errors without a reset time ("insufficient credits",
+ *   "payment required", OpenAI's insufficient_quota, "You exceeded your current quota") never reset by themselves and
+ *   stand as they are.
  * - A reset more than eight days away, or tries over more than eight days, end the waiting with a notice. A request
  *   that hits the limit again right after a reset waits again, at least two minutes; after three such hits in a row
  *   the named reset is no longer trusted (Gemini names one of seconds for a used-up daily quota), and the run tries
@@ -42,6 +43,13 @@
  *   report, a background wait's result, a message from another session, a scheduled prompt, and /loop. A
  *   subagent's own Pi process loads this extension as well, so the subagent waits and continues by itself. While a
  *   run waits, messages that arrive are queued as they are during any run, and go to the model when it continues.
+ * - A compaction that fails on a limit (/compact, or Pi's own when the context fills up or overflows) is tried again
+ *   once the limit resets, worked out the same way: Pi itself tries a failed one again only before the next request of
+ *   a run. The retry waits until Pi is idle, as a compaction ends a running run, and goes as /compact with the
+ *   instructions the failed one had; after one that a context overflow started, the run that overflowed continues
+ *   with a note. Meanwhile the status line reads "⧗ compaction at 11:41 (in 7m) · esc cancels"; Esc in an empty
+ *   editor, a prompt, or another compaction that succeeds ends the wait, and "claude-login:changed" starts the retry
+ *   at once. The wait outlasts /reload, not a restart of Pi: a context over the threshold compacts with the next run.
  * - Pi ended during the wait (a signal at reboot, /quit, or a crash): when the session starts or is resumed before the
  *   reset, the wait resumes with a note of its own; once the reset has passed, a notice says to send a prompt. Pi ends
  *   a run before it quits, as Esc does, so a wait ended that way is marked in the session (a custom entry, outside the
@@ -56,11 +64,15 @@
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { Box, Text } from "@earendil-works/pi-tui";
+import { Box, Key, matchesKey, Text } from "@earendil-works/pi-tui";
 
 const MESSAGE_TYPE = "auto-continue";
 const STATE = "auto-continue:state";
 const STATE_REQUEST = "auto-continue:state-request";
+/** The status line entry of a compaction that waits for a limit to reset. */
+const STATUS_KEY = "auto-continue";
+/** Carries a compaction's wait over /reload to the extension instance that follows. */
+const HANDOVER = Symbol.for("auto-continue:compaction");
 
 /** Errors of a used-up limit: plan and usage limits, quotas, and rate limits. */
 const LIMIT =
@@ -102,6 +114,14 @@ const PROBE_MINUTES = [2, 5, 10, 15, 30, 60];
 /** How often the plan's limits are asked while a run waits; the source keeps its own pace on top. */
 const USAGE_ASK_MS = 2 * 60_000;
 const TICK_MS = 1000;
+
+/** How the notices of a wait that ends name what waited, and what to do instead. */
+interface Words {
+	subject: string;
+	action: string;
+}
+const RUN_WORDS: Words = { subject: "the run", action: "send a prompt" };
+const COMPACTION_WORDS: Words = { subject: "the compaction", action: "run /compact" };
 
 const NOTE = "Continue the task you were working on when the limit was reached; do not repeat work that is already complete.";
 
@@ -332,6 +352,8 @@ interface NoteDetails {
 	firstAt?: number;
 	/** Set on the note of a wait resumed after Pi started again. */
 	restarted?: boolean;
+	/** Set on the note of a run that continues once a compaction its overflow started went through after the reset. */
+	compacted?: boolean;
 }
 
 /** The custom entry that marks a wait as ended by Pi quitting, not by Esc. */
@@ -354,6 +376,37 @@ interface Wait {
 	sawUsedUp: boolean;
 }
 
+/** A failed request or compaction: the error, when it came, and the headers of the refused response if any. */
+interface Hit {
+	text: string;
+	at: number;
+	headers?: Record<string, string>;
+}
+
+/** The limit hits of one kind (runs, compactions) so far. */
+interface Tries {
+	/** Hits in a row after a reset: the first, and each right after a wait. */
+	hits: number;
+	/** Tries without a reset time, and when the first of them failed. */
+	probes: number;
+	firstAt: number;
+}
+
+/** A compaction that failed on a limit, to try again once it resets. */
+interface CompactionWait extends Wait {
+	reason: "manual" | "threshold" | "overflow";
+	/** The instructions of a /compact. */
+	instructions?: string;
+	error: string;
+}
+
+/** What a compaction's wait hands over through /reload. */
+interface Handover {
+	file: string;
+	wait: CompactionWait;
+	tries: Tries;
+}
+
 function sleep(ms: number, signal: AbortSignal | undefined): Promise<void> {
 	return new Promise((resolve) => {
 		if (signal?.aborted) return resolve();
@@ -368,9 +421,11 @@ function sleep(ms: number, signal: AbortSignal | undefined): Promise<void> {
 }
 
 function noteText(d: NoteDetails): string {
-	const reached = `The usage limit was reached at ${new Date(d.hitAt).toISOString()} (${d.error.trim()})`;
+	const during = d.compacted ? " while the context was compacted" : "";
+	const reached = `The usage limit was reached at ${new Date(d.hitAt).toISOString()}${during} (${d.error.trim()})`;
 	const reset = d.resetAt === undefined ? "; the provider named no reset time, so the run tried again at intervals." : `; it resets at ${new Date(d.resetAt).toISOString()}.`;
 	const waited = d.resetAt === undefined ? "The limit no longer refused the request" : "The run waited for the reset";
+	if (d.compacted) return `${reached}${reset} The context was compacted after the reset, and the run continues now. ${NOTE}`;
 	return d.restarted
 		? `${reached}${reset} Pi was restarted while this run waited. ${waited}, and the run continues now. ${NOTE}`
 		: `${reached}${reset} ${waited}, and the run continues now. ${NOTE}`;
@@ -384,11 +439,8 @@ export default function (pi: ExtensionAPI) {
 	let lastLimit: { text: string; at: number; headers?: Record<string, string> } | undefined;
 	/** A request a wait let go failed on the limit again. */
 	let hitAgain = false;
-	/** Limit errors in a row after a reset: the first, and each right after a wait. */
-	let hits = 0;
-	/** Tries without a reset time so far, and when the first request of this limit failed. */
-	let probes = 0;
-	let firstAt = 0;
+	/** The limit hits of the session's runs. */
+	const runTries: Tries = { hits: 0, probes: 0, firstAt: 0 };
 	/** Set when a wait let its request go, until that request ends. */
 	let released = false;
 	/** The wait the run's next request makes. */
@@ -399,6 +451,18 @@ export default function (pi: ExtensionAPI) {
 	/** When Claude Code was last signed in anew. */
 	let loginChangedAt = 0;
 	let ctxRef: ExtensionContext | undefined;
+	/** The compaction that waits for its limit to reset, and the limit hits of compactions. */
+	let compaction: CompactionWait | undefined;
+	const compactionTries: Tries = { hits: 0, probes: 0, firstAt: 0 };
+	/** The compaction this extension started, until it ends. */
+	let retrying: CompactionWait | undefined;
+	/** The instructions of the latest /compact. */
+	let instructions: string | undefined;
+	let ticker: ReturnType<typeof setInterval> | undefined;
+	/** When the plan's limits were last asked for the compaction's wait, and the status line shown for it. */
+	let compactionAsked = 0;
+	let compactionShown: string | undefined;
+	let unsubscribeInput: (() => void) | undefined;
 
 	const emitState = () => pi.events.emit(STATE, { waiting });
 	const setWaiting = (value: boolean) => {
@@ -432,6 +496,46 @@ export default function (pi: ExtensionAPI) {
 		wait.resetAt === undefined
 			? wait.notBefore
 			: Math.max(wait.resetAt + (wait.minute ? MINUTE_MARGIN_MS : EXACT_MARGIN_MS) + wait.spread, wait.notBefore);
+
+	/**
+	 * The wait for a limit `hit`, counted in `tries` (`again`: right after a wait); undefined when the error stands, a
+	 * billing error without a reset time, or a reset or tries more than eight days away, which a notice names.
+	 */
+	function waitFor(ctx: ExtensionContext, hit: Hit, tries: Tries, again: boolean, words: Words): Wait | undefined {
+		let found = textReset(hit.text, hit.at) ?? headerReset(hit.headers, hit.at);
+		if (!found) {
+			const plan = usage(ctx.model, 0);
+			if (plan?.usedUp && plan.resetAt !== undefined) found = { at: plan.resetAt, minute: true };
+		}
+		if (found && found.at - hit.at > MAX_WAIT_MS) {
+			notify(ctx, `The limit resets at ${when(found.at)}, more than eight days away, so ${words.subject} does not wait: ${words.action} then.`, "warning");
+			return undefined;
+		}
+		if (!found && BILLING.test(hit.text)) return undefined;
+		if (found) tries.hits = again ? tries.hits + 1 : 1;
+		if (found && tries.hits < MAX_HITS) {
+			tries.probes = 0;
+			const span = Math.max(0, found.at - hit.at);
+			return {
+				hitAt: hit.at,
+				resetAt: found.at,
+				minute: found.minute,
+				notBefore: tries.hits > 1 ? hit.at + REPEAT_MS : 0,
+				spread: Math.random() * (found.minute ? SPREAD_MS : Math.min(SPREAD_MS, span / 10)),
+				again: tries.hits > 1,
+				sawUsedUp: false,
+			};
+		}
+		// No reset time, or the named one did not hold three times in a row: try again at intervals.
+		if (tries.probes === 0) tries.firstAt = hit.at;
+		if (hit.at - tries.firstAt > MAX_WAIT_MS) {
+			notify(ctx, `The limit still refuses requests after eight days of tries: ${words.action} to continue.`, "warning");
+			return undefined;
+		}
+		const minutes = PROBE_MINUTES[Math.min(tries.probes, PROBE_MINUTES.length - 1)];
+		tries.probes++;
+		return { hitAt: hit.at, minute: false, notBefore: hit.at + minutes * 60_000, spread: 0, again: tries.probes > 1, sawUsedUp: false };
+	}
 
 	/** Holds the request until the limit has reset; false when the run was aborted meanwhile. */
 	async function hold(ctx: ExtensionContext, wait: Wait): Promise<boolean> {
@@ -490,7 +594,7 @@ export default function (pi: ExtensionAPI) {
 		for (const entry of ctx.sessionManager.getBranch() as any[]) {
 			if (entry?.type === "custom_message" && entry.customType === MESSAGE_TYPE) {
 				const d = entry.details as NoteDetails | undefined;
-				note = d && typeof d.hitAt === "number" ? d : undefined;
+				note = d && typeof d.hitAt === "number" && !d.compacted ? d : undefined;
 				ended = false;
 			} else if (note && entry?.type === "custom" && entry.customType === MESSAGE_TYPE && (entry.data as QuitMark | undefined)?.quit) {
 				ended = false;
@@ -506,10 +610,93 @@ export default function (pi: ExtensionAPI) {
 		if (ctx.hasUI) ctx.ui.notify(text, type);
 	}
 
+	/** Ends the compaction's wait and clears its status line entry. */
+	function stopCompactionWait(ctx = ctxRef) {
+		compaction = undefined;
+		if (ticker) clearInterval(ticker);
+		ticker = undefined;
+		compactionShown = undefined;
+		if (ctx?.hasUI) ctx.ui.setStatus(STATUS_KEY, undefined);
+	}
+
+	function showCompaction(ctx: ExtensionContext, text: string) {
+		if (text !== compactionShown && ctx.hasUI) ctx.ui.setStatus(STATUS_KEY, (compactionShown = text));
+	}
+
+	function armCompaction(ctx: ExtensionContext, wait: CompactionWait) {
+		compaction = wait;
+		compactionAsked = 0;
+		if (!ticker) {
+			ticker = setInterval(tickCompaction, TICK_MS);
+			ticker.unref?.();
+		}
+		tickCompaction();
+	}
+
+	/** Once a second while a compaction waits: its status line, and the retry once the limit reset and Pi is idle. */
+	function tickCompaction() {
+		const wait = compaction;
+		const ctx = ctxRef;
+		if (!wait || !ctx) return;
+		const now = Date.now();
+		let free = loginChangedAt > wait.hitAt;
+		const plan = source(ctx.model);
+		if (plan && now - compactionAsked >= USAGE_ASK_MS) {
+			compactionAsked = now;
+			plan.refresh().catch(() => {});
+		}
+		const answer = usage(ctx.model, wait.hitAt);
+		if (answer?.usedUp) {
+			wait.sawUsedUp = true;
+			if (answer.resetAt !== undefined) {
+				wait.resetAt = answer.resetAt;
+				wait.minute = true;
+			}
+		} else if (answer && wait.sawUsedUp && now >= wait.notBefore) {
+			// The window the limit was reached in is free again before its reset.
+			free = true;
+		}
+		const due = dueOf(wait);
+		if (!free && now < due) {
+			showCompaction(ctx, `⧗ compaction at ${when(due)} (in ${left(due - now)}) · esc cancels`);
+			return;
+		}
+		// A compaction ends a running run, so the retry waits for Pi to be idle.
+		if (!ctx.isIdle()) {
+			showCompaction(ctx, "⧗ compaction once Pi is idle · esc cancels");
+			return;
+		}
+		stopCompactionWait(ctx);
+		retrying = wait;
+		ctx.compact({
+			customInstructions: wait.instructions,
+			onComplete: () => {
+				retrying = undefined;
+				if (wait.reason === "overflow") continueAfterCompaction(wait);
+			},
+			// session_compact_failed takes the failure.
+			onError: () => {},
+		});
+	}
+
+	/** The run that overflowed continues once the compaction went through. */
+	function continueAfterCompaction(wait: CompactionWait) {
+		const details: NoteDetails = { hitAt: wait.hitAt, error: wait.error, resetAt: wait.resetAt, compacted: true };
+		try {
+			pi.sendMessage({ customType: MESSAGE_TYPE, content: noteText(details), display: true, details }, { triggerTurn: true });
+		} catch {
+			// The session was replaced meanwhile.
+		}
+	}
+
 	pi.registerMessageRenderer<NoteDetails>(MESSAGE_TYPE, (message, { outputPad }, theme) => {
 		const d = message.details;
 		const head = d ? (d.restarted ? "Pi restarted during the wait for the usage limit" : `Usage limit reached at ${when(d.hitAt)}`) : "Usage limit reached";
-		const line = d?.resetAt !== undefined ? `${head} · resets ${when(d.resetAt)} · the run continues after the reset` : `${head} · no reset time named · the run tries again at intervals`;
+		const line = d?.compacted
+			? `Usage limit reached at ${when(d.hitAt)} during a compaction · compacted after the reset · the run continues`
+			: d?.resetAt !== undefined
+				? `${head} · resets ${when(d.resetAt)} · the run continues after the reset`
+				: `${head} · no reset time named · the run tries again at intervals`;
 		const box = new Box(outputPad, 0, (t) => theme.bg("customMessageBg", t));
 		box.addChild(new Text(theme.fg("dim", `› ${line}`), 0, 0));
 		return box;
@@ -531,8 +718,8 @@ export default function (pi: ExtensionAPI) {
 		lastLimit = undefined;
 		refused = undefined;
 		hitAgain = false;
-		hits = 0;
-		probes = 0;
+		runTries.hits = 0;
+		runTries.probes = 0;
 		released = false;
 	};
 
@@ -542,6 +729,24 @@ export default function (pi: ExtensionAPI) {
 		setWaiting(false);
 		emitState();
 		pi.events.emit("plan-usage:source-request", undefined);
+		unsubscribeInput?.();
+		unsubscribeInput = undefined;
+		if (ctx.mode === "tui") {
+			unsubscribeInput = ctx.ui.onTerminalInput((data) => {
+				if (!compaction || !matchesKey(data, Key.escape)) return undefined;
+				if (!ctx.isIdle() || ctx.ui.getEditorText().trim()) return undefined;
+				stopCompactionWait(ctx);
+				notify(ctx, "The compaction no longer waits for the usage limit to reset: /compact tries it again.", "info");
+				return { consume: true };
+			});
+		}
+		const store = globalThis as { [HANDOVER]?: Handover };
+		const handed = store[HANDOVER];
+		delete store[HANDOVER];
+		if (event.reason === "reload" && handed && handed.file === ctx.sessionManager.getSessionFile()) {
+			Object.assign(compactionTries, handed.tries);
+			armCompaction(ctx, handed.wait);
+		}
 		if (event.reason !== "startup" && event.reason !== "resume" && event.reason !== "reload") return;
 		const note = pendingNote(ctx);
 		if (!note) return;
@@ -554,7 +759,7 @@ export default function (pi: ExtensionAPI) {
 		setTimeout(() => {
 			if (ctxRef !== ctx || armed || !ctx.isIdle()) return;
 			const now = Date.now();
-			firstAt = note.firstAt ?? note.hitAt;
+			runTries.firstAt = note.firstAt ?? note.hitAt;
 			armed = {
 				hitAt: now,
 				resetAt: note.resetAt,
@@ -564,7 +769,7 @@ export default function (pi: ExtensionAPI) {
 				again: false,
 				sawUsedUp: false,
 			};
-			const details: NoteDetails = { hitAt: note.hitAt, error: note.error, resetAt: note.resetAt, firstAt, restarted: true };
+			const details: NoteDetails = { hitAt: note.hitAt, error: note.error, resetAt: note.resetAt, firstAt: runTries.firstAt, restarted: true };
 			try {
 				pi.sendMessage({ customType: MESSAGE_TYPE, content: noteText(details), display: true, details }, { triggerTurn: true });
 			} catch {
@@ -584,9 +789,56 @@ export default function (pi: ExtensionAPI) {
 			}
 		}
 		abortedAt = 0;
+		// /reload hands the compaction's wait to the extension instance that follows.
+		const file = ctxRef?.sessionManager.getSessionFile();
+		if (event.reason === "reload" && compaction && file) {
+			(globalThis as { [HANDOVER]?: Handover })[HANDOVER] = { file, wait: compaction, tries: { ...compactionTries } };
+		}
+		stopCompactionWait();
+		retrying = undefined;
+		unsubscribeInput?.();
+		unsubscribeInput = undefined;
 		ctxRef = undefined;
 		reset();
 		setWaiting(false);
+	});
+
+	pi.on("session_before_compact", (event) => {
+		if (event.reason === "manual") instructions = event.customInstructions;
+	});
+
+	pi.on("session_compact", () => {
+		// A compaction went through: none needs to wait any more.
+		stopCompactionWait();
+		compactionTries.hits = 0;
+		compactionTries.probes = 0;
+	});
+
+	pi.on("session_compact_failed", (event, ctx) => {
+		ctxRef = ctx;
+		const mine = retrying;
+		retrying = undefined;
+		const text = event.errorMessage ?? "";
+		if (event.aborted || !LIMIT.test(text)) return;
+		const wait = waitFor(ctx, { text, at: Date.now() }, compactionTries, mine !== undefined, COMPACTION_WORDS);
+		if (!wait) return;
+		const reason = mine?.reason ?? event.reason;
+		const pending: CompactionWait = {
+			...wait,
+			reason,
+			instructions: mine ? mine.instructions : event.reason === "manual" ? instructions : undefined,
+			error: text,
+		};
+		armCompaction(ctx, pending);
+		const due = dueOf(pending);
+		const at = wait.resetAt === undefined ? `at ${when(due)}, as no reset time was named` : `once the limit resets, at ${when(due)}`;
+		notify(ctx, `The compaction is tried again ${at}${reason === "overflow" ? ", and the run continues then" : ""} (Esc cancels).`, "info");
+	});
+
+	pi.on("input", (event) => {
+		// A prompt goes first; Pi compacts before it when the context needs it.
+		if (event.source !== "extension" && compaction) stopCompactionWait();
+		return { action: "continue" };
 	});
 
 	pi.on("before_provider_request", () => {
@@ -614,8 +866,8 @@ export default function (pi: ExtensionAPI) {
 		lastLimit = undefined;
 		hitAgain = false;
 		if (message.stopReason !== "aborted") {
-			hits = 0;
-			probes = 0;
+			runTries.hits = 0;
+			runTries.probes = 0;
 		}
 	});
 
@@ -630,52 +882,15 @@ export default function (pi: ExtensionAPI) {
 		const last = messages[messages.length - 1];
 		if (!last || last.role !== "assistant" || last.stopReason !== "error") return undefined;
 
-		let found = textReset(hit.text, hit.at) ?? headerReset(hit.headers, hit.at);
-		if (!found) {
-			const plan = usage(ctx.model, 0);
-			if (plan?.usedUp && plan.resetAt !== undefined) found = { at: plan.resetAt, minute: true };
-		}
-		if (found) {
-			if (found.at - hit.at > MAX_WAIT_MS) {
-				notify(ctx, `The limit resets at ${when(found.at)}, more than eight days away, so the run does not wait: send a prompt then.`, "warning");
-				return undefined;
-			}
-		} else {
-			if (BILLING.test(hit.text)) return undefined;
-		}
-
 		// Omit the failed attempt from the model's context, as Pi's own retry does, so the run can continue.
 		const same = (m: (typeof messages)[number]) => m === last || (m.role === "assistant" && m.timestamp === last.timestamp && m.stopReason === "error");
 		const entry = [...event.context.contextEntries].reverse().find((e) => e.messages.some(same));
 		if (!entry) return undefined;
 
-		let wait: Wait;
-		if (found) hits = again ? hits + 1 : 1;
-		if (found && hits < MAX_HITS) {
-			probes = 0;
-			const span = Math.max(0, found.at - hit.at);
-			wait = {
-				hitAt: hit.at,
-				resetAt: found.at,
-				minute: found.minute,
-				notBefore: hits > 1 ? hit.at + REPEAT_MS : 0,
-				spread: Math.random() * (found.minute ? SPREAD_MS : Math.min(SPREAD_MS, span / 10)),
-				again: hits > 1,
-				sawUsedUp: false,
-			};
-		} else {
-			// No reset time, or the named one did not hold three times in a row: try again at intervals.
-			if (probes === 0) firstAt = hit.at;
-			if (hit.at - firstAt > MAX_WAIT_MS) {
-				notify(ctx, "The limit still refuses requests after eight days of tries: send a prompt to continue.", "warning");
-				return undefined;
-			}
-			const minutes = PROBE_MINUTES[Math.min(probes, PROBE_MINUTES.length - 1)];
-			probes++;
-			wait = { hitAt: hit.at, minute: false, notBefore: hit.at + minutes * 60_000, spread: 0, again: probes > 1, sawUsedUp: false };
-		}
+		const wait = waitFor(ctx, hit, runTries, again, RUN_WORDS);
+		if (!wait) return undefined;
 		armed = wait;
-		const details: NoteDetails = { hitAt: hit.at, error: hit.text, resetAt: wait.resetAt, firstAt: wait.resetAt === undefined ? firstAt : undefined };
+		const details: NoteDetails = { hitAt: hit.at, error: hit.text, resetAt: wait.resetAt, firstAt: wait.resetAt === undefined ? runTries.firstAt : undefined };
 		return {
 			entries: [
 				...event.entries,

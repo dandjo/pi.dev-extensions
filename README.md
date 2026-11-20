@@ -1893,13 +1893,25 @@ you send a prompt.
   longer trusted (Gemini names one of seconds for a used-up daily quota), and
   the run tries again at the intervals above. A reset more than eight days
   away, or tries over eight days, end the waiting with a notice.
+- A compaction that fails on a limit — `/compact`, or Pi's own when the
+  context fills up or overflows — is tried again once the limit resets, with
+  the reset worked out as above. Pi itself tries a failed compaction again
+  only before the next request of a run, and an idle session stays as it is.
+  The retry waits until Pi is idle, since a compaction ends a running run,
+  and goes as `/compact` with the instructions the failed one had. After one
+  that a context overflow started, the run that overflowed continues with a
+  note. Meanwhile the status line shows
+  `⧗ compaction at 11:41 (in 7m) · esc cancels`. Esc in an empty editor, a
+  prompt, or another compaction that succeeds ends the wait; `/claude-login`
+  starts the retry at once. The wait outlasts `/reload`, not a restart of Pi;
+  a context over the threshold compacts with the next run anyway.
 - If Pi ends during the wait (a reboot, `/quit`), the wait resumes when the
   session starts again before the reset; after the reset, a notice says to
   send a prompt. Esc during the wait is remembered as Esc: the session does
   not wait again on its next start.
 - The [tmux tab](#tmux-tab-activity) rests while a run waits, and the notice
-  of [claude-login](#claude-login) says that a waiting run continues on the
-  account `/claude-login` signs in.
+  of [claude-login](#claude-login) says that a waiting run or compaction goes
+  on with the account `/claude-login` signs in.
 
 ## context-gc
 
