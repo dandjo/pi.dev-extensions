@@ -1974,18 +1974,22 @@ long tool inputs.
 - The cuts are Pi's own context edits. The session file keeps everything: the
   transcript, `/tree`, exports, and the session totals stay complete, and
   going back with `/tree` to a point before a cut brings the full text back.
-- Every cut makes the provider write its prompt cache anew from the first
-  changed message, so it cuts in batches: at the end of a turn, once at least
-  100k tokens can go. When the cache is cold anyway, it cuts whatever it can
-  before the first request, so the cache is built from the smaller context
-  only: after an hour without a request (the lifetime of Claude Code's cache),
-  and after a switch to another model with `/model` or Ctrl+P, whose cache
-  holds nothing of the conversation. That request carries the cuts itself;
-  they are stored at the end of its turn.
+- With Claude, a cut makes the next request write every message to the prompt
+  cache anew, however far back the cut is: Claude Code and Pi's Anthropic
+  provider mark only the last message for the cache, and Anthropic's cache
+  looks back only about 20 blocks from a mark for a stored prefix. A cut
+  costs about as much as the whole context, so it cuts in batches: at the end
+  of a turn, once at least 100k tokens and 30 % of the context can go. When
+  the cache is cold anyway, it cuts whatever it can before the first request,
+  so the cache is built from the smaller context only: after an hour without
+  a request (the lifetime of Claude Code's cache), and after a switch to
+  another model with `/model` or Ctrl+P, whose cache holds nothing of the
+  conversation. That request carries the cuts itself; they are stored at the
+  end of its turn.
 - The system prompt carries a `context_gc` section that tells the model about
   the stubs: it should run the command or read the file again rather than
-  guess. Its text never changes, so the prompt cache keeps everything before
-  the first cut.
+  guess. Its text never changes, so the cached tools and system prompt stay
+  valid.
 - With `pi-claude-subscription` it needs the fixes of that provider's
   [pull request #4](https://github.com/jkeskikangas/pi-claude-subscription/pull/4):
   up to 0.2.4, after a change in older messages, the provider resumes its own
@@ -1994,18 +1998,18 @@ long tool inputs.
 - `/gc` cuts at the next request, regardless of the thresholds. `/gc status`
   shows the passes so far, the context, and what could go now. A notice names
   every cut.
-- Replayed over a month of sessions, the batch and cold cuts took about a
-  third off the tokens read from the cache, without more cache writes. Pi's
-  compaction still runs when the context fills up; it is needed far less
-  often.
+- Measured over four days of sessions with Claude (10,000 requests), the cuts
+  took a fifth off the tokens and 8.5 % off the cost at API prices; replayed
+  with the 30 % condition, 12 %. Pi's compaction still runs when the context
+  fills up; it is needed less often.
 - Settings, all optional, in `~/.pi/agent/context-gc.json`: `enabled` (true),
   `keepRecent` (10 responses), `minResultChars` (4000), `minArgChars` (2000),
-  `batchTokens` (100000), `coldMinutes` (60), `coldMinTokens` (5000),
-  `thinking`, `toolResults`, and `toolArgs` (true each), and `keepTools`
-  (`["agent", "ask_user_question"]`). Under `providers`, each of them can be
-  set for one provider and wins there over the top level: `coldMinutes`
-  follows the one-hour cache of `claude-sdk`, and a provider whose cache
-  lives shorter can cut sooner:
+  `batchTokens` (100000), `batchShare` (0.3), `coldMinutes` (60),
+  `coldMinTokens` (5000), `thinking`, `toolResults`, and `toolArgs` (true
+  each), and `keepTools` (`["agent", "ask_user_question"]`). Under
+  `providers`, each of them can be set for one provider and wins there over
+  the top level: `coldMinutes` follows the one-hour cache of `claude-sdk`, and
+  a provider whose cache lives shorter can cut sooner:
   `{"providers": {"openai": {"coldMinutes": 10}}}`.
 
 ## wait

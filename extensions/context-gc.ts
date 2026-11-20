@@ -6,19 +6,22 @@
  *   command or file and keeps the first and last lines. The session file keeps everything: the cuts are Pi's own
  *   context_edit entries, so the transcript, /tree, exports, and session totals stay complete, and navigating to a point
  *   before a cut brings the full text back.
- * - Every cut makes the provider write its prompt cache anew from the first changed message, so it cuts in batches:
- *   when at least 100k tokens can go, at the end of a turn. And when the cache is cold anyway, after an hour without
- *   a request or after a switch to another model (/model, Ctrl+P), it cuts whatever it can before the first request,
- *   so the cache is built from the smaller context only. That request carries the cuts itself; they are stored at
- *   the end of its turn.
- * - The system prompt carries a section that tells the model about the stubs. Its text stays the same, so the prompt
- *   cache keeps everything before the first cut.
+ * - With Claude, a cut makes the next request write every message to the prompt cache anew, wherever the cut is:
+ *   Claude Code and Pi's Anthropic provider mark only the last message for the cache, and Anthropic's cache looks
+ *   back only about 20 blocks from a mark for a stored prefix. A cut costs about as much as the whole context, so it
+ *   cuts in batches, at the end of a turn, when at least 100k tokens and 30 % of the context can go. And when the
+ *   cache is cold anyway, after an hour without a request or after a switch to another model (/model, Ctrl+P), it
+ *   cuts whatever it can before the first request, so the cache is built from the smaller context only. That request
+ *   carries the cuts itself; they are stored at the end of its turn.
+ * - The system prompt carries a section that tells the model about the stubs. Its text stays the same, so the cached
+ *   tools and system prompt stay valid.
  * - With pi-claude-subscription it needs the fixes of that provider's pull request #4 ("Resume correctly after edited
  *   history"): up to 0.2.4, after an edit in older messages, it resumes its own transcript at the last unchanged
  *   message and leaves out every later response. claude-sdk-resume-fix.ts brings the fixes in.
  * - /gc cuts at the next request, regardless of the thresholds; /gc status shows what was cut and what could go now.
  * - Settings in ~/.pi/agent/context-gc.json, every key optional: {"enabled": true, "keepRecent": 10,
- *   "minResultChars": 4000, "minArgChars": 2000, "batchTokens": 100000, "coldMinutes": 60, "coldMinTokens": 5000,
+ *   "minResultChars": 4000, "minArgChars": 2000, "batchTokens": 100000, "batchShare": 0.3, "coldMinutes": 60,
+ *   "coldMinTokens": 5000,
  *   "thinking": true, "toolResults": true, "toolArgs": true, "keepTools": ["agent", "ask_user_question"]}. Under
  *   "providers", every key can be set for one provider and wins there over the top level: coldMinutes matches the
  *   claude-sdk provider's prompt cache, which lives an hour, and a provider whose cache lives shorter can cut sooner
@@ -48,6 +51,8 @@ interface Config {
 	minResultChars: number;
 	minArgChars: number;
 	batchTokens: number;
+	/** The least share of the context a batch cut must take out. */
+	batchShare: number;
 	coldMinutes: number;
 	coldMinTokens: number;
 	thinking: boolean;
@@ -62,6 +67,7 @@ const DEFAULTS: Config = {
 	minResultChars: 4000,
 	minArgChars: 2000,
 	batchTokens: 100_000,
+	batchShare: 0.3,
 	coldMinutes: 60,
 	coldMinTokens: 5_000,
 	thinking: true,
@@ -369,6 +375,8 @@ export default function (pi: ExtensionAPI) {
 		if (!config.enabled || event.outcome !== "completed") return undefined;
 		const p = plan(event.context.contextEntries as unknown as Entry[], config);
 		if (p.edits.length === 0 || p.tokens < config.batchTokens) return undefined;
+		const context = ctx.getContextUsage()?.tokens;
+		if (context && p.tokens < config.batchShare * context) return undefined;
 		const pass = passes(ctx).pass + 1;
 		if (ctx.hasUI) ctx.ui.notify(`context-gc: cut ${describe(p)} from older turns (pass ${pass})`, "info");
 		return { entries: [...event.entries, ...drafts(p, pass, "batch")] };
@@ -432,7 +440,9 @@ export default function (pi: ExtensionAPI) {
 						`context-gc ${config.enabled ? "on" : "off"}: ${done.pass} pass${done.pass === 1 ? "" : "es"} cut ~${fmtTokens(done.tokens)} tokens so far.`,
 						`Context now: ${usage?.tokens != null ? `~${fmtTokens(usage.tokens)} tokens` : "unknown"}; ${age}.`,
 						p.edits.length ? `Could go now: ${describe(p)}.` : "Nothing older than the last responses to cut.",
-						`Batch cut from ${fmtTokens(config.batchTokens)} tokens, cold cut after ${config.coldMinutes} min; settings in ${CONFIG_FILE}.`,
+						`Batch cut from ${fmtTokens(config.batchTokens)} tokens and ` +
+							`${Math.round(config.batchShare * 100)} % of the context, ` +
+							`cold cut after ${config.coldMinutes} min; settings in ${CONFIG_FILE}.`,
 					].join("\n"),
 					"info",
 				);
