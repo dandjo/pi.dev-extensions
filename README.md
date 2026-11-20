@@ -1,18 +1,17 @@
 # Pi extensions
 
-Extensions for [Pi](https://pi.dev), the terminal coding agent, that bring
-over what Claude Code does: Pi runs Claude models on your Claude subscription,
-shows a status line with the subscription limits, searches and reads the web,
-keeps a memory per project as Claude Code does, titles every session and
-lights up its tmux tab while it works, lets sessions message each other, runs
-Claude Code's hooks, brings over Claude Code's subagents, questions, side
-questions, goals, loops, scheduled prompts, diff view, agent panel, and Remote
-Control for the Claude app, reads and changes OpenProject and GitLab, reads
-and writes the clipboard, reads PDF and Office documents as Markdown, controls
-your Chrome, keeps requests alive through network trouble, continues after a
-usage limit resets, keeps long conversations small, waits for pipelines and
-deploys without spending requests, keeps itself and the Claude Agent SDK
-current, and fixes how the provider resumes after edited history.
+Extensions for [Pi](https://pi.dev), the terminal coding agent, that bring over
+what Claude Code does: Pi runs Claude models on your Claude subscription, shows
+a status line with the subscription limits, searches and reads the web, keeps a
+memory per project as Claude Code does, titles every session and lights up its
+tmux tab while it works, lets sessions message each other, brings over Claude
+Code's subagents, questions, side questions, goals, loops, scheduled prompts,
+diff view, agent panel, and Remote Control for the Claude app, reads and changes
+OpenProject and GitLab, reads and writes the clipboard, controls your Chrome,
+keeps requests alive through network trouble, continues after a usage limit
+resets, keeps long conversations small, waits for pipelines and deploys without
+spending requests, keeps itself and the Claude Agent SDK current, and fixes how
+the provider resumes after edited history.
 
 Install it as a Pi package (step 3 of the setup below): its `package.json`
 names `extensions/`, which holds one file per extension.
@@ -25,7 +24,6 @@ names `extensions/`, which holds one file per extension.
 | `openproject.ts`            | Adds `openproject`: reads and changes OpenProject through its API v3, as you              | An OpenProject API token for each instance                       |
 | `gitlab.ts`                 | Adds `gitlab` and `gitlab_pipeline`: GitLab through its API, as you, and its CI in brief  | A GitLab personal access token for each instance                 |
 | `clipboard.ts`              | Adds `clipboard`: the model reads and writes the clipboard, text and images               | Linux: `wl-clipboard` (Wayland) or `xclip`                       |
-| `markitdown.ts`             | Adds `markitdown`: PDF, Office, EPUB, HTML, and CSV files as Markdown, through `read` too | `pdftotext` (Poppler) for PDF                                    |
 | `memory.ts`                 | Keeps a memory per project, shared with Claude Code's auto memory when it is there        | —                                                                |
 | `session-title.ts`          | Names each session after its first prompt and shows it in the terminal title              | —                                                                |
 | `tmux-tab-activity.ts`      | Turns Pi's spinner in its tmux tab while Pi, a subagent, or a background wait works       | tmux 3.2 or later, set up as its section describes               |
@@ -41,16 +39,13 @@ names `extensions/`, which holds one file per extension.
 | `auto-continue.ts`          | Waits out a used-up usage limit, quota, or rate limit and continues after the reset       | —                                                                |
 | `context-gc.ts`             | Cuts thinking and long tool outputs of older turns from the context, in batches           | —                                                                |
 | `wait.ts`                   | Adds `wait`: checks a command or tool until a condition holds, without model requests     | —                                                                |
-| `package-update.ts`         | Keeps this package and the marketplace packages current, and reloads Pi when they change  | The package installed with `pi install`                          |
+| `package-update.ts`         | Keeps this package current, and reloads Pi when it changes                                | The package installed with `pi install`                          |
 
 **Claude Code's formats, any model** (`claude-code-*`). They read Claude Code's
-plugins, hooks, and agent definitions and run them in Pi, whichever model
-answers.
+agent definitions and run them in Pi, whichever model answers.
 
 | Extension                   | What it does                                                                              | Needs                                                            |
 | :-------------------------- | :---------------------------------------------------------------------------------------- | :--------------------------------------------------------------- |
-| `claude-code-plugins.ts`    | Loads the plugins of Claude Code marketplaces into Pi; `/plugins` turns them on or off    | Each marketplace installed with `pi install`                     |
-| `claude-code-hooks.ts`      | Runs Claude Code's hooks, from settings files and plugins, at Pi's events                 | —                                                                |
 | `claude-code-agents.ts`     | Adds Claude Code's agent definitions, tool names, and model families to `agent`           | `subagents.ts`                                                   |
 
 **The Claude subscription** (`claude-*`). They need a Claude Code login and
@@ -86,9 +81,9 @@ missing. `web_search` comes from the npm package `pi-web-access`; see
 ## Why Pi instead of Claude Code
 
 With this setup, Pi is not a different Claude. The prompts run through Claude
-Code itself, on the same subscription, models, limits, and login, and the
-skills, hooks, agents, and memory of Claude Code work in Pi as well. Switching
-back and forth costs nothing: both use the same plugins and the same memory.
+Code itself, on the same subscription, models, limits, and login, and Claude
+Code's agents and memory work in Pi as well. Switching back and forth costs
+nothing: both use the same agent definitions and the same memory.
 What differs is the tool around the model.
 
 - **You can change everything.** An extension is one TypeScript file that Pi
@@ -96,7 +91,7 @@ What differs is the tool around the model.
   panels, and dialogs, see and change what goes to the model, and react to
   every step of a session. Claude Code offers hooks, skills, MCP servers, and
   a status line script; its interface and agent loop stay closed. All
-  thirty-two extensions here are such files: the GitLab and OpenProject
+  twenty-nine extensions here are such files: the GitLab and OpenProject
   tools, the plan limits in the status line, the diff panel, scheduled
   prompts, messages between sessions. Each can be read in one go, and a fix
   is a commit here, not a wait for the next Claude Code release.
@@ -130,7 +125,7 @@ Where Claude Code stays the better choice:
 ## Set up Pi
 
 Follow the steps in order — together they are the complete setup: Pi itself,
-the Claude subscription, all thirty-two extensions, and the browser
+the Claude subscription, all twenty-nine extensions, and the browser
 connection. Every step except the Chrome switch in step 4 is a shell command,
 so an agent can carry them out as well.
 
@@ -197,7 +192,7 @@ Install this repository as a Pi package:
 pi install git:github.com/dandjo/pi.dev-extensions
 ```
 
-Pi clones it into `~/.pi/agent/git/` and loads all thirty-two extensions
+Pi clones it into `~/.pi/agent/git/` and loads all twenty-nine extensions
 from there; `pi list` shows the package. [package-update](#package-update)
 brings new versions at every start, new and renamed extensions included, and
 reloads Pi once it is idle; `/update` fetches them at once. There is no build
@@ -262,7 +257,6 @@ Start Pi in a project, or run `/reload` in a running session:
   `π - <session title> - <directory>`.
 - With Pi running in a second terminal, `/peers` lists that session, and
   "Send the other session a hello" shows up there as `› Message from @…`.
-- `/hooks` lists the hooks from your Claude Code settings.
 - "Ask me with ask_user_question whether I prefer tea or coffee" shows a
   question dialog.
 - "Use an Explore subagent to find where the session title is set" runs a
@@ -322,8 +316,7 @@ needs nothing. What changes with a provider other than Claude:
 ## package-update
 
 Keeps this package of extensions current, and the packages other extensions
-ask for: [claude-code-plugins](#claude-code-plugins) asks for the Claude Code
-marketplaces. It needs nothing from any provider.
+ask for. It needs nothing from any provider.
 
 - The package is the one `pi install` put this file in. Every other installed
   package stays as it is until `pi update` by hand; `pi-web-access` is pinned
@@ -337,11 +330,10 @@ marketplaces. It needs nothing from any provider.
   for it and uses its result. A local folder is not updated, and subagent
   processes ([subagents](#subagents)) update nothing.
 - When an update changed what a package loads into Pi (`package.json` and the
-  extensions, skills, prompts, and themes it names, and for a marketplace the
-  plugins and their list in `.claude-plugin/marketplace.json`), Pi reloads by
-  itself, so the new extensions, skills, hooks, and agents apply without a
-  restart. Commits that change only other files update the package without a
-  reload.
+  extensions, skills, prompts, and themes it names, and the paths an asking
+  extension names), Pi reloads by itself, so the new extensions and skills
+  apply without a restart. Commits that change only other files update the
+  package without a reload.
 - The reload waits until Pi is at rest in the terminal: no response or
   compaction running, nothing queued, no prompt just submitted, and the empty
   prompt editor in focus. An open selector such as `/resume` or `/model`, a
@@ -354,94 +346,6 @@ marketplaces. It needs nothing from any provider.
   with an id and its packages (source, folder, a label, and the paths whose
   change needs a reload) at load and whenever `package-update:request` comes;
   a request sent again under the same id replaces the earlier one.
-
-## claude-code-plugins
-
-Brings the plugins of Claude Code marketplaces — their skills, hooks, and
-agents — into Pi. It reads Claude Code's plugin format and needs no Claude
-model: the plugins work with any provider.
-
-- A marketplace is a Pi package whose folder holds
-  `.claude-plugin/marketplace.json`, installed for you (not with `--local`)
-  from git or from a local folder. Without one the extension only offers
-  `/plugins`, for the plugins Claude Code installed; it clones nothing itself.
-
-  ```bash
-  pi install git:git@github.com:acme/claude-marketplace
-  pi install https://example.com/team/plugins.git
-  ```
-
-  When the repository's root holds a `skills/` folder as well (a marketplace
-  that is a single plugin), Pi loads those skills a second time, without the
-  plugin prefix; `pi config` turns them off.
-- [package-update](#package-update) keeps the marketplaces current: this
-  extension asks it to, with the plugins and their list as what needs a
-  reload. Without it a marketplace stays as installed until `pi update` by
-  hand.
-- Builds a copy of every plugin listed in `.claude-plugin/marketplace.json`
-  whose source is a folder of the marketplace, in
-  `~/.pi/agent/claude-code-marketplaces/<name>/plugins`, `<name>` taken from
-  the package folder, and adapts it to Pi:
-  - Skill names carry the plugin, since Pi has no plugin namespaces:
-    `/my-plugin:guidelines` becomes `/skill:my-plugin-guidelines`. References
-    between the skills of a marketplace are rewritten the same way.
-  - `${CLAUDE_SKILL_DIR}` and `${CLAUDE_PLUGIN_ROOT}` are replaced with the
-    absolute paths of the copy, because Pi does not substitute them.
-
-  The copy of a package from git is rebuilt when its commit changes, so after
-  an update at the next load, the copy of a local folder at every start, so
-  that changes not yet committed show. Both happen while Pi loads its
-  extensions, before the session starts, so the SessionStart hooks of the
-  plugins run from the current copy, on the very first start too.
-- The plugins' `hooks/` and `scripts/` are mirrored as they are, and every
-  mirrored plugin is linked into `~/.pi/agent/claude-code-plugins/<plugin>`,
-  where [claude-code-hooks](#claude-code-hooks) and
-  [claude-code-agents](#claude-code-agents) look for
-  Claude Code plugins, so their hooks and agents work in Pi as in Claude
-  Code. The links are made at every start and
-  removed when a marketplace is. A plugin name two
-  marketplaces share goes to the first. Links into a copy follow the copies,
-  and so does a broken link of a mirrored plugin's name; any other entry there
-  is left alone.
-- Every plugin, and every skill of a mirrored plugin, is on unless a switch
-  file turns it off: `~/.pi/agent/claude-code-plugins.json` for you, and the
-  project's `.pi/claude-code-plugins.json` over it once Pi trusts the project.
-  A skill goes by Claude Code's name, `<plugin>:<skill>`:
-
-  ```json
-  {
-    "plugins": { "my-plugin": false },
-    "skills": { "other-plugin:review": false }
-  }
-  ```
-
-  In a project, `true` turns on what your file turns off, so
-  `{"plugins": {"my-plugin": true}}` in one project brings it back there.
-  Pi loads only the skills that are on, of plugins that are on;
-  [claude-code-hooks](#claude-code-hooks) and
-  [claude-code-agents](#claude-code-agents) skip a plugin that is off, the
-  copy Claude Code installed included. The links stay, since one project may
-  need what another turns off. Pi asks for project trust only for its own
-  protected files (`.pi/settings.json`, `.pi/extensions/`, …), so a project
-  with nothing but this file counts as trusted.
-- `/plugins` lists the plugins Pi uses with their skills below them, like
-  `/settings`: Enter or Space switches the selected one, typing searches, Tab
-  moves between your file and the project's, where a row can also follow your
-  setting. Every switch is saved at once, and Pi reloads when the list closes.
-  Without the TUI, `/plugins` prints the list.
-- `/plugins list` prints the plugins with what they bring (skills, hooks,
-  agents) and the switches that are set; `/plugins enable|disable|reset <name>`
-  sets one, in your file or with `--project` in the project's, and Pi
-  reloads. `<name>` is a plugin or `<plugin>:<skill>`; Pi's skill name
-  (`other-plugin-review`) works too. In your file `enable` removes the
-  switch, as on is the default there; `reset` removes it in either file.
-  Other sessions take a change at their next start or reload, their hooks
-  already at their next prompt.
-- Pi warns at start about skill descriptions longer than 1,024 characters (the
-  skill loads anyway).
-- Never edit the package's clone in `~/.pi/agent/git/` or the copies in
-  `~/.pi/agent/claude-code-marketplaces/`: every update resets the clone and
-  rebuilds the copies.
 
 ## statusline
 
@@ -992,43 +896,6 @@ command for me".
 - For yourself, Pi already has `/copy` and `Ctrl+X` (copy the last answer)
   and `Ctrl+V` (paste text or an image into the editor).
 
-## markitdown
-
-Adds the `markitdown` tool, with which the model reads a document as
-Markdown: "what does the offer in the PDF cost", "compare the two Word
-files". It follows Microsoft's
-[markitdown](https://github.com/microsoft/markitdown), written anew in
-TypeScript, without Python and without dependencies.
-
-- It reads PDF, Word (`.docx`), PowerPoint (`.pptx`), Excel (`.xlsx`), EPUB,
-  HTML, CSV and TSV, Jupyter notebooks, RSS and Atom feeds, and ZIP archives
-  of these, under a heading per file. `offset` and `limit` page through the
-  Markdown's lines as `read` pages through a file, cut at the same 2,000 lines
-  or 50 KB; `saveTo` writes the whole Markdown to a file instead, for grep and
-  `read`.
-- `read` returns PDF, Office, EPUB, and ZIP files as the same Markdown, with
-  `offset` and `limit` counting its lines, so the model gets text instead of
-  bytes whichever of the two tools it picks. Other files read as before.
-- The Markdown follows markitdown's, checked against its test files:
-  headings, lists, tables, links, footnotes, and equations (as LaTeX) of Word
-  documents; titles, text, tables, charts as tables, picture placeholders, and
-  notes of slides; a table per sheet; the article of a page saved from
-  Wikipedia or another MediaWiki site. Pictures stay placeholders; their bytes
-  are never read.
-- PDF goes through `pdftotext` from Poppler, which has to be on the `PATH`:
-  `poppler-utils` on Debian, Ubuntu, and Fedora, `brew install poppler` on
-  macOS. The text comes page by page, a marker before each page, and pages
-  laid out as forms or borderless tables become Markdown tables, as
-  markitdown finds them. A scan without a text layer has no text, and there
-  is no OCR; the tool then says so.
-- Not converted: the old binary Office formats (`.doc`, `.xls`, `.ppt`),
-  OpenDocument, and Outlook messages; the tool says how to save them in a
-  format it reads. Unlike markitdown, it reads no images, audio, or YouTube
-  videos and calls no cloud service.
-- Files up to 256 MB, ZIP archives that unpack to at most 512 MB, archives in
-  archives two levels deep, and two minutes of `pdftotext` per PDF. The last
-  eight documents stay converted while their size and time stay the same.
-
 ## memory
 
 Gives Pi a memory per project, kept the way Claude Code keeps its auto
@@ -1262,60 +1129,6 @@ summary — not the conversation or its files.
   Subagent processes bind no inbox, so they never appear in the list. Tested
   on Linux; on native Windows the extension stays out (no tools, no warning).
 
-## claude-code-hooks
-
-Runs the hooks Claude Code would run, at the matching Pi events, with Claude
-Code's [hook protocol](https://code.claude.com/docs/en/hooks): the event as
-JSON on stdin, exit code 2 blocks, one JSON object on stdout decides. It needs
-no Claude model: the hooks run whichever model answers.
-
-- Sources: `~/.claude/settings.json`; the project's `.claude/settings.json`
-  and `.claude/settings.local.json` once Pi trusts the project; and
-  `hooks/hooks.json` of every Claude Code plugin in
-  `~/.pi/agent/claude-code-plugins/<plugin>/` (a directory or a link to one;
-  [claude-code-plugins](#claude-code-plugins) links its plugins there) and of
-  every plugin Claude Code installed for you and enabled in
-  `~/.claude/settings.json` (`enabledPlugins`; a plugin of the same name in
-  `claude-code-plugins` replaces it), with
-  `CLAUDE_PLUGIN_ROOT` set to the plugin and `CLAUDE_PLUGIN_DATA` to
-  `~/.pi/agent/plugin-data/<plugin>`; not of a plugin the switch files of
-  [claude-code-plugins](#claude-code-plugins) turn off.
-  `disableAllHooks: true` in a settings file turns them all off. The files
-  are read again before every prompt.
-- Events: `SessionStart` (at start, resume, `/new`, fork, reload, and after
-  compaction; its output goes into the system prompt), `UserPromptSubmit`,
-  `PreToolUse` (`deny` and exit 2 block the call, `ask` asks you,
-  `updatedInput` rewrites it), `PostToolUse` and `PostToolUseFailure`
-  (feedback is appended to the tool result, `updatedToolOutput` replaces it),
-  `Stop` (continues the run, at most eight times in a row), `PreCompact`,
-  `PostCompact`, `SessionEnd`, `Notification` (`idle_prompt` after 60 seconds
-  idle), and inside subagents `SubagentStart` and `SubagentStop`. Other events
-  never fire in Pi.
-- Under the `claude-sdk` provider, the Claude Code process behind it runs
-  `SessionStart`, `UserPromptSubmit`, and `Stop` hooks itself: those of the
-  plugins your managed settings enable (an organization's server-managed
-  settings, or `managed-settings.json` of the system), from the copy Claude
-  Code installed for them. Pi leaves out every handler of its own that this
-  copy has the same, so its output reaches the model once. `SessionStart`
-  hooks still run in Pi; their context goes into the system prompt only
-  while the model is on another provider. `/hooks` marks these handlers.
-- Handler types `command` and `http`, with `matcher`, `if`, `timeout`,
-  `async`, `asyncRewake`, and `onFailure`. `prompt`, `agent`, and `mcp_tool`
-  hooks are skipped. A command runs in `bash`, or with `"shell": "powershell"`
-  in `pwsh`; on Windows in the shells Pi itself uses there (Git Bash, and
-  PowerShell 7 or Windows PowerShell), not in WSL.
-- Tools reach hooks under Claude Code's names and input fields: `bash` as
-  `Bash` with `command`; `read`, `write`, and `edit` as `Read`, `Write`, and
-  `Edit` with an absolute `file_path` (an edit also with `old_string`,
-  `new_string`, and `edits[]`); `grep` as `Grep`; `find` as `Glob`; the tools
-  of these extensions as their Claude Code originals, `agent` as `Agent`,
-  `ask_user_question` as `AskUserQuestion`, and so on. MCP tools keep their
-  `mcp__…` names.
-- Skill references in hook output get Pi's names: `my-plugin:my-skill`
-  becomes `my-plugin-my-skill`.
-- Hooks run as your user, with your environment, like every extension.
-  `/hooks` lists what is configured and what Pi skips.
-
 ## ask-user-question
 
 `ask_user_question`, shaped like Claude Code's `AskUserQuestion`, so skills
@@ -1365,18 +1178,16 @@ interrupt it, and answer its questions, and it stays alive after its report.
   — Markdown with `name`, `description`, `tools`, `disallowedTools`, `model`,
   `effort`, `maxTurns`, `skills`, `omitClaudeMd`, `background` — from
   `~/.pi/agent/agents/` and the trusted project's `.pi/agents/`.
-  [claude-code-agents](#claude-code-agents) adds Claude Code's directories
-  and plugins.
+  [claude-code-agents](#claude-code-agents) adds Claude Code's directories.
 - A subagent gets the parent's active tools, narrowed by its definition, whose
   `tools` and `disallowedTools` name Pi tools (`read`, `bash`, …). It never
   gets the cron tools, `list_agents`, or `send_message`, and subagents nest at
   most three levels deep. MCP servers start in it only when its tools name an
-  MCP tool. Hooks run inside it too, with `agent_id` and `agent_type` in every
-  event.
+  MCP tool.
 - A subagent's dialogs open in your session, one at a time, titled with the
   agent: the questions of `ask_user_question`, which it has where the session
-  has a user interface, and a hook's confirmation. The questions look as the
-  session's own do: tabs, multi-select, previews, and the mouse (see
+  has a user interface, and an extension's confirmation. The questions look as
+  the session's own do: tabs, multi-select, previews, and the mouse (see
   [ask-user-question](#ask-user-question)). Without a user interface the
   dialogs are declined. Its notifications, status entries, and widgets stay
   with it.
@@ -1471,12 +1282,8 @@ Brings Claude Code's agent definitions and settings to the `agent` tool of
 Without `subagents.ts` it does nothing.
 
 - Definitions from `~/.claude/agents/` (`$CLAUDE_CONFIG_DIR/agents`), above
-  `~/.pi/agent/agents/`; from the trusted project's `.claude/agents/`, at every
-  level up to the repository root, below that level's `.pi/agents/`; and from
-  `agents/` of the plugins in `~/.pi/agent/claude-code-plugins/` and of the plugins Claude Code installed for you and
-  enabled, as `<plugin>:<name>`, below every user and project agent; not of a
-  plugin the switch files of [claude-code-plugins](#claude-code-plugins) turn
-  off.
+  `~/.pi/agent/agents/`, and from the trusted project's `.claude/agents/`, at
+  every level up to the repository root, below that level's `.pi/agents/`.
 - Tool entries in Claude Code's names (`Read`, `Bash`, `Glob`, …) and
   permission rules (`Bash(git *)`) name the matching Pi tools, in every
   definition, those in `.pi/agents/` included.

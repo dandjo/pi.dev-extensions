@@ -9,8 +9,7 @@
  *   a user or project agent named like a built-in replaces it.
  * - Tools: the parent's active tools, narrowed by the definition, whose entries name Pi tools unless a provider
  *   translates them. A subagent never gets ask_user_question, the cron and loop tools, or cross-session messaging;
- *   agent only up to three levels deep. MCP servers start only when the subagent's tools name an MCP tool. Hooks
- *   (claude-code-hooks.ts) run inside it too.
+ *   agent only up to three levels deep. MCP servers start only when the subagent's tools name an MCP tool.
  * - Model: the call's model, else the definition's, else a provider's default, else the current model, at the
  *   parent's thinking level unless the definition sets effort. A model is a full id, inherit (the current model), a
  *   tier, or a model family a provider names:
@@ -48,8 +47,8 @@
  *   conversation without starting a turn. "subagents:interrupt" stops what it is doing and leaves it waiting for an
  *   instruction (five minutes, then it counts as stopped); "subagents:stop" ends it. background-agents.ts offers all
  *   three in the agent's transcript.
- * - A subagent's dialogs (ask_user_question, a hook's confirmation) open in this session, titled with the agent, one
- *   at a time; without a user interface here they are declined. Its ask_user_question questions come as one request
+ * - A subagent's dialogs (ask_user_question, an extension's confirmation) open in this session, titled with the agent,
+ *   one at a time; without a user interface here they are declined. Its ask_user_question questions come as one request
  *   (QUESTIONS_RELAY) and are shown by ask-user-question.ts in the dialog this session's own questions get.
  * - The agent call is drawn like Pi's own tools: its call as the title, while it runs its latest two tool calls, then
  *   the first line of its report with Pi's note on the lines that are hidden, and its figures last, as bash ends with
@@ -1342,8 +1341,8 @@ Usage notes:
  * /agents, /cron, and /memory, and the frame and scrolling of the boxes /btw and the /diff dialog show above the
  * prompt.
  *
- * background-agents.ts, btw.ts, claude-code-hooks.ts, claude-remote-control.ts, diff.ts, memory.ts, scheduled-tasks.ts carry
- * a copy of this block, or of a part of it: change them alike.
+ * background-agents.ts, btw.ts, claude-remote-control.ts, diff.ts, memory.ts, scheduled-tasks.ts carry a copy of this
+ * block, or of a part of it: change them alike.
  */
 const OVERLAY_OPTIONS = { anchor: "center", width: "90%", maxHeight: "90%", margin: 1 } as const;
 

@@ -7,18 +7,16 @@
  *   (with -e, say) it has none, and only the packages other extensions ask for are updated.
  * - Other extensions ask over the event bus, whatever the load order: "package-update:packages" carries a
  *   PackageUpdateRequest, at load and on every "package-update:request"; a request sent again under the same id
- *   replaces the earlier one. claude-code-plugins.ts asks for the Claude Code marketplaces this way. Every other
- *   installed package stays as it is until `pi update` by hand.
+ *   replaces the earlier one. Every other installed package stays as it is until `pi update` by hand.
  * - On every Pi start, `pi update <source>` brings each of these git or npm packages up to date in the background, as
  *   by hand, but in a child process whose output stays out of the terminal, and git never prompts
  *   (GIT_TERMINAL_PROMPT=0, SSH in batch mode). One Pi process updates at a time; one starting meanwhile waits and uses
  *   the result. Local folders are not updated, and subagent processes and Pi with PI_OFFLINE set update nothing.
  * - When an update changed what a package loads into Pi (package.json and the extensions, skills, prompts, and themes
- *   it names, and the paths the asking extension named, such as a marketplace's plugins), Pi reloads by itself as soon
- *   as it is at rest in the terminal: no run or compaction, nothing queued, no prompt just submitted, and the empty
- *   prompt editor in focus, so no selector or dialog is open and no typing is lost. Until then what was loaded before
- *   stays active. A change found by an update of another Pi process counts too. /update updates and reloads right
- *   away.
+ *   it names, and the paths the asking extension named), Pi reloads by itself as soon as it is at rest in the terminal:
+ *   no run or compaction, nothing queued, no prompt just submitted, and the empty prompt editor in focus, so no
+ *   selector or dialog is open and no typing is lost. Until then what was loaded before stays active. A change found by
+ *   an update of another Pi process counts too. /update updates and reloads right away.
  */
 
 import {

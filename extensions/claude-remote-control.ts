@@ -1236,10 +1236,10 @@ interface ClaudeLoginRefusal {
 }
 
 /**
- * Claude Code <-> Pi tool names and inputs, shared by the extensions that speak Claude Code's formats (hooks, subagent
- * definitions).
+ * Claude Code <-> Pi tool names and inputs, shared by the extensions that speak Claude Code's formats (subagent
+ * definitions, Remote Control).
  *
- * claude-code-agents.ts, claude-code-hooks.ts carry a copy of this block, or of a part of it: change them alike.
+ * claude-code-agents.ts carries a copy of a part of this block: change them alike.
  */
 /** Pi tool name -> Claude Code tool name. Tools without an entry keep their name (MCP tools, other extension tools). */
 const PI_TO_CLAUDE: Record<string, string> = {
@@ -1370,8 +1370,8 @@ function toClaudeResponse(
  * /agents, /cron, and /memory, and the frame and scrolling of the boxes /btw and the /diff dialog show above the
  * prompt.
  *
- * background-agents.ts, btw.ts, claude-code-hooks.ts, diff.ts, memory.ts, scheduled-tasks.ts, subagents.ts carry a copy of
- * this block, or of a part of it: change them alike.
+ * background-agents.ts, btw.ts, diff.ts, memory.ts, scheduled-tasks.ts, subagents.ts carry a copy of this block, or of
+ * a part of it: change them alike.
  */
 /** Draws a rounded frame around `body`, with `title` in the top edge and `help` (the keys) as its last line. */
 function frame(theme: Theme, width: number, title: string, body: string[], help: string): string[] {

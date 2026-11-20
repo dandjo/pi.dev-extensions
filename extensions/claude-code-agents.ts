@@ -2,11 +2,9 @@
  * Claude Code agents: Claude Code's agent definitions and settings for the agent tool of subagents.ts
  * (https://code.claude.com/docs/en/sub-agents). It reads Claude Code's formats only and works with any provider.
  *
- * - Agent definitions from ~/.claude/agents (CLAUDE_CONFIG_DIR is honoured), above ~/.pi/agent/agents; from
+ * - Agent definitions from ~/.claude/agents (CLAUDE_CONFIG_DIR is honoured), above ~/.pi/agent/agents, and from
  *   <project>/.claude/agents at every level of the walk up, below that level's .pi/agents, once the project is
- *   trusted; and from agents/ of every Claude Code plugin in ~/.pi/agent/claude-code-plugins (one directory per
- *   plugin) and of every plugin Claude Code installed for the user and enabled in its user settings, named
- *   <plugin>:<name>, unless the switch files of claude-code-plugins.ts turn the plugin off.
+ *   trusted.
  * - Tool entries of every definition in Claude Code's names (Read, Bash, Glob, …) and permission rules (Bash(git *))
  *   name the matching Pi tools (CLAUDE_TO_PI below).
  * - model: sonnet, opus, haiku, and fable resolve to the newest model of that family on the current provider. They
@@ -19,8 +17,7 @@
  * All of it reaches subagents.ts through the event bus ("subagents:provider"); without it this file does nothing.
  */
 
-import { type ExtensionAPI, getAgentDir } from "@earendil-works/pi-coding-agent";
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import * as os from "node:os";
 import * as path from "node:path";
 
@@ -29,76 +26,10 @@ function claudeDir(): string {
 }
 
 /**
- * Whether a plugin is on: the switch files of claude-code-plugins.ts can turn it off, claude-code-plugins.json in Pi's
- * agent directory and, once the project is trusted, <cwd>/.pi/claude-code-plugins.json over it ("plugins":
- * {"<name>": false}; a project's true turns on what the user's file turns off). A file that cannot be read counts as
- * none. claude-code-hooks.ts carries a copy of this function, claude-code-plugins.ts the same rule: change them alike.
- */
-function pluginOn(name: string, cwd: string, trusted: boolean): boolean {
-	const files = [path.join(getAgentDir(), "claude-code-plugins.json")];
-	if (trusted) files.push(path.join(cwd, ".pi", "claude-code-plugins.json"));
-	let on = true;
-	for (const file of files) {
-		try {
-			const value = JSON.parse(readFileSync(file, "utf8"))?.plugins?.[name];
-			if (typeof value === "boolean") on = value;
-		} catch {
-			// no such file, or not JSON
-		}
-	}
-	return on;
-}
-
-/**
- * The Claude Code plugins Pi uses, by name: every directory in ~/.pi/agent/claude-code-plugins (or a link to one),
- * then the plugins Claude Code installed for the user (plugins/installed_plugins.json) and enabled in
- * its user settings (enabledPlugins), at their installPath. Of two plugins of one name, the one found first wins; a
- * plugin the switch files turn off (pluginOn) is left out, in either place.
- * claude-code-hooks.ts carries a copy of this function: change them alike.
- */
-function claudePlugins(cwd: string, trusted: boolean): { name: string; root: string }[] {
-	const plugins = new Map<string, string>();
-	const linked = path.join(getAgentDir(), "claude-code-plugins");
-	try {
-		for (const name of readdirSync(linked).sort()) {
-			if (!pluginOn(name, cwd, trusted)) continue;
-			try {
-				if (statSync(path.join(linked, name)).isDirectory()) plugins.set(name, path.join(linked, name));
-			} catch {
-				// a broken link
-			}
-		}
-	} catch {
-		// no such folder
-	}
-	const json = (file: string): any => {
-		try {
-			return JSON.parse(readFileSync(file, "utf8"));
-		} catch {
-			return undefined;
-		}
-	};
-	const installed = json(path.join(claudeDir(), "plugins", "installed_plugins.json"))?.plugins ?? {};
-	const enabled = json(path.join(claudeDir(), "settings.json"))?.enabledPlugins ?? {};
-	for (const id of Object.keys(installed).sort()) {
-		const name = id.split("@")[0];
-		if (!name || enabled[id] !== true || plugins.has(name) || !Array.isArray(installed[id])) continue;
-		if (!pluginOn(name, cwd, trusted)) continue;
-		const entry = installed[id].find((e: any) => e?.scope === "user" && typeof e.installPath === "string");
-		if (entry && existsSync(entry.installPath)) plugins.set(name, entry.installPath);
-	}
-	return [...plugins].map(([name, root]) => ({ name, root }));
-}
-
-function pluginAgentDirs(cwd: string, trusted: boolean): { plugin: string; dir: string }[] {
-	return claudePlugins(cwd, trusted).map(({ name, root }) => ({ plugin: name, dir: path.join(root, "agents") }));
-}
-
-/**
- * Claude Code <-> Pi tool names and inputs, shared by the extensions that speak Claude Code's formats (hooks, subagent
- * definitions).
+ * Claude Code <-> Pi tool names and inputs, shared by the extensions that speak Claude Code's formats (subagent
+ * definitions, Remote Control).
  *
- * claude-code-hooks.ts, claude-remote-control.ts carry a copy of this block, or of a part of it: change them alike.
+ * claude-remote-control.ts carries a copy of a part of this block: change them alike.
  */
 /** Claude Code tool name -> the Pi tools that provide it. An empty list: Pi has no equivalent. */
 const CLAUDE_TO_PI: Record<string, string[]> = {
@@ -172,16 +103,8 @@ interface SubagentsProvider {
 }
 
 export default function (pi: ExtensionAPI) {
-	// The session's directory and whether its project is trusted, for the project's plugin switches.
-	let cwd = process.cwd();
-	let trusted = false;
-	pi.on("session_start", (_event, ctx) => {
-		cwd = ctx.cwd;
-		trusted = ctx.isProjectTrusted();
-	});
 	const provider: SubagentsProvider = {
 		id: "claude-code-agents",
-		pluginAgentDirs: () => pluginAgentDirs(cwd, trusted),
 		userAgentDirs: () => [path.join(claudeDir(), "agents")],
 		projectAgentDirs: (dir) => [path.join(dir, ".claude", "agents")],
 		toolNames: piToolNames,
