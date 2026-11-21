@@ -46,8 +46,9 @@
  *   scheduled-tasks.ts shows a task: what the wait waits for and until when, since when, when it gives up, its checks,
  *   its command, and the end of the last check's output, kept current; x cancels the wait, Esc closes the box. x in
  *   the panel cancels it as well (background-waits:cancel).
- * - Scheduled tasks (scheduled-tasks.ts, scheduled-tasks:state) are listed below them with their schedule and next
- *   run: Enter opens the task in its manager, x deletes it. The panel also exists while only waits or tasks are there.
+ * - Scheduled tasks (scheduled-tasks.ts, scheduled-tasks:state) are listed below them as well: scheduled or loop
+ *   where an agent has its type, then their prompt, and at the end their id, schedule, and next run: Enter opens the
+ *   task in its manager, x deletes it. The panel also exists while only waits or tasks are there.
  * - The mouse: the row under the pointer gets the selection marker, and when the pointer leaves the panel the marker
  *   goes back to the row selected with the keys (none while the prompt has the focus); Pi reports no leaving, so the
  *   TUI's mouse moves are observed (observeMouseMoves). A key that acts on a row (↑↓, Enter, x) acts on the one with
@@ -966,8 +967,8 @@ export default function (pi: ExtensionAPI) {
 				: entry.kind === "wait"
 					? entry.wait.tool
 					: entry.task.kind === "loop wakeup"
-						? "↻ loop"
-						: "↻ scheduled";
+						? "loop"
+						: "scheduled";
 		const nameWidth = Math.min(MAX_NAME_WIDTH, Math.max(4, ...list.map((e) => label(e).length)));
 		const now = Date.now();
 		const statuses = visible.map((e) =>
@@ -975,7 +976,7 @@ export default function (pi: ExtensionAPI) {
 				? statusText(e.row)
 				: e.kind === "wait"
 					? `${e.wait.id} · ${elapsed(now - e.wait.startedAt)} · ${e.wait.checks} check${e.wait.checks === 1 ? "" : "s"}`
-					: `${e.task.kind === "loop wakeup" ? "" : `${e.task.schedule} · `}next ${e.task.next}`,
+					: `${e.task.id} · ${e.task.kind === "loop wakeup" ? "" : `${e.task.schedule} · `}next ${e.task.next}`,
 		);
 		const description = (e: Entry) =>
 			e.kind === "agent" ? e.row.description : e.kind === "wait" ? `${e.wait.label}${e.wait.last ? ` · ${e.wait.last}` : ""}` : e.task.prompt;

@@ -1338,9 +1338,9 @@ Claude Code, the prompt writes to the agent shown, and Esc interrupts it.
   last check's output, kept current while it runs. `x` cancels it there too,
   Esc closes the box.
 - Scheduled tasks ([scheduled-tasks](#scheduled-tasks)) are listed below them,
-  marked `↻`, with their prompt, schedule, and next run. Enter opens the task
-  in the task manager, `x` deletes it. The panel also appears while only waits
-  or tasks are there.
+  the same way: `scheduled` or `loop`, their prompt, and at the end their id,
+  schedule, and next run. Enter opens the task in the task manager, `x`
+  deletes it. The panel also appears while only waits or tasks are there.
 - In fullscreen mode the row under the pointer gets the arrow and the
   selection background, as in the `ask_user_question` dialog; when the pointer
   leaves the panel, the marker goes back to the row selected with the keys, or
