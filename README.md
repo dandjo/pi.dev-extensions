@@ -971,9 +971,11 @@ spinners of all tabs turn in step.
   of the `π`. The frames are Pi's own, `⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏`, one every 80 ms, each
   taken from the clock, so all tabs show the same frame.
 - It pauses while an `ask_user_question` dialog waits, when the tab's bell takes
-  over, and while a run waits for a usage limit to reset
-  ([auto-continue](#auto-continue)). It puts Pi's own title back when Pi
-  settles, no subagent works, and no background wait runs.
+  over, while a run waits for a usage limit to reset
+  ([auto-continue](#auto-continue)), and while a run only waits in its own
+  `agent` calls whose subagents all wait (for your instruction, an answer, or
+  a usage limit). It puts Pi's own title back when Pi settles, no subagent
+  works, and no background wait runs.
 - A window with several panes shows the pane whose Pi works: the active
   pane's while it works, else the first other pane's that works, else the
   active pane's. While another pane works, the tab shows that pane's name, so

@@ -11,7 +11,8 @@
  * ⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏, one every 80 ms, each taken from the clock, so all tabs show the same frame. It stops when Pi settles,
  * no subagent works, and no background wait runs, pauses while an ask_user_question dialog waits (the tab's bell shows
  * then), and puts Pi's own title back. A run that waits for a usage limit to reset (auto-continue.ts,
- * "auto-continue:state") does not count as work meanwhile.
+ * "auto-continue:state") does not count as work meanwhile, nor does a run that only waits in agent calls of its own
+ * whose subagents all wait (for an instruction, an answer, or a usage limit).
  *
  * A window with several panes shows the pane whose Pi works: the active pane's while it works, else the first other
  * pane's that works, else the active pane's. While another pane works, the tab shows that pane's name, so its width
@@ -74,6 +75,8 @@ const QUESTIONS_CLOSE = "ask-user-question:close";
 /** auto-continue.ts: whether the run waits for a usage limit to reset ({ waiting }), and the request for it. */
 const LIMIT_STATE = "auto-continue:state";
 const LIMIT_REQUEST = "auto-continue:state-request";
+/** The tool of subagents.ts: a call of it in the foreground waits for its subagent. */
+const AGENT_TOOL = "agent";
 
 function tmuxOption(name: string): Promise<string> {
 	return new Promise((resolve) => {
@@ -113,6 +116,11 @@ export default function (pi: ExtensionAPI) {
 	let compacting = false;
 	/** The subagents that work now: running, and not waiting for an instruction, an answer, or a usage limit. */
 	let agents = 0;
+	/** The foreground subagents running now, and how many of them wait. */
+	let foreground = 0;
+	let foregroundWaiting = 0;
+	/** The tool calls of the run that execute now: tool call id -> tool name. */
+	const tools = new Map<string, string>();
 	/** The background waits running now, by the tool that waits. */
 	const waits = new Map<string, number>();
 	/** The ask_user_question dialogs open now, by tool call id. */
@@ -124,7 +132,14 @@ export default function (pi: ExtensionAPI) {
 	let generation = 0;
 
 	const waiting = () => [...waits.values()].some((count) => count > 0);
-	const working = () => ((running && !limitWait) || compacting || agents > 0 || waiting()) && asking.size === 0;
+	// The run only waits in its agent calls, and each of their subagents waits.
+	const held = () =>
+		tools.size > 0 &&
+		[...tools.values()].every((name) => name === AGENT_TOOL) &&
+		foreground > 0 &&
+		foregroundWaiting === foreground;
+	const working = () =>
+		((running && !limitWait && !held()) || compacting || agents > 0 || waiting()) && asking.size === 0;
 	const dir = (context: ExtensionContext) => path.basename(context.cwd);
 
 	function frame(): void {
@@ -168,8 +183,11 @@ export default function (pi: ExtensionAPI) {
 			void update();
 		}),
 		pi.events.on(SUBAGENTS_STATE, (data) => {
-			const list = Array.isArray(data) ? (data as { status?: unknown; waiting?: unknown }[]) : [];
+			const list = Array.isArray(data) ? (data as { status?: unknown; waiting?: unknown; background?: unknown }[]) : [];
 			const now = list.filter((agent) => agent?.status === "running" && !agent.waiting).length;
+			const held = list.filter((agent) => agent?.status === "running" && agent.background !== true);
+			foreground = held.length;
+			foregroundWaiting = held.filter((agent) => agent.waiting).length;
 			// Work that starts while nothing moves checks the setup again, as a run of Pi's does.
 			if (agents === 0 && now > 0 && !timer) setup = null;
 			agents = now;
@@ -197,6 +215,9 @@ export default function (pi: ExtensionAPI) {
 		running = false;
 		compacting = false;
 		agents = 0;
+		foreground = 0;
+		foregroundWaiting = 0;
+		tools.clear();
 		waits.clear();
 		asking.clear();
 		setup = null;
@@ -215,6 +236,17 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("agent_settled", () => {
 		running = false;
+		tools.clear();
+		void update();
+	});
+
+	pi.on("tool_execution_start", (event) => {
+		tools.set(event.toolCallId, event.toolName);
+		void update();
+	});
+
+	pi.on("tool_execution_end", (event) => {
+		tools.delete(event.toolCallId);
 		void update();
 	});
 
