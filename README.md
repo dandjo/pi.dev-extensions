@@ -206,6 +206,26 @@ On the first browser action, Chrome asks whether to allow the connection —
 choose **Allow**. What the connection can see and why it is set up this way:
 [Browser control](#browser-control).
 
+Playwright MCP adds a headless browser of its own, for pages that need
+JavaScript but no login. Register it the same way, and add
+`"exposure": "deferred"` to its entry as well:
+
+```bash
+pi mcp add playwright -- npx -y @playwright/mcp@latest --headless --isolated --output-dir "~/.cache/playwright-mcp"
+```
+
+```json
+"playwright": {
+  "command": "npx",
+  "args": ["-y", "@playwright/mcp@latest", "--headless", "--isolated", "--output-dir", "~/.cache/playwright-mcp"],
+  "exposure": "deferred"
+}
+```
+
+`pi mcp list` then reports `playwright: connected, 25 tools (deferred, global)`.
+It starts the installed Google Chrome; without one, see
+[Browser control](#browser-control).
+
 ### 5. Check the result
 
 Start Pi in a project, or run `/reload` in a running session:
@@ -232,6 +252,8 @@ Start Pi in a project, or run `/reload` in a running session:
 - `/rc` shows a link and a QR code, and the session appears under Code in the
   Claude app; a message sent from there arrives in the terminal.
 - "Open example.com in the browser" opens a tab in your Chrome.
+- "Open example.com with Playwright and tell me its title" answers through
+  `browser_navigate`, without a window.
 
 ## Manage extensions
 
@@ -2071,6 +2093,27 @@ together with `source_check` (evidence for a claim) and `get_search_content`
   directly, and screenshots and snapshots reach it as they are. With Pi's
   default, `codemode`, only scripts could call them. `--slim` is no
   alternative: it leaves only `navigate`, `evaluate`, and `screenshot`.
+- [Playwright MCP](https://github.com/microsoft/playwright-mcp) from
+  Microsoft adds a second browser, headless and with a fresh profile in memory
+  (`--isolated`): no logins, no tabs of yours, nothing kept between sessions.
+  It suits pages that need JavaScript, where `web_fetch` reads an empty page,
+  and anything the model may click through without your accounts; your
+  Chrome stays for pages behind a login or a bot challenge, which a headless
+  browser meets more often. Its 25 tools navigate, click, fill forms, press
+  keys, read a page as an accessibility snapshot, and take screenshots.
+- It runs on your machine and reaches what your machine reaches, the VPN
+  included. Playwright states that it is no security boundary, so it runs
+  locally for each user rather than as a shared server: a browser on a
+  server would reach the services in its networks past their allowlists and
+  logins.
+- It starts the installed Google Chrome. Without one, run
+  `npx @playwright/mcp install-browser chrome-for-testing` and add
+  `"--browser", "chromium"` to its `args`.
+- `--output-dir` keeps the snapshots and screenshots it saves as files in
+  `~/.cache/playwright-mcp`; without it they land in `.playwright-mcp/` of
+  the project Pi works in. The model gets a link to each snapshot and reads
+  the file when it needs it. `@latest` and `"exposure": "deferred"` work as
+  for chrome-devtools-mcp.
 
 ## License
 
