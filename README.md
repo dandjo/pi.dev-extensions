@@ -325,6 +325,11 @@ Keeps this package of extensions current. It needs nothing from any provider.
   the previous version is still loaded. Outside the terminal (RPC mode) the
   notice asks for `/reload` instead.
 - `/update` updates the package and reloads at once.
+- After the reload, its own or the one Pi makes by itself, a line tells the
+  result: `<package>: updated <old> -> <new>; reloaded.`, or
+  `<package>: already current (<revision>); reloaded.`. It takes the place of
+  Pi's own `Reloaded …` line, since a reload draws the conversation anew and a
+  notice shown before it would be gone.
 
 ## statusline
 

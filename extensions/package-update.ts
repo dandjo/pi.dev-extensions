@@ -14,12 +14,15 @@
  *   no run or compaction, nothing queued, no prompt just submitted, and the empty prompt editor in focus, so no
  *   selector or dialog is open and no typing is lost. Until then what was loaded before stays active. A change found by
  *   an update of another Pi process counts too. /update updates and reloads right away.
+ * - The result ("updated a -> b; reloaded.", "already current") is shown after the reload, by the runtime the reload
+ *   started (LIVE): a reload draws the conversation anew, which removes a notice shown before it.
  */
 
 import {
 	CustomEditor,
 	DefaultPackageManager,
 	type ExtensionAPI,
+	type ExtensionCommandContext,
 	type ExtensionContext,
 	getAgentDir,
 	SettingsManager,
@@ -56,6 +59,11 @@ const REST_POLL_MS = 1_000;
 const INPUT_GRACE_MS = 5_000;
 
 const run = promisify(execFile);
+
+/** Shows a notice in the session runtime that is current now; set at session_start, cleared at its session_shutdown. */
+type Notify = (text: string, level: "info" | "warning" | "error") => void;
+const LIVE = Symbol.for("pi.package-update.live");
+const live = globalThis as typeof globalThis & Record<symbol, Notify | undefined>;
 
 /** The package this extension keeps current: the one it came with. */
 interface Own {
@@ -321,6 +329,10 @@ export default function (pi: ExtensionAPI) {
 	let due: string | null = null;
 	let poll: ReturnType<typeof setInterval> | null = null;
 	let lastInput = 0;
+	/** This runtime's entry in LIVE. */
+	let notifyHere: Notify | null = null;
+	/** The notice the automatic reload shows once it is done. */
+	let afterReload: string | null = null;
 
 	function atRest(): boolean {
 		if (!ctx || !tui) return false;
@@ -344,9 +356,8 @@ export default function (pi: ExtensionAPI) {
 	/** Reloads through /update, which has the command context reload needs. */
 	function reloadIfAtRest(): void {
 		if (!ctx || due === null || !atRest()) return;
-		const notice = `${due}; reloading.`;
+		afterReload = `${due}; reloaded.`;
 		stopWaiting();
-		ctx.ui.notify(notice, "info");
 		pi.sendUserMessage(`/${COMMAND} ${RELOAD_MARK}`, { expandPromptTemplates: true });
 	}
 
@@ -385,6 +396,10 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("session_start", (event, context) => {
 		ctx = context;
+		if (context.hasUI) {
+			notifyHere = (text, level) => context.ui.notify(text, level);
+			live[LIVE] = notifyHere;
+		}
 		const m = own;
 		if (!m?.updatable || process.env.PI_SUBAGENT_DEPTH || process.env.PI_OFFLINE) return;
 		// Only the start updates; a later session waits for an update still running, or finds one finished since its
@@ -413,38 +428,51 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("session_shutdown", () => {
 		stopWaiting();
+		if (live[LIVE] === notifyHere) live[LIVE] = undefined;
+		notifyHere = null;
 		ctx = null;
 	});
+
+	/**
+	 * Reloads, then shows text in the runtime the reload started (this one when Pi refused the reload). Pi's own
+	 * "Reloaded …" line gives way to it, so the text says that Pi reloaded.
+	 */
+	async function reloadThenNotify(command: ExtensionCommandContext, text: string, level: "info" | "error" = "info"): Promise<void> {
+		stopWaiting();
+		await command.reload();
+		live[LIVE]?.(text, level);
+	}
 
 	pi.registerCommand(COMMAND, {
 		description: "Update this package of extensions and reload",
 		handler: async (args, command) => {
 			if (args === RELOAD_MARK) {
-				await command.reload();
+				const text = afterReload;
+				afterReload = null;
+				if (text) await reloadThenNotify(command, text);
+				else await command.reload();
 				return;
 			}
 			const result = own?.updatable ? await update(own) : undefined;
 			if (!own || !result) {
-				command.ui.notify(
+				await reloadThenNotify(
+					command,
 					result === null
-						? "Another Pi process has just updated the package."
-						: "No package to update: this file was not installed with pi install, or from a local folder, which loads as it is.",
-					"info",
+						? "Another Pi process has just updated the package; reloaded."
+						: "No package to update: this file was not installed with pi install, or from a local folder, which loads as it is; reloaded.",
 				);
-				stopWaiting();
-				await command.reload();
 				return;
 			}
 			if ("error" in result) {
 				command.ui.notify(`${label(own)}: update failed (${result.error})`, "error");
 				return;
 			}
-			command.ui.notify(
-				result.from === result.to ? `${label(own)}: already current (${result.to})` : `${label(own)}: updated ${result.from ?? "none"} -> ${result.to}`,
-				"info",
+			await reloadThenNotify(
+				command,
+				result.from === result.to
+					? `${label(own)}: already current (${result.to}); reloaded.`
+					: `${label(own)}: updated ${result.from ?? "none"} -> ${result.to}; reloaded.`,
 			);
-			stopWaiting();
-			await command.reload();
 		},
 	});
 }
