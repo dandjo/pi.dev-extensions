@@ -1,13 +1,13 @@
 /**
  * tmux tab activity: while Pi or one of its subagents works, or a background wait runs, Pi's spinner turns in its tmux
- * tab in place of the window number, in step with the spinners of the other tabs.
+ * tab in place of the π between the window number and the session name, in step with the spinners of the other tabs.
  *
  * Pi shows the session in the terminal title, "π - <name> - <directory>", or "π - <directory>" while the session has
  * no name. During a run, a compaction, while a subagent works (subagents.ts, "subagents:state" on the event bus; not
  * one that waits for an instruction, an answer, or a usage limit), or while a background wait runs (wait.ts and
  * gitlab.ts, "background-waits:state"), this extension writes it as "π - ␟⠹ <name> - <directory>" (an unnamed session's
  * directory as its name): ␟ marks the title of a working session, and the spinner's frame follows it, which the tab
- * formats below put in place of the window number. The frames are those of Pi's own spinner (pi-tui's Loader),
+ * formats below put in place of the π. The frames are those of Pi's own spinner (pi-tui's Loader),
  * ⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏, one every 80 ms, each taken from the clock, so all tabs show the same frame. It stops when Pi settles,
  * no subagent works, and no background wait runs, pauses while an ask_user_question dialog waits (the tab's bell shows
  * then), and puts Pi's own title back. A run that waits for a usage limit to reset (auto-continue.ts,
@@ -15,8 +15,8 @@
  *
  * A window with several panes shows the pane whose Pi works: the active pane's while it works, else the first other
  * pane's that works, else the active pane's. While another pane works, the tab shows that pane's name, so its width
- * changes when that run starts and ends. A window renamed by hand keeps its name, with the spinner in place of its
- * number.
+ * changes when that run starts and ends. A window renamed by hand keeps its name, with π or the spinner before it; a
+ * window without Pi shows its number and command.
  *
  * tmux setup. tmux takes a title as the pane title at once, but names the window (#W) after it at most every 500 ms,
  * so the tab has to show the pane title itself. In ~/.tmux.conf or ~/.config/tmux/tmux.conf (tmux 3.2 or later):
@@ -24,16 +24,19 @@
  *   # The window name: the session name from Pi's title without the spinner, else the command.
  *   set -g automatic-rename on
  *   set -g automatic-rename-format '#{?#{m:π - *,#{pane_title}},#{s/^␟. //:#{s/^π - (.*) - .*$/\1/:pane_title}},#{pane_current_command}}'
- *   # The tab: the number and session name from a pane's title, the spinner in place of the number while that pane
- *   # works; the active pane's while it works, else the first other pane's that works (␞ separates their names, the
- *   # first stays), else the active pane's. A window renamed by hand keeps its name (#W).
+ *   # The tab: its number, then π for a window with Pi, which the spinner takes the place of while a pane's Pi works,
+ *   # then the session name from a pane's title; the active pane's while it works, else the first other pane's that
+ *   # works (␞ separates their names, the first stays), else the active pane's. A window renamed by hand keeps its
+ *   # name (#W).
  *   %hidden PI_NAME='#{s/^π - (.*) - .*$/\1/:pane_title}'
  *   %hidden PI_BUSY='#{m:π - ␟*,#{pane_title}}'
  *   %hidden PI_OTHERS='#{s/␞.*$//:#{P:#{?#{m:π - ␟*,#{pane_title}},#{s/^π - (.*) - .*$/\1/:pane_title}␞,}}}'
  *   %hidden PI_LIVE="#{?$PI_BUSY,$PI_NAME,$PI_OTHERS}"
- *   # The spinner, undimmed (#[nodim fg=blue] gives it a colour), and padded to the number's width.
- *   %hidden PI_SPIN="#{s/^␟(.).*$/#[nodim]\\1#[default]/:$PI_LIVE}#{R: ,#{e|-:#{w:#{window_index}},1}}"
- *   %hidden PI_TAB="#{?$PI_LIVE,$PI_SPIN #{?#{automatic-rename},#{s/^␟. //:$PI_LIVE},#W},#I #{?#{&&:#{automatic-rename},#{m:π - *,#{pane_title}}},$PI_NAME,#W}}"
+ *   # The spinner, undimmed (#[nodim fg=blue] gives it a colour); π and the frames are one column each, so the tab
+ *   # keeps its width.
+ *   %hidden PI_SPIN="#{s/^␟(.).*$/#[nodim]\\1#[default]/:$PI_LIVE}"
+ *   %hidden PI_MARK="#{?$PI_LIVE,$PI_SPIN ,#{?#{m:π - *,#{pane_title}},π ,}}"
+ *   %hidden PI_TAB="#I $PI_MARK#{?$PI_LIVE,#{?#{automatic-rename},#{s/^␟. //:$PI_LIVE},#W},#{?#{&&:#{automatic-rename},#{m:π - *,#{pane_title}}},$PI_NAME,#W}}"
  *   set -g window-status-format " $PI_TAB"
  *   set -g window-status-current-format " $PI_TAB"
  *
@@ -57,7 +60,7 @@ const FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "
 const FRAME_MS = 80;
 /** Pi's title starts with this; a Pi build with a name of its own (piConfig.name) is not covered. */
 const APP_TITLE = "π";
-/** Marks a working session's title; the spinner's frame follows, which the tab formats put in place of the number. */
+/** Marks a working session's title; the spinner's frame follows, which the tab formats put in place of the π. */
 const MARK = "␟";
 /** subagents.ts: the subagents of this session, whenever something changes, and the request for that list. */
 const SUBAGENTS_STATE = "subagents:state";

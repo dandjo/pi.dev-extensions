@@ -957,8 +957,9 @@ background while the agent works.
 ## tmux-tab-activity
 
 While Pi or one of its subagents works, or a background wait runs, Pi's
-spinner turns in its tmux tab in place of the window number, so the tab bar
-shows which sessions are busy. The spinners of all tabs turn in step.
+spinner turns in its tmux tab in place of the `π` between the window number
+and the session name, so the tab bar shows which sessions are busy. The
+spinners of all tabs turn in step.
 
 - Pi shows the session in the terminal title, `π - <name> - <directory>`. During
   a run, a compaction, while a subagent works (one that waits for your
@@ -967,7 +968,7 @@ shows which sessions are busy. The spinners of all tabs turn in step.
   runs, the extension writes it as `π - ␟⠹ <name> - <directory>` (an unnamed
   session's directory as its name): `␟` marks the title of a working session,
   and the spinner's frame follows it, which the tab formats below put in place
-  of the number. The frames are Pi's own, `⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏`, one every 80 ms, each
+  of the `π`. The frames are Pi's own, `⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏`, one every 80 ms, each
   taken from the clock, so all tabs show the same frame.
 - It pauses while an `ask_user_question` dialog waits, when the tab's bell takes
   over, and while a run waits for a usage limit to reset
@@ -977,8 +978,8 @@ shows which sessions are busy. The spinners of all tabs turn in step.
   pane's while it works, else the first other pane's that works, else the
   active pane's. While another pane works, the tab shows that pane's name, so
   its width changes when that run starts and ends.
-- A window renamed by hand keeps its name, with the spinner in place of its
-  number.
+- A window renamed by hand keeps its name, with `π` or the spinner before it.
+  A window without Pi shows its number and command.
 - tmux takes a title as the pane title at once, but names the window after it
   at most every 500 ms, so the tab has to show the pane title itself. Set up
   tmux 3.2 or later like this, in `~/.tmux.conf` or
@@ -990,19 +991,20 @@ shows which sessions are busy. The spinners of all tabs turn in step.
   # else the command.
   set -g automatic-rename on
   set -g automatic-rename-format '#{?#{m:π - *,#{pane_title}},#{s/^␟. //:#{s/^π - (.*) - .*$/\1/:pane_title}},#{pane_current_command}}'
-  # The tab: the number and session name from a pane's title, the spinner in
-  # place of the number while that pane works; the active pane's while it
-  # works, else the first other pane's that works (␞ separates their names,
-  # the first stays), else the active pane's. A window renamed by hand keeps
-  # its name (#W).
+  # The tab: its number, then π for a window with Pi, which the spinner takes
+  # the place of while a pane's Pi works, then the session name from a pane's
+  # title; the active pane's while it works, else the first other pane's that
+  # works (␞ separates their names, the first stays), else the active pane's.
+  # A window renamed by hand keeps its name (#W).
   %hidden PI_NAME='#{s/^π - (.*) - .*$/\1/:pane_title}'
   %hidden PI_BUSY='#{m:π - ␟*,#{pane_title}}'
   %hidden PI_OTHERS='#{s/␞.*$//:#{P:#{?#{m:π - ␟*,#{pane_title}},#{s/^π - (.*) - .*$/\1/:pane_title}␞,}}}'
   %hidden PI_LIVE="#{?$PI_BUSY,$PI_NAME,$PI_OTHERS}"
-  # The spinner, undimmed (#[nodim fg=blue] gives it a colour), and padded to
-  # the number's width.
-  %hidden PI_SPIN="#{s/^␟(.).*$/#[nodim]\\1#[default]/:$PI_LIVE}#{R: ,#{e|-:#{w:#{window_index}},1}}"
-  %hidden PI_TAB="#{?$PI_LIVE,$PI_SPIN #{?#{automatic-rename},#{s/^␟. //:$PI_LIVE},#W},#I #{?#{&&:#{automatic-rename},#{m:π - *,#{pane_title}}},$PI_NAME,#W}}"
+  # The spinner, undimmed (#[nodim fg=blue] gives it a colour); π and the
+  # frames are one column each, so the tab keeps its width.
+  %hidden PI_SPIN="#{s/^␟(.).*$/#[nodim]\\1#[default]/:$PI_LIVE}"
+  %hidden PI_MARK="#{?$PI_LIVE,$PI_SPIN ,#{?#{m:π - *,#{pane_title}},π ,}}"
+  %hidden PI_TAB="#I $PI_MARK#{?$PI_LIVE,#{?#{automatic-rename},#{s/^␟. //:$PI_LIVE},#W},#{?#{&&:#{automatic-rename},#{m:π - *,#{pane_title}}},$PI_NAME,#W}}"
   set -g window-status-format " $PI_TAB"
   set -g window-status-current-format " $PI_TAB"
   ```
