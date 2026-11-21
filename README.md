@@ -1330,9 +1330,9 @@ Claude Code, the prompt writes to the agent shown, and Esc interrupts it.
   one runs, the footer adds `ctrl+b to run in background`; without a
   foreground agent, Ctrl+B stays the editor's cursor left.
 - Background waits ([wait](#wait), [`gitlab_pipeline`](#gitlab_pipeline))
-  are listed below the agents, marked `⧗` with the tool, with their id, what
-  they wait for, what the last check found, the time since they started, and
-  their checks; `x` cancels one. Enter opens a box above the prompt, as the
+  are listed below the agents as agents are: the tool where an agent has its
+  type, then what they wait for and what the last check found, and at the end
+  their id, the time since they started, and their checks; `x` cancels one. Enter opens a box above the prompt, as the
   task manager shows a scheduled task: what the wait waits for and until when,
   since when, when it gives up, its checks, its command, and the end of the
   last check's output, kept current while it runs. `x` cancels it there too,

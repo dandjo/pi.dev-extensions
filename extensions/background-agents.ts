@@ -40,8 +40,9 @@
  *   as it comes, until the file holds the message. Over RPC a message_update carries only the change, which is applied
  *   to the message. The panel replaces the editor with a subclass of Pi's own, so another extension that replaces the
  *   editor wins over it.
- * - Background waits (wait.ts and gitlab.ts, background-waits:state) are listed below the agents with what they wait
- *   for, the time since they started, and their checks. Enter opens a box above the prompt, as the task manager of
+ * - Background waits (wait.ts and gitlab.ts, background-waits:state) are listed below the agents as agents are: the
+ *   tool where an agent has its type, then what they wait for, and at the end their id, the time since they started,
+ *   and their checks. Enter opens a box above the prompt, as the task manager of
  *   scheduled-tasks.ts shows a task: what the wait waits for and until when, since when, when it gives up, its checks,
  *   its command, and the end of the last check's output, kept current; x cancels the wait, Esc closes the box. x in
  *   the panel cancels it as well (background-waits:cancel).
@@ -963,7 +964,7 @@ export default function (pi: ExtensionAPI) {
 			entry.kind === "agent"
 				? entry.row.type
 				: entry.kind === "wait"
-					? `⧗ ${entry.wait.tool}`
+					? entry.wait.tool
 					: entry.task.kind === "loop wakeup"
 						? "↻ loop"
 						: "↻ scheduled";
@@ -973,11 +974,11 @@ export default function (pi: ExtensionAPI) {
 			e.kind === "agent"
 				? statusText(e.row)
 				: e.kind === "wait"
-					? `${elapsed(now - e.wait.startedAt)} · ${e.wait.checks} check${e.wait.checks === 1 ? "" : "s"}`
+					? `${e.wait.id} · ${elapsed(now - e.wait.startedAt)} · ${e.wait.checks} check${e.wait.checks === 1 ? "" : "s"}`
 					: `${e.task.kind === "loop wakeup" ? "" : `${e.task.schedule} · `}next ${e.task.next}`,
 		);
 		const description = (e: Entry) =>
-			e.kind === "agent" ? e.row.description : e.kind === "wait" ? `${e.wait.id} · ${e.wait.label}${e.wait.last ? ` · ${e.wait.last}` : ""}` : e.task.prompt;
+			e.kind === "agent" ? e.row.description : e.kind === "wait" ? `${e.wait.label}${e.wait.last ? ` · ${e.wait.last}` : ""}` : e.task.prompt;
 		const statusWidth = Math.max(...statuses.map((s) => s.length), 0);
 		visible.forEach((entry, i) => {
 			const index = scroll + i + 1;
