@@ -5,7 +5,9 @@
  * pickSmallModel below) answers the prompt from it, so the page text never goes to another provider. Without a model,
  * or when the model fails, the Markdown itself is returned. A page behind a Cloudflare bot challenge, which only a
  * real browser passes, is read from its latest Wayback Machine capture instead; only its address goes to archive.org.
- * {"waybackFallback": false} in ~/.pi/agent/web-tools.json turns that off. web_search comes from the pi-web-access
+ * {"waybackFallback": false} in ~/.pi/agent/web-tools.json turns that off. Where only a browser helps (a block, a
+ * challenge without a capture, a page that builds its content with JavaScript, an archived copy that may be stale), the
+ * result says so and points to a browser tool that runs a browser of its own. web_search comes from the pi-web-access
  * package.
  */
 
@@ -27,7 +29,13 @@ const USER_AGENT = "Mozilla/5.0 (compatible; pi-web-fetch/1.0; +https://pi.dev)"
 // Prefix of a raw capture (id_: the page as archived, without the Wayback toolbar); the timestamp 2 picks the latest.
 const ARCHIVE_LATEST = "https://web.archive.org/web/2id_/";
 const CAPTURE = /^https?:\/\/web\.archive\.org\/web\/(\d{4})(\d{2})(\d{2})\d*id_\/(https?:\/\/.+)$/;
-const BROWSER_HINT = "read it in a real browser instead, with a browser tool if one is available";
+// The browser for a page anyone may read is one of its own, such as Playwright's, not the user's own browser with
+// the user's logins and tabs.
+const BROWSER_HINT =
+	"read it in a real browser instead, with a browser tool that runs a browser of its own, such as Playwright, " +
+	"rather than one attached to the user's browser, which is for pages that need the user's login";
+/** Below this many characters of text, an HTML page with scripts counts as built by JavaScript. */
+const THIN_PAGE_CHARS = 300;
 const CONFIG_FILE = path.join(getAgentDir(), "web-tools.json");
 const SYSTEM_PROMPT = [
 	"You answer a question about a web page from its content alone.",
@@ -43,6 +51,8 @@ interface Page {
 	markdown: string;
 	/** Why the content does not come from url itself. */
 	note?: string;
+	/** Why the content may be incomplete. */
+	hint?: string;
 }
 
 /** A bot challenge that only a real browser passes, such as Cloudflare's managed challenge. */
@@ -203,7 +213,7 @@ async function fetchPage(address: string, signal: AbortSignal | undefined): Prom
 		if (!capture || "redirect" in capture || !date) {
 			throw new Error(`${error.message}; the Wayback Machine has no capture of it either, ${BROWSER_HINT}`);
 		}
-		const note = `${error.url.href} answers with a bot challenge, so this comes from its Wayback Machine capture of ${date[1]}-${date[2]}-${date[3]} (${capture.url}).`;
+		const note = `${error.url.href} answers with a bot challenge, so this comes from its Wayback Machine capture of ${date[1]}-${date[2]}-${date[3]} (${capture.url}); if it must be current, ${BROWSER_HINT}.`;
 		return { ...capture, note };
 	}
 }
@@ -253,10 +263,20 @@ async function load(start: URL, signal: AbortSignal | undefined): Promise<Page |
 		}
 		if (isHtml || (!contentType && /^\s*<(!doctype html|html)/i.test(text))) {
 			// A raw capture keeps the page's links as they were, so they resolve against the archived address.
-			return { url: url.href, ...htmlToMarkdown(text, CAPTURE.exec(url.href)?.[4] ?? url.href) };
+			const page: Page = { url: url.href, ...htmlToMarkdown(text, CAPTURE.exec(url.href)?.[4] ?? url.href) };
+			if (page.markdown && builtByScript(text, page.markdown)) {
+				page.hint = `${url.href} has little text without JavaScript, so this may be only part of it; to see all of it, ${BROWSER_HINT}.`;
+			}
+			return page;
 		}
 		return { url: url.href, title: "", markdown: text.trim() };
 	}
+}
+
+/** Whether an HTML page has scripts and next to no text without them, as a page rendered in the browser has. */
+function builtByScript(html: string, markdown: string): boolean {
+	const text = markdown.replace(/\[([^\]]*)\]\([^)]*\)/g, "$1").replace(/[#*_`|>-]/g, " ").replace(/\s+/g, " ").trim();
+	return text.length < THIN_PAGE_CHARS && /<script\b/i.test(html);
 }
 
 function truncated(text: string): string {
@@ -414,8 +434,11 @@ export default function (pi: ExtensionAPI) {
 					details: { url: params.url, redirect: page.redirect },
 				};
 			}
-			if (!page.markdown) throw new Error(`${page.url} has no readable text`);
-			const source = page.note ? `${page.note}\n\n` : "";
+			if (!page.markdown) {
+				throw new Error(`${page.url} has no readable text; if it builds its content with JavaScript, ${BROWSER_HINT}`);
+			}
+			const notes = [page.note, page.hint].filter(Boolean);
+			const source = notes.length ? `${notes.join("\n")}\n\n` : "";
 
 			const fallback = (note: string) => ({
 				content: [{ type: "text" as const, text: truncated(`${source}${note}\n\n${page.title ? `# ${page.title}\n\n` : ""}${page.markdown}`) }],

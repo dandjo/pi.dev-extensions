@@ -560,6 +560,13 @@ enters the conversation, not the page.
   `{"waybackFallback": false}` in `~/.pi/agent/web-tools.json` turns that off.
   Other blocks (Reddit), and a challenged page without a capture, end in an
   error that points to a browser tool.
+- That pointer names a browser tool that runs a browser of its own, such as
+  Playwright, rather than one attached to your browser, which is for pages
+  that need your login. It also comes with a Wayback Machine capture (for
+  when the page must be current), with a page without text, and above a page
+  that has scripts but less than 300 characters of text without them, which
+  is likely built by JavaScript. Whether the model then opens a browser is
+  its choice; `web_fetch` never does.
 - Redirects within the same site are followed. A redirect to another site is
   reported, and the model decides whether to fetch the target.
 - Text pages only: HTML, plain text, JSON, XML. PDFs and other files are refused
