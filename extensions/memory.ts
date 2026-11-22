@@ -2,8 +2,8 @@
  * Memory: a persistent memory per project, kept the way Claude Code keeps its auto memory, for any provider.
  *
  * - A project's memory is a folder with an index, MEMORY.md, holding one line per entry that links a topic file, and
- *   the topic files themselves (Markdown with frontmatter). The index goes into the system prompt on every run, read
- *   live; the model reads a topic file when it is relevant and writes, corrects, and removes entries with its file
+ *   the topic files themselves (Markdown with frontmatter). The index goes into the system prompt, read at the start of
+ *   every run; the model reads a topic file when it is relevant and writes, corrects, and removes entries with its file
  *   tools, following the rules that come with the index.
  * - Where it lives comes from the providers in ~/.pi/agent/memory.json, in order of priority: the first one available
  *   is used, the others are fallbacks. {"providers": {"claude": {}, "pi": {}}} is the default:
@@ -35,6 +35,11 @@
  *   memory.json reordered) the entries come along. The source is the named provider, else the first one in order of
  *   priority whose folder has an index; Claude Code's and Pi's own folders count even when memory.json leaves them
  *   out. The source stays as it is, and a file of the same name in the target is not overwritten.
+ * - The index in the system prompt stays as it was first shown in the session (or after its last compaction): when it
+ *   changes, Pi would send the whole section again, and every request of the session carries each copy. Instead the
+ *   run gets a hidden message with the lines added, changed, and removed since the model last saw it (a custom entry,
+ *   memory-index-shown, keeps track over restarts). A change to more than half of the lines shows the whole index
+ *   again.
  * - Subagents (PI_SUBAGENT_DEPTH) get no memory, as in Claude Code.
  */
 
@@ -56,6 +61,59 @@ const MAX_INDEX_LINES = 200;
 const MAX_LINE_CHARS = 150;
 const MAX_TOPIC_BYTES = 8 * 1024;
 const CONFIG_FILE = path.join(getAgentDir(), "memory.json");
+/** The index as the model knows it: the one in the system prompt, and the one the changes since then led to. */
+const SHOWN_ENTRY = "memory-index-shown";
+const UPDATE_MESSAGE = "memory-index-update";
+
+interface Shown {
+	dir: string;
+	section: string;
+	told: string;
+}
+
+/** What this session's branch says the model knows of the index in dir; nothing after a compaction. */
+function shownIn(ctx: ExtensionContext, dir: string): Shown | undefined {
+	let shown: Shown | undefined;
+	for (const entry of ctx.sessionManager.getBranch()) {
+		if (entry.type === "compaction") shown = undefined;
+		else if (entry.type === "custom" && entry.customType === SHOWN_ENTRY) {
+			const data = entry.data as Partial<Shown> | undefined;
+			if (data?.dir !== dir || typeof data.told !== "string") shown = undefined;
+			else if (typeof data.section === "string") shown = { dir, section: data.section, told: data.told };
+			else if (shown) shown = { ...shown, told: data.told };
+		}
+	}
+	return shown;
+}
+
+/** The entries added, changed, and removed between two versions of the index, keyed by the file a line links. */
+function indexChanges(before: string, after: string): { text: string; share: number } | undefined {
+	const lines = (text: string) =>
+		new Map(
+			text
+				.split("\n")
+				.filter((line) => line.trim())
+				.map((line) => [line.match(/\]\(([^)]+)\)/)?.[1] ?? line, line] as const),
+		);
+	const old = lines(before);
+	const now = lines(after);
+	const added = [...now].filter(([key]) => !old.has(key)).map(([, line]) => line);
+	const changed = [...now].filter(([key, line]) => old.has(key) && old.get(key) !== line).map(([, line]) => line);
+	const removed = [...old].filter(([key]) => !now.has(key)).map(([, line]) => line);
+	const count = added.length + changed.length + removed.length;
+	if (!count) return undefined;
+	const part = (title: string, rows: string[]) => (rows.length ? [`${title}:`, ...rows, ""] : []);
+	const text = [
+		`The memory index (${INDEX}) changed since you last saw it: this or another session wrote to it. Read the index in the system prompt with these changes:`,
+		"",
+		...part("Added", added),
+		...part("Changed (now reads)", changed),
+		...part("Removed", removed),
+	]
+		.join("\n")
+		.trim();
+	return { text, share: count / Math.max(old.size, now.size, 1) };
+}
 
 /** How the model keeps the memory, in Claude Code's format so that both can read and write the same files. */
 const RULES = [
@@ -500,6 +558,22 @@ export default function (pi: ExtensionAPI) {
 			const lines = index.split("\n");
 			if (lines.length > MAX_INDEX_LINES) index = `${lines.slice(0, MAX_INDEX_LINES).join("\n")}\n…`;
 		}
+		// The index the system prompt keeps; changes since the model last saw it come as a message.
+		let shownIndex = index;
+		let message: { customType: string; content: string; display: boolean } | undefined;
+		const shown = shownIn(ctx, memory.dir);
+		if (!shown) pi.appendEntry(SHOWN_ENTRY, { dir: memory.dir, section: index, told: index });
+		else if (shown.told === index) shownIndex = shown.section;
+		else {
+			const changes = indexChanges(shown.told, index);
+			if (changes && changes.share <= 0.5) {
+				shownIndex = shown.section;
+				message = { customType: UPDATE_MESSAGE, content: changes.text, display: false };
+				pi.appendEntry(SHOWN_ENTRY, { dir: memory.dir, told: index });
+			} else if (changes) pi.appendEntry(SHOWN_ENTRY, { dir: memory.dir, section: index, told: index });
+			else shownIndex = shown.section;
+		}
+		index = shownIndex;
 		sections.memory = [
 			`Persistent memory for this project, ${describe(memory.provider)}. Directory: ${memory.dir}`,
 			"The index below links topic files (relative to that directory). Read a topic file when it is relevant to the task before acting; treat entries as dated observations and verify them against the current state when it matters.",
@@ -508,6 +582,7 @@ export default function (pi: ExtensionAPI) {
 			"",
 			index ? `${INDEX}:\n${index}` : `${INDEX} does not exist yet: this project has no memory so far.`,
 		].join("\n");
+		return message ? { message } : undefined;
 	});
 
 	// Writes into the memory keep its limits.

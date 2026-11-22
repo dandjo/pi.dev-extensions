@@ -10,8 +10,9 @@
  * - Tools: the parent's active tools, narrowed by the definition, whose entries name Pi tools unless a provider
  *   translates them. A subagent never gets ask_user_question, the cron and loop tools, or cross-session messaging;
  *   agent only up to three levels deep. MCP servers start only when the subagent's tools name an MCP tool.
- * - Model: the call's model, else the definition's, else a provider's default, else the current model, at the
- *   parent's thinking level unless the definition sets effort. A model is a full id, inherit (the current model), a
+ * - Model: the call's model, else the definition's, else a provider's default, else the defaultModel of
+ *   ~/.pi/agent/subagents.json, else the current model, at the parent's thinking level unless the definition sets
+ *   effort. A model is a full id, inherit (the current model), a
  *   tier, or a model family a provider names:
  *   - small and large stay within the current model's provider: the model ~/.pi/agent/subagents.json names for the
  *     provider and tier ({"tiers": {"<provider>": {"small": "<model-id>", "large": "<model-id>"}}}), else the newest
@@ -425,10 +426,12 @@ function offeredFamilies(ctx: ExtensionContext): string[] {
 }
 
 function defaultModel(): string | undefined {
-	return provided((p) => {
-		const model = p.defaultModel?.()?.trim();
-		return model ? [model] : [];
-	})[0];
+	return (
+		provided((p) => {
+			const model = p.defaultModel?.()?.trim();
+			return model ? [model] : [];
+		})[0] ?? configuredDefault()
+	);
 }
 
 /** The Pi tools an entry of a definition names: the first provider's translation, else the name itself. */
@@ -617,6 +620,16 @@ function newer(a: string, b: string): boolean {
 
 function newest<T extends { id: string }>(models: T[]): T | undefined {
 	return models.reduce<T | undefined>((acc, m) => (!acc || newer(m.id, acc.id) ? m : acc), undefined);
+}
+
+/** The default model ~/.pi/agent/subagents.json names ({"defaultModel": "<model, tier, or family>"}). */
+function configuredDefault(): string | undefined {
+	try {
+		const model = JSON.parse(readFileSync(path.join(getAgentDir(), "subagents.json"), "utf8"))?.defaultModel;
+		return typeof model === "string" && model.trim() ? model.trim() : undefined;
+	} catch {
+		return undefined;
+	}
 }
 
 /** The model ~/.pi/agent/subagents.json names for a provider and tier. */

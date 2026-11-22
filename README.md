@@ -121,7 +121,16 @@ in `~/.pi/agent/settings.json`, next to the `packages` entry the install wrote:
   "defaultProvider": "claude-sdk",
   "defaultModel": "claude-opus-5-5",
   "packages": ["npm:pi-claude-subscription"],
-  "compaction": { "reserveTokens": 32768 },
+  "compaction": {
+    "reserveTokens": 32768,
+    "modelOverrides": {
+      "claude-sdk/claude-opus-5-5": { "reserveTokens": 850000 },
+      "claude-sdk/claude-opus-5": { "reserveTokens": 850000 },
+      "claude-sdk/claude-sonnet-5-5": { "reserveTokens": 850000 },
+      "claude-sdk/claude-sonnet-5": { "reserveTokens": 850000 },
+      "claude-sdk/claude-haiku-5-5": { "reserveTokens": 850000 }
+    }
+  },
   "retry": { "maxRetries": 10, "maxAgentDelayMs": 32000 }
 }
 ```
@@ -134,6 +143,13 @@ context window minus 23k tokens, so at 977k for a 1M model, and answers
 "Prompt is too long". Pi's default reserve of 16384 tokens would only start
 compacting at 983,616. Pi does recover from the error by compacting and
 retrying, but the turn fails first.
+
+The `modelOverrides` make the models with a 1M context window compact at
+150k tokens instead (1M minus 850,000). Every request reads the whole context
+again, so a session that grows towards 1M costs most: requests above 150k
+were a quarter of all and caused well over half of the cost. A model with a
+smaller window must not get such an override, since its threshold would fall
+below zero and Pi would compact before every request.
 
 The `retry` values let Pi retry a dropped connection or an overloaded server
 ten times, after 2, 4, 8, 16, then 32 seconds, as Claude Code retries ten
@@ -903,6 +919,12 @@ out wrong.
   `type` and `modified`; **Why:** and **How to apply:** for feedback and
   project entries), one index line per file, and updating instead of
   duplicating. The topic files are read on demand.
+- In a session the index in the system prompt stays as the model first saw
+  it, or as it was after the last compaction. When it changes, Pi would send
+  the whole section again, and every later request would carry each copy;
+  instead the next run gets a hidden message with the lines added, changed,
+  and removed. A change to more than half of the lines shows the whole index
+  again.
 - `/memory` shows the providers with the one in use and the index;
   `/memory edit` opens the index in Pi's editor.
 - `/memory lint` checks the memory against its rules and what it costs: index
@@ -1178,8 +1200,13 @@ interrupt it, and answer its questions, and it stays alive after its report.
   dialogs are declined. Its notifications, status entries, and widgets stay
   with it.
 - Model: the call's `model`, else the definition's, else a default model,
-  else the current one. A model is a full model id, `inherit` (the current
-  one), a tier, or a model family:
+  else the current one. The default model comes from a provider
+  ([claude-code-agents](#claude-code-agents):
+  `CLAUDE_CODE_SUBAGENT_MODEL`), else from `defaultModel` in
+  `~/.pi/agent/subagents.json`, such as `{"defaultModel": "sonnet"}`: a
+  subagent without a model of its own then runs on Sonnet instead of the
+  session's model, at half of Opus's price per token. A model is a full model
+  id, `inherit` (the current one), a tier, or a model family:
   - `small` and `large` stay with the current model's provider. `small` is
     the newest model of a small family the provider has (`haiku`), else the
     model of the [side tasks](#small-model), the cheapest; `large` is the
