@@ -20,6 +20,9 @@
  *   version (soft delete): Vault keeps the earlier versions, and the deleted one can be undeleted by whoever may.
  * - vault_login logs in with OIDC through the vault CLI: the browser opens the identity provider's page, and the new
  *   token goes to ~/.vault-token. Without the vault CLI on the PATH the extension adds no vault_login.
+ * - A renewable token is renewed on use: before a vault_* call, when less than half its TTL (at most 30 minutes) is
+ *   left. A token nobody uses expires as Vault set it. Once Vault renews no further (its maximum TTL), the call's
+ *   result says until when the token holds.
  */
 
 import { spawn } from "node:child_process";
@@ -34,6 +37,8 @@ import { Type } from "typebox";
 const REQUEST_TIMEOUT_MS = 30_000;
 /** How long vault_login waits for the user to log in in the browser. */
 const LOGIN_TIMEOUT_MS = 180_000;
+/** Renew the token when less than this, or half its TTL, is left. */
+const RENEW_BELOW_S = 30 * 60;
 /** How long a command that gives a field its value may take. */
 const COMMAND_TIMEOUT_MS = 60_000;
 const RUN_TIMEOUT_DEFAULT_S = 300;
@@ -126,7 +131,15 @@ async function call(method: string, apiPath: string, signal?: AbortSignal, body?
 	return { status: response.status, json };
 }
 
-type Token = { display_name?: string; expire_time?: string | null; policies?: string[]; identity_policies?: string[] };
+type Token = {
+	display_name?: string;
+	expire_time?: string | null;
+	policies?: string[];
+	identity_policies?: string[];
+	ttl?: number;
+	creation_ttl?: number;
+	renewable?: boolean;
+};
 
 /**
  * The token's details, or undefined when there is no token or Vault rejects it (401/403). Anything else, Vault not
@@ -139,6 +152,47 @@ async function lookupSelf(signal?: AbortSignal): Promise<Token | undefined> {
 	if (answer.status === 401 || answer.status === 403) return undefined;
 	const errors = ((answer.json?.errors ?? []) as unknown[]).map(String).filter(Boolean).join("; ");
 	throw new Error(`Vault could not check the token: ${errors || `it answered ${answer.status}`}`);
+}
+
+/** Until when the token needs no look: it is far from expiry, or cannot be renewed. Kept per token. */
+let renewal: { token: string; checkAfter: number } | undefined;
+
+/**
+ * Renews the token when little of its TTL is left. Returns a note for the call's result once Vault renews no further;
+ * every failure is left to the call itself.
+ */
+async function keepAlive(signal?: AbortSignal): Promise<string | undefined> {
+	try {
+		const secret = token();
+		if (!secret || (renewal?.token === secret && Date.now() < renewal.checkAfter)) return undefined;
+		const self = await lookupSelf(signal);
+		if (!self) return undefined;
+		const ttl = Number(self.ttl ?? 0);
+		if (!self.renewable || ttl <= 0) {
+			renewal = { token: secret, checkAfter: Number.POSITIVE_INFINITY };
+			return undefined;
+		}
+		// A renewal sets the TTL anew from now: only when less than half the original one is left, so it never shortens it.
+		const below = Math.min(RENEW_BELOW_S, Number(self.creation_ttl ?? 0) / 2 || RENEW_BELOW_S);
+		if (ttl >= below) {
+			renewal = { token: secret, checkAfter: Date.now() + (ttl - below) * 1000 };
+			return undefined;
+		}
+		const answer = await call("POST", "auth/token/renew-self", signal, {});
+		if (answer.status !== 200) {
+			renewal = { token: secret, checkAfter: Date.now() + 60_000 };
+			return undefined;
+		}
+		const left = Number(answer.json?.auth?.lease_duration ?? 0);
+		if (left >= below) {
+			renewal = { token: secret, checkAfter: Date.now() + (left - below) * 1000 };
+			return undefined;
+		}
+		const until = new Date(Date.now() + left * 1000).toISOString().replace(/\.\d+Z$/, "Z");
+		return `The Vault token expires in ${Math.max(0, Math.round(left / 60))} minutes (${until}) and Vault renews it no further: ${loginHint()} then.`;
+	} catch {
+		return undefined;
+	}
 }
 
 const describeToken = (self: Token) =>
@@ -321,6 +375,20 @@ type FieldSpec = {
 
 export default function (pi: ExtensionAPI) {
 	if (!process.env.VAULT_ADDR?.trim()) return;
+
+	const renewed = new Set(["vault_list", "vault_secret", "vault_run", "vault_write"]);
+	const notes = new Map<string, string>();
+	pi.on("tool_call", async (event, ctx) => {
+		if (!renewed.has(event.toolName)) return;
+		const note = await keepAlive(ctx.signal);
+		if (note) notes.set(event.toolCallId, note);
+	});
+	pi.on("tool_result", (event) => {
+		const note = notes.get(event.toolCallId);
+		if (!note) return;
+		notes.delete(event.toolCallId);
+		return { content: [...event.content, { type: "text", text: note }] };
+	});
 
 	pi.registerTool({
 		name: "vault_list",

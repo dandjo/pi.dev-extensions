@@ -966,6 +966,10 @@ a tool may do is up to the token's policies.
   "Invalid parameter: redirect_uri", and after three minutes the tool
   points to the web UI instead: log in there, copy the token, and run
   `vault login` in a terminal.
+- A renewable token is renewed on use: before a `vault_*` call, when less
+  than half its TTL, at most 30 minutes, is left. A token nobody uses
+  expires as Vault set it; no timer keeps it alive. Once Vault renews it no
+  further (its maximum TTL), the call's result says until when it holds.
 
 For example, a database dump with the password from Vault:
 
