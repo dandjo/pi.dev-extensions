@@ -24,6 +24,10 @@
  *   content (artifacts, archives) is saved to a temp file, removed when the session ends. A cut job log keeps its end.
  * - files uploads local files as multipart/form-data (a project avatar, a markdown upload); the fields of body go
  *   along as form fields. Files go, like the token, only to the instance of the call.
+ * - fieldFiles sets body fields from local files, field name → path: the content of each file (up to 64 KB, UTF-8, one
+ *   trailing newline stripped) becomes the string value of that field, so a secret, such as the value of a CI/CD
+ *   variable, never appears in the call, the result, or the transcript. Every such value is masked in the result,
+ *   whatever the field or the status, and only the paths are shown of the call.
  * - Requests go through the proxy Pi uses for its own HTTP (its httpProxy setting, applied as HTTPS_PROXY and
  *   HTTP_PROXY, and NO_PROXY): https through a CONNECT tunnel, as curl and undici do.
  * - A second tool, gitlab_pipeline, shows, waits for, and drives CI pipelines and jobs in a few lines, with the same
@@ -60,6 +64,8 @@ const REQUEST_TIMEOUT_MS = 30_000;
 const MAX_REDIRECTS = 5;
 const MAX_DOWNLOAD_BYTES = 100 * 1024 * 1024;
 const MAX_UPLOAD_BYTES = 100 * 1024 * 1024;
+/** A file named by fieldFiles is a value, not an upload: this large at most. */
+const MAX_FIELD_FILE_BYTES = 64 * 1024;
 /** Content types of uploaded files by extension; anything else goes as application/octet-stream. */
 const UPLOAD_TYPES: Record<string, string> = {
 	".png": "image/png",
@@ -220,6 +226,50 @@ function multipart(fields: Record<string, unknown> | undefined, files: Record<st
 	}
 	parts.push(Buffer.from(`--${boundary}--\r\n`));
 	return { contentType: `multipart/form-data; boundary=${boundary}`, data: Buffer.concat(parts) };
+}
+
+/**
+ * The values of body fields read from local files (field name → path): a regular UTF-8 file of up to 64 KB, minus one
+ * trailing newline. A message names the path and the reason, never the content.
+ */
+function readFieldFiles(fieldFiles: Record<string, string>): Record<string, string> {
+	const values: Record<string, string> = {};
+	for (const [name, file] of Object.entries(fieldFiles)) {
+		if (name === "") throw new Error("fieldFiles: a field name is empty");
+		if (typeof file !== "string") throw new Error(`fieldFiles.${name}: the path is not a string`);
+		const resolved = localPath(file);
+		let data: Buffer;
+		try {
+			const stat = statSync(resolved);
+			if (!stat.isFile()) throw new Error("not a regular file");
+			if (stat.size > MAX_FIELD_FILE_BYTES) throw new Error(`larger than ${formatSize(MAX_FIELD_FILE_BYTES)}`);
+			data = readFileSync(resolved);
+			if (data.length > MAX_FIELD_FILE_BYTES) throw new Error(`larger than ${formatSize(MAX_FIELD_FILE_BYTES)}`);
+		} catch (error) {
+			const code = (error as NodeJS.ErrnoException).code;
+			throw new Error(`fieldFiles.${name}: ${resolved} cannot be read (${code ?? (error instanceof Error ? error.message : "error")})`);
+		}
+		let text: string;
+		try {
+			text = new TextDecoder("utf-8", { fatal: true }).decode(data);
+		} catch {
+			throw new Error(`fieldFiles.${name}: ${resolved} is not UTF-8 text`);
+		}
+		values[name] = text.replace(/\r?\n$/, "");
+	}
+	return values;
+}
+
+/** Masks the values in a text, as they stand and as JSON writes them, the longest first so none is left in part. */
+function masker(values: string[]): (text: string) => string {
+	const forms = new Set<string>();
+	for (const value of values) {
+		if (value === "") continue;
+		forms.add(value);
+		forms.add(JSON.stringify(value).slice(1, -1));
+	}
+	const sorted = [...forms].sort((a, b) => b.length - a.length);
+	return (text) => sorted.reduce((rest, form) => rest.split(form).join(REDACTED), text);
 }
 
 /**
@@ -606,6 +656,13 @@ const BaseParams = {
 			additionalProperties: Type.String(),
 			description:
 				"Local files to upload with POST or PUT as multipart/form-data, form field name → path, e.g. {\"avatar\": \"~/logo.png\"} for PUT /projects/{id} or {\"file\": \"./diagram.png\"} for POST /projects/{id}/uploads",
+		}),
+	),
+	fieldFiles: Type.Optional(
+		Type.Object({}, {
+			additionalProperties: Type.String(),
+			description:
+				"Body fields taken from local files with POST or PUT, field name → path (a 0600 temp file), e.g. {\"value\": \"/tmp/secret.txt\"} for POST /projects/{id}/variables. The file's text (UTF-8, up to 64 KB, one trailing newline stripped) becomes the string value of that field and wins over the same field in body. The value never shows in the call or the result: it is masked in the response. Use it for secrets",
 		}),
 	),
 	raw: Type.Optional(
@@ -1404,7 +1461,9 @@ export default function (pi: ExtensionAPI) {
 			"secret CI/CD variable values are always masked. File contents come as they are, job logs without colour " +
 			"codes; binary content such as artifacts is saved to a temp file. files uploads local files as multipart/form-data, " +
 			"e.g. a project avatar (PUT /projects/{id}, files {\"avatar\": path}) or an image for markdown (POST " +
-			"/projects/{id}/uploads, files {\"file\": path}). Output over " +
+			"/projects/{id}/uploads, files {\"file\": path}). fieldFiles takes body fields from local files so a secret " +
+			"stays out of the call and the result (POST /projects/{id}/variables with body {\"key\": …} and fieldFiles " +
+			"{\"value\": path}); the value is masked in the response. Output over " +
 			`${formatSize(DEFAULT_MAX_BYTES)} is truncated (a job log keeps its end) and the full response saved to a ` +
 			"temp file. Temp files are removed when the session ends.",
 		promptSnippet:
@@ -1422,6 +1481,7 @@ export default function (pi: ExtensionAPI) {
 			"gitlab: a description in a list is cut; GET the single issue or merge request before quoting or changing its description.",
 			"gitlab: send POST, PUT, or DELETE only for changes the user asked for.",
 			"gitlab: upload a local file with files, e.g. a project avatar as PUT /projects/{id} with files {\"avatar\": \"/path/logo.png\"}; upload only files the user named for that purpose.",
+			"gitlab: send a secret (a CI/CD variable value, a token) with fieldFiles, a field name → the path of a 0600 temp file, never in body, so it stays out of the call, the result, and the transcript.",
 		],
 		parameters: parameters(instances),
 		annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
@@ -1434,13 +1494,20 @@ export default function (pi: ExtensionAPI) {
 			}
 			const files = params.files as Record<string, string> | undefined;
 			if (files !== undefined && method !== "POST" && method !== "PUT") throw new Error("files are uploaded with POST or PUT");
+			const fieldFiles = params.fieldFiles as Record<string, string> | undefined;
+			if (fieldFiles !== undefined && method !== "POST" && method !== "PUT") {
+				throw new Error(`fieldFiles go in the body of POST or PUT, not of a ${method} request`);
+			}
 			const target = requestUrl(instance, params.path, params.query as Record<string, unknown> | undefined);
 			if (files !== undefined && target.pathname === instance.graphql) throw new Error("files cannot go to /api/graphql");
+			const fromFiles = fieldFiles !== undefined ? readFieldFiles(fieldFiles) : {};
+			const sent =
+				Object.keys(fromFiles).length > 0 ? { ...(params.body as Record<string, unknown> | undefined), ...fromFiles } : params.body;
 			const payload: Payload | undefined =
 				files !== undefined && Object.keys(files).length > 0
-					? multipart(params.body as Record<string, unknown> | undefined, files)
-					: params.body !== undefined
-						? { contentType: "application/json", data: JSON.stringify(params.body) }
+					? multipart(sent as Record<string, unknown> | undefined, files)
+					: sent !== undefined
+						? { contentType: "application/json", data: JSON.stringify(sent) }
 						: undefined;
 			const token = await resolveToken(
 				instance,
@@ -1449,7 +1516,7 @@ export default function (pi: ExtensionAPI) {
 				signal,
 			);
 			const { response, url } = await send(instance, token, method, target, payload, signal);
-			const mask = (text: string) => text.split(token).join(REDACTED);
+			const mask = masker([token, ...Object.values(fromFiles)]);
 			const rerun = response.status === 401 && forgetToken(instance);
 
 			const graphql = target.pathname === instance.graphql;

@@ -760,7 +760,7 @@ written with your permissions.
   fields named `token` or `*_token` (`runners_token`, a newly created access
   token), and the value of a CI/CD variable that is masked or hidden or whose
   key names a secret (`PASSWORD`, `SECRET`, `TOKEN`, `…_KEY`, …) read
-  `[redacted]`.
+  `[redacted]`, and so does every value sent with `fieldFiles`.
 - REST JSON is folded before it reaches the model. A list of issues shrinks
   to about a third of its size:
   - Empty fields, avatar URLs, and the `_links` of list items are left out,
@@ -779,6 +779,18 @@ written with your permissions.
   fields of `body` go along as form fields (arrays as `key[]`). Like the token,
   files go only to the instance of the call, up to 100 MB in all; GET, DELETE,
   and GraphQL take none.
+- `fieldFiles` takes body fields from local files with POST or PUT, field name
+  → path, so a secret stays out of the call, the result, and the transcript:
+  a CI/CD variable is `POST /projects/{id}/variables` with
+  `body: {"key": "E2E_HTTP_PASSWORD", "masked": true, "environment_scope": "*"}`
+  and `fieldFiles: {"value": "/tmp/secret"}` (a file of mode 600, written
+  e.g. from a vault). The text of the file,
+  UTF-8 and up to 64 KB, with one trailing newline cut off, becomes the string
+  value of the field and wins over the same field in `body`; a directory, a
+  larger or a non-UTF-8 file is refused without showing its content. The value
+  is masked in everything the tool returns, whatever the field and the status,
+  and the call shows only its path. With `files`, it goes along as a form field.
+  GET and DELETE take none.
 - File contents (`…/raw`) and GraphQL answers come as they are. A job log
   (`…/jobs/{id}/trace`) comes without its colour codes, and when it is cut,
   it keeps its end, where the failure is.
