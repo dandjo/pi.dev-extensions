@@ -11,11 +11,10 @@
  *   chosen with the keys when the pointer leaves the options (a key acts on the option highlighted, and makes it the
  *   one chosen with the keys), a tab under the pointer gets a lighter background, a click on an option picks it as Enter does (toggles it in a multi-select), a click on a
  *   tab opens it, a click on the submit line on the Submit tab submits, and the wheel moves the highlight.
- * - The dialog rings the terminal bell (BEL) as it opens, so the terminal marks the tab of a session that waits for an
- *   answer. In tmux it rings the terminals of the session's clients directly instead, and sets the pane option
- *   @pi_ask while it is open, so tmux can ignore every other program's bell (bell-action none) and the tab formats can
- *   mark the window of a waiting question with #{P:#{?@pi_ask,1,}}. {"bell": false} in
- *   ~/.pi/agent/ask-user-question.json turns both off.
+ * - The dialog rings the terminal bell (BEL) as it opens, so a terminal or tmux marks the tab of a session that waits
+ *   for an answer. {"bell": false} in ~/.pi/agent/ask-user-question.json turns that off. The event
+ *   ask-user-question:dialog (QuestionsDialog) tells when a terminal dialog opens and closes, its own questions and a
+ *   subagent's alike, and whether it rang, for an extension that marks the tab otherwise (tmux-tab-activity.ts).
  * - RPC clients get one select dialog per question. Without any UI the call fails with a note to decide alone.
  * - A subagent (subagents.ts) runs as an RPC client of the session that started it. Where that session says it takes
  *   whole question sets (PI_SUBAGENT_QUESTIONS), the subagent hands its questions over in one editor request titled
@@ -29,8 +28,7 @@
  *   questions ended. Interrupting the run withdraws them.
  */
 
-import { execFile } from "node:child_process";
-import { appendFile, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import * as path from "node:path";
 import { type ExtensionAPI, type ExtensionContext, getAgentDir } from "@earendil-works/pi-coding-agent";
 import {
@@ -91,6 +89,11 @@ const QUESTIONS_OPEN = "ask-user-question:open";
 const QUESTIONS_CLOSE = "ask-user-question:close";
 const ASKER = "ask-user-question:asker";
 const ASKER_REQUEST = "ask-user-question:asker-request";
+/** A terminal dialog opens or closes. */
+const QUESTIONS_DIALOG = "ask-user-question:dialog";
+type QuestionsDialog = { open: boolean; bell: boolean };
+/** Sends QUESTIONS_DIALOG: set when the extension loads. */
+let emitDialog: (state: QuestionsDialog) => void = () => {};
 /**
  * The title of the editor request a subagent hands its questions to the session that started it with. The prefill is
  * a QuestionsRelay as JSON, the value a QuestionsReply as JSON; a cancelled request means dismissed.
@@ -257,45 +260,12 @@ function bellEnabled(): boolean {
 	}
 }
 
-/** The tmux pane Pi runs in, or undefined outside tmux. */
-const TMUX_PANE = process.env.TMUX && process.env.TMUX_PANE ? process.env.TMUX_PANE : undefined;
-/** The terminal dialogs open now: the pane keeps @pi_ask until the last one closes. */
-let asking = 0;
-
-function tmux(args: string[], done?: (stdout: string) => void): void {
-	execFile("tmux", args, { timeout: 5000 }, (error, stdout) => {
-		if (!error) done?.(stdout);
-	});
-}
-
-/**
- * A question opens: outside tmux the bell; in tmux the pane option @pi_ask and a bell written to the terminal of every
- * client of the pane's session (tmux, set to ignore bells, would not pass Pi's on). Returns what the close undoes.
- */
-function signalQuestion(write: (data: string) => void): () => void {
-	if (!bellEnabled()) return () => {};
-	if (!TMUX_PANE) {
-		write("\x07");
-		return () => {};
-	}
-	const pane = TMUX_PANE;
-	asking++;
-	tmux(["set-option", "-p", "-t", pane, "@pi_ask", "1"]);
-	tmux(["list-clients", "-t", pane, "-F", "#{client_tty}"], (stdout) => {
-		for (const tty of stdout.split("\n").filter((line) => line.startsWith("/dev/"))) appendFile(tty, "\x07", () => {});
-	});
-	let undone = false;
-	return () => {
-		if (undone) return;
-		undone = true;
-		if (--asking === 0) tmux(["set-option", "-p", "-u", "-t", pane, "@pi_ask"]);
-	};
-}
-
 /** Interactive terminal dialog. Resolves to the answers by question index, or undefined when dismissed or closed. */
 function askInTerminal(ctx: ExtensionContext, questions: Question[], signal: AbortSignal, from?: string): Promise<Map<number, Answer> | undefined> {
 	return ctx.ui.custom<Map<number, Answer> | undefined>((tui, theme, _keybindings, finish) => {
-		const unsignal = signalQuestion((data) => tui.terminal.write(data));
+		const bell = bellEnabled();
+		if (bell) tui.terminal.write("\x07");
+		emitDialog({ open: true, bell });
 		/** The option under the pointer, on its tab: it has the highlight while the pointer is there. */
 		let hover: { tab: number; index: number } | undefined;
 		// The pointer leaving the dialog: every move first clears what is under the pointer, and the dialog's own move
@@ -308,8 +278,10 @@ function askInTerminal(ctx: ExtensionContext, questions: Question[], signal: Abo
 				if (hover === undefined && hoverTab === undefined) refresh();
 			});
 		});
+		let closed = false;
 		const done = (result: Map<number, Answer> | undefined) => {
-			unsignal();
+			if (!closed) emitDialog({ open: false, bell });
+			closed = true;
 			stopWatching();
 			finish(result);
 		};
@@ -779,10 +751,7 @@ async function ask(pi: ExtensionAPI, ctx: ExtensionContext, toolCallId: string, 
 }
 
 export default function (pi: ExtensionAPI) {
-	// A Pi that ended while a question was open left @pi_ask on its pane: the next Pi in the pane takes it away.
-	pi.on("session_start", (_event, ctx) => {
-		if (TMUX_PANE && ctx.mode === "tui" && asking === 0) tmux(["set-option", "-p", "-u", "-t", TMUX_PANE, "@pi_ask"]);
-	});
+	emitDialog = (state) => pi.events.emit(QUESTIONS_DIALOG, state satisfies QuestionsDialog);
 	// A subagent's questions, asked here for it. They are not offered to other extensions: no tool call of this session
 	// stands behind them.
 	const asker: Asker = {

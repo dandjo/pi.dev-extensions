@@ -1013,6 +1013,21 @@ spinners of all tabs turn in step.
   set -g window-status-current-format " $PI_TAB"
   ```
 
+- While an `ask_user_question` dialog is open, its own questions or a
+  subagent's, the pane has the option `@pi_ask`, so the tab formats can mark
+  the window, the active one too, which tmux's bell flag never does. Where
+  tmux ignores bells (`bell-action none`, so that no other program's bell
+  rings), the extension writes the bell to the terminals of the session's
+  clients itself; not when the dialog did not ring. The next Pi in a pane
+  removes a mark a crashed Pi left:
+
+  ```conf
+  set -g bell-action none
+  %hidden PI_ASK="#{P:#{?@pi_ask,1,}}"
+  set -g window-status-style "#{?$PI_ASK,nodim#,bold#,blink,dim}"
+  set -g window-status-current-style "reverse#{?$PI_ASK,#,blink,}"
+  ```
+
 - It checks the setup when a run starts, and turns the spinner only while a
   tab format shows the pane title (`pane_title` or `#T`) and takes the
   spinner from behind `␟`, and `set-titles` does not hand the pane title on
@@ -1111,20 +1126,10 @@ that ask through it, such as setup wizards, work unchanged.
 - The highlighted option has the selection background, as in Claude Code,
   and an arrow (`→`) in front, as in Pi's own lists.
 - The dialog rings the terminal bell as it opens, so the terminal marks a
-  session that waits for an answer. In tmux it rings the terminals of the
-  session's clients directly and sets the pane option `@pi_ask` while it is
-  open, so tmux can ignore every other program's bell and the tabs can mark
-  the window whose Pi asks, the active one too:
-
-  ```conf
-  set -g bell-action none
-  %hidden PI_ASK="#{P:#{?@pi_ask,1,}}"
-  set -g window-status-style "#{?$PI_ASK,nodim#,bold#,blink,dim}"
-  set -g window-status-current-style "reverse#{?$PI_ASK,#,blink,}"
-  ```
-
-  `{"bell": false}` in `~/.pi/agent/ask-user-question.json` turns the bell
-  and the mark off.
+  session that waits for an answer; tmux sets the bell flag of its window,
+  which `window-status-bell-style` can make blink in the tab, and
+  [tmux-tab-activity](#tmux-tab-activity) can mark it on the active tab too.
+  `{"bell": false}` in `~/.pi/agent/ask-user-question.json` turns that off.
 - In fullscreen mode (`tuiMode`) the mouse works as well: the highlight follows
   the pointer and goes back to the option chosen with the keys when the pointer
   leaves the options; a key acts on the option highlighted, which then becomes

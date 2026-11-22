@@ -9,8 +9,7 @@
  * "π - ␟⠹ <name> - <directory>" (an unnamed session's directory as its name): ␟ marks the title of a working session,
  * and the spinner's frame follows it, which the tab formats below put in place of the π. The frames are those of Pi's
  * own spinner (pi-tui's Loader), ⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏, one every 80 ms, each taken from the clock, so all tabs show the same frame. It stops when Pi settles,
- * no subagent works, and no background wait runs, pauses while an ask_user_question dialog waits (its mark, the pane
- * option @pi_ask, shows then), and puts Pi's own title back. A run that waits for a usage limit to reset (auto-continue.ts,
+ * no subagent works, and no background wait runs, pauses while an ask_user_question dialog waits (its mark shows then, see below), and puts Pi's own title back. A run that waits for a usage limit to reset (auto-continue.ts,
  * "auto-continue:state") does not count as work meanwhile, nor does a run that only waits in agent calls of its own
  * whose subagents all wait (for an instruction, an answer, or a usage limit).
  *
@@ -41,6 +40,17 @@
  *   set -g window-status-format " $PI_TAB"
  *   set -g window-status-current-format " $PI_TAB"
  *
+ * A question that waits: while a terminal dialog of ask-user-question.ts is open ("ask-user-question:dialog", its own
+ * questions and a subagent's), the pane has the option @pi_ask, so the tab formats can mark the window, the active
+ * one too, which tmux's bell flag never does. Where tmux ignores bells (bell-action none, so that no other program's
+ * bell rings), the extension writes the bell to the terminals of the session's clients itself. Not when the dialog
+ * did not ring ("bell": false in ask-user-question.json). The next Pi in a pane removes a mark a crashed Pi left.
+ *
+ *   set -g bell-action none
+ *   %hidden PI_ASK="#{P:#{?@pi_ask,1,}}"
+ *   set -g window-status-style "#{?$PI_ASK,nodim#,bold#,blink,dim}"
+ *   set -g window-status-current-style "reverse#{?$PI_ASK,#,blink,}"
+ *
  * Then `tmux source-file` the configuration, and /reload in running Pi sessions. The extension checks the setup when
  * a run starts: it turns the spinner only while window-status-format or window-status-current-format shows the pane
  * title (pane_title or #T) and takes the spinner from behind ␟, and not while set-titles hands the pane title on to
@@ -53,6 +63,7 @@
  */
 
 import { execFile } from "node:child_process";
+import { appendFile } from "node:fs";
 import path from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
@@ -72,6 +83,10 @@ const WAITS_REQUEST = "background-waits:request";
 /** ask-user-question.ts: a dialog opens and closes (answered, declined, or withdrawn), with its tool call id. */
 const QUESTIONS_OPEN = "ask-user-question:open";
 const QUESTIONS_CLOSE = "ask-user-question:close";
+/** ask-user-question.ts: a terminal dialog opens or closes ({ open, bell }), with its own questions or a subagent's. */
+const QUESTIONS_DIALOG = "ask-user-question:dialog";
+/** The pane option that marks a pane whose Pi waits for an answer, for the tab formats. */
+const ASK_OPTION = "@pi_ask";
 /** auto-continue.ts: whether the run waits for a usage limit to reset ({ waiting }), and the request for it. */
 const LIMIT_STATE = "auto-continue:state";
 const LIMIT_REQUEST = "auto-continue:state-request";
@@ -81,6 +96,13 @@ const AGENT_TOOL = "agent";
 function tmuxOption(name: string): Promise<string> {
 	return new Promise((resolve) => {
 		execFile("tmux", ["show-options", "-gv", name], { timeout: 3_000 }, (error, stdout) => resolve(error ? "" : stdout.trim()));
+	});
+}
+
+/** Runs tmux; its output, or undefined when it failed. */
+function tmux(args: string[]): Promise<string | undefined> {
+	return new Promise((resolve) => {
+		execFile("tmux", args, { timeout: 3_000 }, (error, stdout) => resolve(error ? undefined : stdout));
 	});
 }
 
@@ -171,7 +193,27 @@ export default function (pi: ExtensionAPI) {
 		frame();
 	}
 
+	/** The pane of this Pi, and its terminal dialogs open now that rang: the pane keeps @pi_ask until the last closes. */
+	const pane = process.env.TMUX_PANE;
+	let dialogs = 0;
+
+	async function markQuestion(target: string): Promise<void> {
+		await tmux(["set-option", "-p", "-t", target, ASK_OPTION, "1"]);
+		// tmux passes Pi's bell on by itself unless it ignores bells; then it goes to the session's clients directly.
+		if ((await tmux(["display-message", "-p", "-t", target, "#{bell-action}"]))?.trim() !== "none") return;
+		const ttys = (await tmux(["list-clients", "-t", target, "-F", "#{client_tty}"])) ?? "";
+		for (const tty of ttys.split("\n").filter((line) => line.startsWith("/dev/"))) appendFile(tty, "\x07", () => {});
+	}
+
+	const unmarkQuestion = (target: string) => void tmux(["set-option", "-p", "-u", "-t", target, ASK_OPTION]);
+
 	const unsubscribe = [
+		pi.events.on(QUESTIONS_DIALOG, (data) => {
+			const { open, bell } = (data ?? {}) as { open?: unknown; bell?: unknown };
+			if (!pane || bell !== true) return;
+			if (open === true && dialogs++ === 0) void markQuestion(pane);
+			else if (open === false && dialogs > 0 && --dialogs === 0) unmarkQuestion(pane);
+		}),
 		pi.events.on(QUESTIONS_OPEN, (data) => {
 			const id = (data as { toolCallId?: unknown } | undefined)?.toolCallId;
 			asking.add(typeof id === "string" ? id : "");
@@ -213,6 +255,8 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("session_start", (_event, context) => {
 		ctx = context;
+		// A Pi that ended while a question was open left the mark on its pane.
+		if (pane && context.mode === "tui" && dialogs === 0) unmarkQuestion(pane);
 		running = false;
 		compacting = false;
 		agents = 0;
@@ -268,5 +312,7 @@ export default function (pi: ExtensionAPI) {
 		stop();
 		ctx = null;
 		for (const off of unsubscribe) off();
+		if (pane && dialogs > 0) unmarkQuestion(pane);
+		dialogs = 0;
 	});
 }
