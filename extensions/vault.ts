@@ -128,13 +128,17 @@ async function call(method: string, apiPath: string, signal?: AbortSignal, body?
 
 type Token = { display_name?: string; expire_time?: string | null; policies?: string[]; identity_policies?: string[] };
 
+/**
+ * The token's details, or undefined when there is no token or Vault rejects it (401/403). Anything else, Vault not
+ * answering or answering with another error, throws: it says nothing about the token.
+ */
 async function lookupSelf(signal?: AbortSignal): Promise<Token | undefined> {
-	try {
-		const answer = await call("GET", "auth/token/lookup-self", signal);
-		return answer.status === 200 ? (answer.json?.data as Token) : undefined;
-	} catch {
-		return undefined;
-	}
+	if (!token()) return undefined;
+	const answer = await call("GET", "auth/token/lookup-self", signal);
+	if (answer.status === 200) return answer.json?.data as Token;
+	if (answer.status === 401 || answer.status === 403) return undefined;
+	const errors = ((answer.json?.errors ?? []) as unknown[]).map(String).filter(Boolean).join("; ");
+	throw new Error(`Vault could not check the token: ${errors || `it answered ${answer.status}`}`);
 }
 
 const describeToken = (self: Token) =>
@@ -685,7 +689,7 @@ export default function (pi: ExtensionAPI) {
 				const lines = run.stderr.split("\n").map((line) => line.trim()).filter((line) => line && !/^https?:\/\//.test(line));
 				throw new Error(`vault login failed: ${lines.slice(-3).join(" ") || `exit code ${run.code}`}`);
 			}
-			const self = await lookupSelf(signal);
+			const self = await lookupSelf(signal).catch(() => undefined);
 			const note = process.env.VAULT_TOKEN?.trim() ? " VAULT_TOKEN is set in Pi's environment and wins over ~/.vault-token: unset it, or the tools keep the old token." : "";
 			return { content: [{ type: "text", text: `Logged in: ${self ? describeToken(self) : "the token could not be checked"}.${note}` }], details: undefined };
 		},
