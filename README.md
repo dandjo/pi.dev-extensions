@@ -2001,7 +2001,6 @@ details are no longer needed, before the next part fills the context further.
 - It works in the interactive session only: a subagent ends with its run, and
   so does print mode.
 
-
 ## wait
 
 Adds the `wait` tool: it waits for something to happen — a CI pipeline, a
