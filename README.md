@@ -1607,7 +1607,8 @@ and you can work on from there while Pi keeps running on your machine.
   they are open. An answer from the app closes the terminal dialog. An answer
   from the terminal goes to the app and withdraws the card there, as do Esc and
   an interrupted run. Declining in the app with a note passes that note to the
-  model.
+  model. The app sends a multi-select answer as a list of labels, Claude Code
+  as labels joined with `, `; both arrive with every label ticked.
 - Slash commands from the app: Pi's built-ins that need no terminal UI run as
   if typed in the terminal — `/new` (also Claude Code's `/clear`), `/reload`,
   `/compact [instructions]`, `/name [name]`, `/model [name]`,

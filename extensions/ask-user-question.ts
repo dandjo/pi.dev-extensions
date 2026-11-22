@@ -166,8 +166,11 @@ interface Outcome {
 interface QuestionsOpen {
 	toolCallId: string;
 	questions: Question[];
-	/** Answers by question text, multi-select labels joined with ", "; annotations as Claude Code's (notes per question). */
-	answer(answers: Record<string, string>, annotations?: Record<string, { notes?: string }>): boolean;
+	/**
+	 * Answers by question text, multi-select labels joined with ", " as Claude Code joins them, or as a list (the
+	 * Claude app's form); annotations as Claude Code's (notes per question).
+	 */
+	answer(answers: Record<string, string | string[]>, annotations?: Record<string, { notes?: string }>): boolean;
 	decline(message?: string): boolean;
 }
 
@@ -224,17 +227,52 @@ function resultText(details: Details): string {
 	return `User has answered your questions: ${pairs}. You can now continue with the user's answers in mind.${note}`;
 }
 
-/** Answers by question text, as another extension hands them over, by question index. */
+/**
+ * The parts of a multi-select answer, as Claude Code joins them: separated by ", ", a part that holds ", " or a quote
+ * written as a JSON string.
+ */
+function splitJoined(value: string): string[] {
+	const parts: string[] = [];
+	let rest = value;
+	while (rest) {
+		let part: string | undefined;
+		const quoted = rest.startsWith('"') ? rest.match(/^"(?:[^"\\]|\\.)*"(?=, |$)/) : null;
+		if (quoted) {
+			try {
+				part = JSON.parse(quoted[0]) as string;
+				rest = rest.slice(quoted[0].length);
+			} catch {
+				part = undefined;
+			}
+		}
+		if (part === undefined) {
+			const end = rest.indexOf(", ");
+			part = end < 0 ? rest : rest.slice(0, end);
+			rest = end < 0 ? "" : rest.slice(end);
+		}
+		parts.push(part.trim());
+		rest = rest.startsWith(", ") ? rest.slice(2) : rest;
+	}
+	return parts.filter(Boolean);
+}
+
+/**
+ * Answers by question text, as another extension hands them over, by question index. A multi-select answer is a
+ * joined string or, as the Claude app sends it through Remote Control, a list of labels.
+ */
 function fromRecord(questions: Question[], answers: Record<string, unknown>, annotations?: Record<string, { notes?: unknown }>): Map<number, Answer> {
 	const result = new Map<number, Answer>();
 	questions.forEach((q, i) => {
 		const raw = answers[q.question];
-		const value = typeof raw === "string" ? raw.trim() : "";
+		const list = Array.isArray(raw)
+			? raw.filter((part): part is string => typeof part === "string").map((part) => part.trim())
+			: undefined;
+		const value = typeof raw === "string" ? raw.trim() : list && !q.multiSelect ? list.join(", ") : "";
 		const labels = q.options.map((o) => o.label);
 		let answer: Answer;
 		if (labels.includes(value)) answer = { labels: [value] };
 		else if (q.multiSelect) {
-			const parts = value.split(", ").filter(Boolean);
+			const parts = list ? list.filter(Boolean) : labels.includes(value) ? [value] : splitJoined(value);
 			const custom = parts.filter((part) => !labels.includes(part)).join(", ");
 			answer = { labels: parts.filter((part) => labels.includes(part)), ...(custom && { custom }) };
 		} else answer = value ? { labels: [], custom: value } : { labels: [] };
