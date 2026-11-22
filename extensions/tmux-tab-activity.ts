@@ -1,17 +1,17 @@
 /**
- * tmux tab activity: while Pi or one of its subagents works, or a background wait runs, Pi's spinner turns in its tmux
- * tab in place of the π between the window number and the session name, in step with the spinners of the other tabs.
+ * tmux tab activity: while Pi or one of its subagents works, Pi's spinner turns in its tmux tab in place of the π
+ * between the window number and the session name, in step with the spinners of the other tabs.
  *
  * Pi shows the session in the terminal title, "π - <name> - <directory>", or "π - <directory>" while the session has
  * no name. During a run, a compaction, while a subagent works (subagents.ts, "subagents:state" on the event bus; not
- * one that waits for an instruction, an answer, or a usage limit), or while a background wait runs (wait.ts and
- * gitlab.ts, "background-waits:state"; not a repeating one, such as a keepalive), this extension writes it as
+ * one that waits for an instruction, an answer, or a usage limit), this extension writes it as
  * "π - ␟⠹ <name> - <directory>" (an unnamed session's directory as its name): ␟ marks the title of a working session,
  * and the spinner's frame follows it, which the tab formats below put in place of the π. The frames are those of Pi's
  * own spinner (pi-tui's Loader), ⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏, one every 80 ms, each taken from the clock, so all tabs show the same frame. It stops when Pi settles,
- * no subagent works, and no background wait runs, pauses while an ask_user_question dialog waits (its mark shows then, see below), and puts Pi's own title back. A run that waits for a usage limit to reset (auto-continue.ts,
+ * and no subagent works, pauses while an ask_user_question dialog waits (its mark shows then, see below), and puts Pi's own title back. A run that waits for a usage limit to reset (auto-continue.ts,
  * "auto-continue:state") does not count as work meanwhile, nor does a run that only waits in agent calls of its own
- * whose subagents all wait (for an instruction, an answer, or a usage limit).
+ * whose subagents all wait (for an instruction, an answer, or a usage limit). Background waits (wait.ts, gitlab.ts)
+ * never count: they run without the model, as the session waits idle.
  *
  * A window with several panes shows the pane whose Pi works: the active pane's while it works, else the first other
  * pane's that works, else the active pane's. While another pane works, the tab shows that pane's name, so its width
@@ -79,9 +79,6 @@ const MARK = "␟";
 /** subagents.ts: the subagents of this session, whenever something changes, and the request for that list. */
 const SUBAGENTS_STATE = "subagents:state";
 const SUBAGENTS_REQUEST = "subagents:request";
-/** wait.ts, gitlab.ts: the background waits of a tool ({ tool, waits }), whenever they change, and the request for them. */
-const WAITS_STATE = "background-waits:state";
-const WAITS_REQUEST = "background-waits:request";
 /** ask-user-question.ts: a dialog opens and closes (answered, declined, or withdrawn), with its tool call id. */
 const QUESTIONS_OPEN = "ask-user-question:open";
 const QUESTIONS_CLOSE = "ask-user-question:close";
@@ -148,8 +145,6 @@ export default function (pi: ExtensionAPI) {
 	let foregroundWaiting = 0;
 	/** The tool calls of the run that execute now: tool call id -> tool name. */
 	const tools = new Map<string, string>();
-	/** The background waits running now, by the tool that waits. */
-	const waits = new Map<string, number>();
 	/** The ask_user_question dialogs open now, by tool call id. */
 	const asking = new Set<string>();
 	let timer: ReturnType<typeof setTimeout> | null = null;
@@ -158,7 +153,6 @@ export default function (pi: ExtensionAPI) {
 	/** Counts the calls of update(), so one that waited for the setup check does nothing once a later one came. */
 	let generation = 0;
 
-	const waiting = () => [...waits.values()].some((count) => count > 0);
 	// The run only waits in its agent calls, and each of their subagents waits.
 	const held = () =>
 		tools.size > 0 &&
@@ -166,7 +160,7 @@ export default function (pi: ExtensionAPI) {
 		foreground > 0 &&
 		foregroundWaiting === foreground;
 	const working = () =>
-		((running && !limitWait && !held()) || compacting || agents > 0 || waiting()) && asking.size === 0;
+		((running && !limitWait && !held()) || compacting || agents > 0) && asking.size === 0;
 	const dir = (context: ExtensionContext) => path.basename(context.cwd);
 
 	function frame(): void {
@@ -247,15 +241,6 @@ export default function (pi: ExtensionAPI) {
 			limitWait = now;
 			void update();
 		}),
-		pi.events.on(WAITS_STATE, (data) => {
-			const { tool, waits: list } = (data ?? {}) as { tool?: unknown; waits?: unknown };
-			if (typeof tool !== "string") return;
-			// A repeating wait (a keepalive, say) runs for hours without anyone waiting for it: it does not count as work.
-			const now = Array.isArray(list) ? list.filter((wait) => (wait as { repeat?: unknown } | null)?.repeat !== true).length : 0;
-			if (!waiting() && now > 0 && !timer) setup = null;
-			waits.set(tool, now);
-			void update();
-		}),
 	];
 
 	pi.on("session_start", (_event, context) => {
@@ -268,12 +253,10 @@ export default function (pi: ExtensionAPI) {
 		foreground = 0;
 		foregroundWaiting = 0;
 		tools.clear();
-		waits.clear();
 		asking.clear();
 		setup = null;
 		limitWait = false;
 		pi.events.emit(SUBAGENTS_REQUEST, undefined);
-		pi.events.emit(WAITS_REQUEST, undefined);
 		pi.events.emit(LIMIT_REQUEST, undefined);
 	});
 

@@ -27,7 +27,7 @@ names `extensions/`, which holds one file per extension.
 | `vault.ts`                  | Adds the `vault_*` tools: HashiCorp Vault KV secrets, commands with secrets, OIDC login   | `VAULT_ADDR`; the `vault` CLI for `vault_login`                  |
 | `memory.ts`                 | Keeps a memory per project, shared with Claude Code's auto memory when it is there        | —                                                                |
 | `session-title.ts`          | Names each session after its first prompt and shows it in the terminal title              | —                                                                |
-| `tmux-tab-activity.ts`      | Turns Pi's spinner in its tmux tab while Pi, a subagent, or a background wait works       | tmux 3.2 or later, set up as its section describes               |
+| `tmux-tab-activity.ts`      | Turns Pi's spinner in its tmux tab while Pi or a subagent works                           | tmux 3.2 or later, set up as its section describes               |
 | `session-socket.ts`         | Lets sessions message each other and your Claude Code sessions, as Claude Code does       | Linux or macOS                                                   |
 | `ask-user-question.ts`      | Adds `ask_user_question`, Claude Code's multiple-choice questions                         | —                                                                |
 | `subagents.ts`              | Adds the `agent` tool: subagents in their own Pi process, on a tier or a model of choice  | —                                                                |
@@ -1076,27 +1076,27 @@ background while the agent works.
 
 ## tmux-tab-activity
 
-While Pi or one of its subagents works, or a background wait runs, Pi's
-spinner turns in its tmux tab in place of the `π` between the window number
-and the session name, so the tab bar shows which sessions are busy. The
-spinners of all tabs turn in step.
+While Pi or one of its subagents works, Pi's spinner turns in its tmux tab in
+place of the `π` between the window number and the session name, so the tab
+bar shows which sessions are busy. The spinners of all tabs turn in step.
 
 - Pi shows the session in the terminal title, `π - <name> - <directory>`. During
   a run, a compaction, while a subagent works (one that waits for your
-  instruction, an answer, or a usage limit does not count), or while a
-  background wait of [wait](#wait) or [`gitlab_pipeline`](#gitlab_pipeline)
-  runs (not a repeating one, such as a keepalive), the extension writes it as
-  `π - ␟⠹ <name> - <directory>` (an unnamed session's directory as its name):
-  `␟` marks the title of a working session, and the spinner's frame follows
-  it, which the tab formats below put in place of the `π`. The frames are
-  Pi's own, `⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏`, one every 80 ms, each taken from the clock, so all
-  tabs show the same frame.
+  instruction, an answer, or a usage limit does not count), the extension
+  writes it as `π - ␟⠹ <name> - <directory>` (an unnamed session's directory
+  as its name): `␟` marks the title of a working session, and the spinner's
+  frame follows it, which the tab formats below put in place of the `π`. The
+  frames are Pi's own, `⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏`, one every 80 ms, each taken from the
+  clock, so all tabs show the same frame.
 - It pauses while an `ask_user_question` dialog waits, when the dialog's mark
   takes over, while a run waits for a usage limit to reset
   ([auto-continue](#auto-continue)), and while a run only waits in its own
   `agent` calls whose subagents all wait (for your instruction, an answer, or
-  a usage limit). It puts Pi's own title back when Pi settles, no subagent
-  works, and no background wait runs.
+  a usage limit). It puts Pi's own title back when Pi settles and no subagent
+  works.
+- Background waits of [wait](#wait) and [`gitlab_pipeline`](#gitlab_pipeline)
+  never turn it: they check without the model while the session is idle, and
+  the agent panel lists them.
 - A window with several panes shows the pane whose Pi works: the active
   pane's while it works, else the first other pane's that works, else the
   active pane's. While another pane works, the tab shows that pane's name, so
