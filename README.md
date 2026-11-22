@@ -36,6 +36,7 @@ names `extensions/`, which holds one file per extension.
 | `network-resilience.ts`     | Claude Code's handling of dropped connections: stall notice, restart, network wait        | —                                                                |
 | `auto-continue.ts`          | Waits out a used-up usage limit, quota, or rate limit and continues after the reset       | —                                                                |
 | `context-gc.ts`             | Cuts thinking and long tool outputs of older turns from the context, in batches           | —                                                                |
+| `compact.ts`                | Adds `compact`: the model compacts the session on its own and then continues the task     | —                                                                |
 | `wait.ts`                   | Adds `wait`: checks a command or tool until a condition holds, without model requests     | —                                                                |
 | `package-update.ts`         | Keeps this package current, and reloads Pi when it changes                                | The package installed with `pi install`                          |
 
@@ -1976,6 +1977,30 @@ long tool inputs.
   the top level: `coldMinutes` follows the one-hour cache of `claude-sdk`, and
   a provider whose cache lives shorter can cut sooner:
   `{"providers": {"openai": {"coldMinutes": 10}}}`.
+
+## compact
+
+Adds the `compact` tool, with which the model compacts the session on its
+own, as `/compact` does for you: when a part of the work is done and its
+details are no longer needed, before the next part fills the context further.
+
+- `focus` (optional) says what the summary must keep: the task, decisions,
+  open steps, paths. It goes to the summary as `/compact <instructions>`
+  would.
+- The call ends the run after its tool batch, as Pi's compaction would abort
+  a run that goes on. Once Pi is idle, the session is compacted, and a
+  message then starts a turn in which the model continues the task from the
+  summary.
+- A compaction that fails (nothing to compact yet, a usage limit, …) lets the
+  model continue all the same, with the error in the message. Esc during the
+  compaction or the run, or a message from you meanwhile, drops the
+  continuation: you take over.
+- The model is told to compact only when the context is large and a finished
+  part of the work no longer needs its details, never in the middle of a
+  step.
+- It works in the interactive session only: a subagent ends with its run, and
+  so does print mode.
+
 
 ## wait
 
