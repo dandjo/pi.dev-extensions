@@ -671,7 +671,16 @@ export default function (pi: ExtensionAPI) {
 				});
 			});
 			if (signal?.aborted) throw new Error("Cancelled.");
-			if (run.timedOut) throw new Error(`No login within ${LOGIN_TIMEOUT_MS / 60_000} minutes. Did the browser open? The user can run \`vault login -method=oidc\` in a terminal.`);
+			if (run.timedOut) {
+				const ui = `${(process.env.VAULT_ADDR ?? "").trim().replace(/\/+$/, "")}/ui/`;
+				throw new Error(
+					`No login within ${LOGIN_TIMEOUT_MS / 60_000} minutes. Did the browser open? If the identity provider showed ` +
+						`"Invalid parameter: redirect_uri" or a similar error, its client does not allow the CLI's redirect URI ` +
+						`http://localhost:8250/oidc/callback, and only its admin can add it. Until then the user can log in on ${ui} ` +
+						`in the browser, copy the token there (user menu, "Copy token"), and run \`vault login\` in a terminal, which ` +
+						`asks for the token without showing it.`,
+				);
+			}
 			if (run.code !== 0) {
 				const lines = run.stderr.split("\n").map((line) => line.trim()).filter((line) => line && !/^https?:\/\//.test(line));
 				throw new Error(`vault login failed: ${lines.slice(-3).join(" ") || `exit code ${run.code}`}`);

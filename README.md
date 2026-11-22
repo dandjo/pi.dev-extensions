@@ -961,7 +961,11 @@ a tool may do is up to the token's policies.
 - `vault_login` logs in with OIDC through the `vault` CLI, when the token is
   missing or expired: your browser opens the identity provider's page, and
   the new token goes to `~/.vault-token`. Without the CLI on the PATH it is
-  left out.
+  left out. The identity provider's client must allow the redirect URI
+  `http://localhost:8250/oidc/callback`; without it the browser shows
+  "Invalid parameter: redirect_uri", and after three minutes the tool
+  points to the web UI instead: log in there, copy the token, and run
+  `vault login` in a terminal.
 
 For example, a database dump with the password from Vault:
 
