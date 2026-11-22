@@ -1016,13 +1016,15 @@ spinners of all tabs turn in step.
 - While an `ask_user_question` dialog is open, its own questions or a
   subagent's, the pane has the option `@pi_ask`, so the tab formats can mark
   the window, the active one too, which tmux's bell flag never does. Where
-  tmux ignores bells (`bell-action none`, so that no other program's bell
-  rings), the extension writes the bell to the terminals of the session's
-  clients itself; not when the dialog did not ring. The next Pi in a pane
-  removes a mark a crashed Pi left:
+  tmux does not pass Pi's bell on (`bell-action none` and `monitor-bell off`,
+  so that no other program's bell rings or flags a tab; `bell-action` alone
+  still sets the flag), the extension writes the bell to the terminals of the
+  session's clients itself; not when the dialog did not ring. The next Pi in
+  a pane removes a mark a crashed Pi left:
 
   ```conf
   set -g bell-action none
+  set -g monitor-bell off
   %hidden PI_ASK="#{P:#{?@pi_ask,1,}}"
   set -g window-status-style "#{?$PI_ASK,nodim#,bold#,blink,dim}"
   set -g window-status-current-style "reverse#{?$PI_ASK,#,blink,}"

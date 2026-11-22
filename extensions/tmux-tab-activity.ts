@@ -42,11 +42,13 @@
  *
  * A question that waits: while a terminal dialog of ask-user-question.ts is open ("ask-user-question:dialog", its own
  * questions and a subagent's), the pane has the option @pi_ask, so the tab formats can mark the window, the active
- * one too, which tmux's bell flag never does. Where tmux ignores bells (bell-action none, so that no other program's
- * bell rings), the extension writes the bell to the terminals of the session's clients itself. Not when the dialog
- * did not ring ("bell": false in ask-user-question.json). The next Pi in a pane removes a mark a crashed Pi left.
+ * one too, which tmux's bell flag never does. Where tmux does not pass Pi's bell on to the terminal (bell-action none
+ * and monitor-bell off, so that no other program's bell rings or flags a tab; also visual-bell on), the extension writes
+ * the bell to the terminals of the session's clients itself. Not when the dialog did not ring ("bell": false in
+ * ask-user-question.json). The next Pi in a pane removes a mark a crashed Pi left.
  *
  *   set -g bell-action none
+ *   set -g monitor-bell off
  *   %hidden PI_ASK="#{P:#{?@pi_ask,1,}}"
  *   set -g window-status-style "#{?$PI_ASK,nodim#,bold#,blink,dim}"
  *   set -g window-status-current-style "reverse#{?$PI_ASK,#,blink,}"
@@ -87,6 +89,9 @@ const QUESTIONS_CLOSE = "ask-user-question:close";
 const QUESTIONS_DIALOG = "ask-user-question:dialog";
 /** The pane option that marks a pane whose Pi waits for an answer, for the tab formats. */
 const ASK_OPTION = "@pi_ask";
+/** Whether tmux passes a bell in the pane on to the terminals of its clients (alerts.c): "1" or "0". */
+const PASSES_BELL =
+	"#{&&:#{monitor-bell},#{&&:#{!=:#{visual-bell},on},#{||:#{==:#{bell-action},any},#{||:#{&&:#{==:#{bell-action},current},#{window_active}},#{&&:#{==:#{bell-action},other},#{!:#{window_active}}}}}}}";
 /** auto-continue.ts: whether the run waits for a usage limit to reset ({ waiting }), and the request for it. */
 const LIMIT_STATE = "auto-continue:state";
 const LIMIT_REQUEST = "auto-continue:state-request";
@@ -199,8 +204,8 @@ export default function (pi: ExtensionAPI) {
 
 	async function markQuestion(target: string): Promise<void> {
 		await tmux(["set-option", "-p", "-t", target, ASK_OPTION, "1"]);
-		// tmux passes Pi's bell on by itself unless it ignores bells; then it goes to the session's clients directly.
-		if ((await tmux(["display-message", "-p", "-t", target, "#{bell-action}"]))?.trim() !== "none") return;
+		// Where tmux passes Pi's bell on by itself, ringing here too would ring twice.
+		if ((await tmux(["display-message", "-p", "-t", target, PASSES_BELL]))?.trim() !== "0") return;
 		const ttys = (await tmux(["list-clients", "-t", target, "-F", "#{client_tty}"])) ?? "";
 		for (const tty of ttys.split("\n").filter((line) => line.startsWith("/dev/"))) appendFile(tty, "\x07", () => {});
 	}
