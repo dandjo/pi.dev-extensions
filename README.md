@@ -24,6 +24,7 @@ names `extensions/`, which holds one file per extension.
 | `openproject.ts`            | Adds `openproject`: reads and changes OpenProject through its API v3, as you              | An OpenProject API token for each instance                       |
 | `gitlab.ts`                 | Adds `gitlab` and `gitlab_pipeline`: GitLab through its API, as you, and its CI in brief  | A GitLab personal access token for each instance                 |
 | `onepassword.ts`            | Adds the `onepassword_*` tools: 1Password items and `op run`, one approval per session    | The 1Password CLI, signed in through the 1Password app           |
+| `vault.ts`                  | Adds the `vault_*` tools: HashiCorp Vault KV secrets, commands with secrets, OIDC login   | `VAULT_ADDR`; the `vault` CLI for `vault_login`                  |
 | `memory.ts`                 | Keeps a memory per project, shared with Claude Code's auto memory when it is there        | —                                                                |
 | `session-title.ts`          | Names each session after its first prompt and shows it in the terminal title              | —                                                                |
 | `tmux-tab-activity.ts`      | Turns Pi's spinner in its tmux tab while Pi, a subagent, or a background wait works       | tmux 3.2 or later, set up as its section describes               |
@@ -81,7 +82,7 @@ missing. `web_search` comes from the npm package `pi-web-access`; see
 ## Set up Pi
 
 Follow the steps in order — together they are the complete setup: Pi itself,
-the Claude subscription, all twenty-nine extensions, and the browser
+the Claude subscription, all thirty extensions, and the browser
 connection. Every step except the Chrome switch in step 4 is a shell command,
 so an agent can carry them out as well.
 
@@ -172,7 +173,7 @@ Install this repository as a Pi package:
 pi install git:github.com/dandjo/pi.dev-extensions
 ```
 
-Pi clones it into `~/.pi/agent/git/` and loads all twenty-nine extensions
+Pi clones it into `~/.pi/agent/git/` and loads all thirty extensions
 from there; `pi list` shows the package. [package-update](#package-update)
 brings new versions at every start, new and renamed extensions included, and
 reloads Pi once it is idle; `/update` fetches them at once. There is no build
@@ -926,6 +927,48 @@ For example, a registry login without the token in the conversation:
 {
   "command": "printenv TOKEN | docker login -u ci --password-stdin registry.example.com",
   "env": { "TOKEN": "op://Shared/Registry/token" }
+}
+```
+
+## vault
+
+Adds tools for the KV version 2 secrets engines of HashiCorp Vault, through
+Vault's HTTP API. The address comes from `VAULT_ADDR`, without which it adds
+nothing; the token from `VAULT_TOKEN` or `~/.vault-token`, where `vault
+login` keeps it, read anew for every call; `VAULT_NAMESPACE` where set. What
+a tool may do is up to the token's policies.
+
+- Paths are written as for the `vault` CLI, with the mount first, such as
+  `secret/app/database`; a field is `path#field`.
+- No secret value reaches the model:
+  - `vault_list` lists the folders and secrets under a path, or the KV
+    version 2 mounts.
+  - `vault_secret` shows a secret's versions and its fields by name, whether
+    each is set, and its `path#field` reference; of the custom metadata only
+    the keys.
+  - `vault_run` runs a shell command with secrets in environment variables
+    given as `path#field` references. The values go to that command alone
+    and are masked in its output. The command runs without a terminal, as
+    the `bash` tool's do.
+  - `vault_write` sets or removes fields of a secret and keeps the others. It
+    reads the secret and writes it back with check-and-set, so a change made
+    meanwhile is not overwritten. A secret value comes only from a generated
+    password, a command's output, a file, or another secret's field; a value
+    in the call is for what is not secret, such as a user name. A new secret
+    needs `create`, so a typing error makes no new path. Its action `delete`
+    deletes the secret's current version: Vault keeps the earlier versions,
+    and whoever may can undelete it.
+- `vault_login` logs in with OIDC through the `vault` CLI, when the token is
+  missing or expired: your browser opens the identity provider's page, and
+  the new token goes to `~/.vault-token`. Without the CLI on the PATH it is
+  left out.
+
+For example, a database dump with the password from Vault:
+
+```json
+{
+  "command": "MYSQL_PWD=\"$DB_PASSWORD\" mysqldump -h db.example.com -u app app > app.sql",
+  "env": { "DB_PASSWORD": "secret/app/database#password" }
 }
 ```
 
