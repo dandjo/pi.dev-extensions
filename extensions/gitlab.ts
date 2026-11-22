@@ -1240,8 +1240,10 @@ interface BackgroundWaitView {
 	tool: string;
 	/** What is awaited. */
 	label: string;
-	/** When the wait ends, in words. */
+	/** When the wait ends, in words; for a repeating wait, when it raises an alert. */
 	until: string;
+	/** Repeats its check until it is cancelled or the session ends, and does not end when until holds. */
+	repeat?: boolean;
 	startedAt: number;
 	checks: number;
 	/** What the last check found, in one line. */
@@ -1251,7 +1253,7 @@ interface BackgroundWaitView {
 	/** The end of the last check's output, where it says more than last. */
 	output?: string;
 	intervalMs: number;
-	/** When it gives up. */
+	/** When it gives up; Infinity for a repeating wait without a timeout. */
 	deadline: number;
 }
 

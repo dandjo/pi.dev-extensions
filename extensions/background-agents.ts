@@ -41,11 +41,12 @@
  *   to the message. The panel replaces the editor with a subclass of Pi's own, so another extension that replaces the
  *   editor wins over it.
  * - Background waits (wait.ts and gitlab.ts, background-waits:state) are listed below the agents as agents are: the
- *   tool where an agent has its type, then what they wait for, and at the end their id, the time since they started,
- *   and their checks. Enter opens a box above the prompt, as the task manager of
- *   scheduled-tasks.ts shows a task: what the wait waits for and until when, since when, when it gives up, its checks,
- *   its command, and the end of the last check's output, kept current; x cancels the wait, Esc closes the box. x in
- *   the panel cancels it as well (background-waits:cancel).
+ *   tool where an agent has its type, then what they wait for, and at the end their id, the time since they started
+ *   (for a repeating wait, its interval), and their checks. Enter opens a box above the prompt, as the task manager of
+ *   scheduled-tasks.ts shows a task: what the wait waits for and until when (a repeating wait: what it repeats and
+ *   when it alerts), since when, when it gives up, its checks, its command, and the end of the last check's output,
+ *   kept current; x cancels the wait, Esc closes the box. x in the panel cancels it as well
+ *   (background-waits:cancel).
  * - Scheduled tasks (scheduled-tasks.ts, scheduled-tasks:state) are listed below them as well: scheduled or loop
  *   where an agent has its type, then their prompt, and at the end their id, schedule, and next run: Enter opens the
  *   task in its manager, x deletes it. The panel also exists while only waits or tasks are there.
@@ -701,8 +702,10 @@ interface BackgroundWaitView {
 	tool: string;
 	/** What is awaited. */
 	label: string;
-	/** When the wait ends, in words. */
+	/** When the wait ends, in words; for a repeating wait, when it raises an alert. */
 	until: string;
+	/** Repeats its check until it is cancelled or the session ends, and does not end when until holds. */
+	repeat?: boolean;
 	startedAt: number;
 	checks: number;
 	/** What the last check found, in one line. */
@@ -712,7 +715,7 @@ interface BackgroundWaitView {
 	/** The end of the last check's output, where it says more than last. */
 	output?: string;
 	intervalMs: number;
-	/** When it gives up. */
+	/** When it gives up; Infinity for a repeating wait without a timeout. */
 	deadline: number;
 }
 
@@ -975,7 +978,7 @@ export default function (pi: ExtensionAPI) {
 			e.kind === "agent"
 				? statusText(e.row)
 				: e.kind === "wait"
-					? `${e.wait.id} · ${elapsed(now - e.wait.startedAt)} · ${e.wait.checks} check${e.wait.checks === 1 ? "" : "s"}`
+					? `${e.wait.id} · ${e.wait.repeat ? `every ${elapsed(e.wait.intervalMs).replace(/ 0s$/, "")}` : elapsed(now - e.wait.startedAt)} · ${e.wait.checks} check${e.wait.checks === 1 ? "" : "s"}`
 					: `${e.task.id} · ${e.task.kind === "loop wakeup" ? "" : `${e.task.schedule} · `}next ${e.task.next}`,
 		);
 		const description = (e: Entry) =>
@@ -1427,18 +1430,19 @@ export default function (pi: ExtensionAPI) {
 			/** Body rows of the box: at most half the terminal, so the conversation above stays readable (as /btw). */
 			const maxRows = () => Math.max(4, Math.floor(tui.terminal.rows * 0.5) - 3);
 			const body = (wait: BackgroundWaitView, running: boolean, inner: number): string[] => {
-				const label = (name: string) => theme.fg("muted", name.padEnd(11));
+				const label = (name: string) => theme.fg("muted", name.padEnd(12));
 				const block = (title: string, text: string) => [
 					"",
 					theme.fg("muted", title),
 					...text.split("\n").flatMap((line) => (line ? wrapTextWithAnsi(line, inner) : [""])),
 				];
 				const checks = `${wait.checks}, every ${elapsed(wait.intervalMs)}`;
+				const end = Number.isFinite(wait.deadline) ? clock(wait.deadline) : "runs until cancelled or the session ends";
 				return [
-					...wrapTextWithAnsi(`${label("Waits for")}${wait.label}`, inner),
-					...wrapTextWithAnsi(`${label("Until")}${wait.until}`, inner),
+					...wrapTextWithAnsi(`${label(wait.repeat ? "Repeats" : "Waits for")}${wait.label}`, inner),
+					...wrapTextWithAnsi(`${label(wait.repeat ? "Alerts when" : "Until")}${wait.until}`, inner),
 					`${label("Since")}${clock(wait.startedAt)} (${elapsed(Date.now() - wait.startedAt)})`,
-					`${label("Gives up")}${clock(wait.deadline)}`,
+					`${label(wait.repeat ? "Ends" : "Gives up")}${end}`,
 					`${label("Checks")}${checks}`,
 					...(running ? [] : ["", theme.fg("warning", "Ended: its result comes as a message, unless it was cancelled.")]),
 					...(wait.command ? block("Command", wait.command) : []),

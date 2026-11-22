@@ -965,11 +965,12 @@ spinners of all tabs turn in step.
   a run, a compaction, while a subagent works (one that waits for your
   instruction, an answer, or a usage limit does not count), or while a
   background wait of [wait](#wait) or [`gitlab_pipeline`](#gitlab_pipeline)
-  runs, the extension writes it as `π - ␟⠹ <name> - <directory>` (an unnamed
-  session's directory as its name): `␟` marks the title of a working session,
-  and the spinner's frame follows it, which the tab formats below put in place
-  of the `π`. The frames are Pi's own, `⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏`, one every 80 ms, each
-  taken from the clock, so all tabs show the same frame.
+  runs (not a repeating one, such as a keepalive), the extension writes it as
+  `π - ␟⠹ <name> - <directory>` (an unnamed session's directory as its name):
+  `␟` marks the title of a working session, and the spinner's frame follows
+  it, which the tab formats below put in place of the `π`. The frames are
+  Pi's own, `⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏`, one every 80 ms, each taken from the clock, so all
+  tabs show the same frame.
 - It pauses while an `ask_user_question` dialog waits, when the tab's bell takes
   over, while a run waits for a usage limit to reset
   ([auto-continue](#auto-continue)), and while a run only waits in its own
@@ -1334,10 +1335,12 @@ Claude Code, the prompt writes to the agent shown, and Esc interrupts it.
 - Background waits ([wait](#wait), [`gitlab_pipeline`](#gitlab_pipeline))
   are listed below the agents as agents are: the tool where an agent has its
   type, then what they wait for and what the last check found, and at the end
-  their id, the time since they started, and their checks; `x` cancels one. Enter opens a box above the prompt, as the
-  task manager shows a scheduled task: what the wait waits for and until when,
-  since when, when it gives up, its checks, its command, and the end of the
-  last check's output, kept current while it runs. `x` cancels it there too,
+  their id, the time since they started (for a repeating wait, its interval),
+  and their checks; `x` cancels one. Enter opens a box above the prompt, as
+  the task manager shows a scheduled task: what the wait waits for and until
+  when (a repeating wait: what it repeats and when it alerts), since when,
+  when it gives up, its checks, its command, and the end of the last check's
+  output, kept current while it runs. `x` cancels it there too,
   Esc closes the box.
 - Scheduled tasks ([scheduled-tasks](#scheduled-tasks)) are listed below them,
   the same way: `scheduled` or `loop`, their prompt, and at the end their id,
@@ -2003,12 +2006,21 @@ is a request that reads the whole context.
   `list: true` list the background waits, those of
   [`gitlab_pipeline`](#gitlab_pipeline) too; `/waits cancel <id>` or the
   tool's `cancel` stops one.
+- `repeat: true`, for shell commands, is for background work that recurs,
+  such as a keepalive or a token renewal: the command runs every `interval`
+  seconds until the wait is cancelled or the session ends (a `timeout` only
+  when given). The condition, `failure` by default, raises an alert: a
+  message comes when it holds, the wait goes on, and the next alert comes
+  only after a check where it did not hold. The model is told to use it
+  instead of `nohup` or `&` in bash, so the work shows in the
+  [agent panel](#background-agents) and you can stop it there.
 - Background waits go on over `/reload`, and a result that comes while Pi
   reloads arrives once it has. Another session (`/new`, `/resume`, `/fork`)
   ends them, as they belong to the conversation that started them, and names
   them in a notice. The [agent panel](#background-agents) lists them, and
-  [tmux-tab-activity](#tmux-tab-activity) counts them as work; both learn of
-  them on the event bus (`background-waits:state`).
+  [tmux-tab-activity](#tmux-tab-activity) counts them as work, except
+  repeating ones; both learn of them on the event bus
+  (`background-waits:state`).
 - The model is told to wait only for what has not happened yet. A check whose
   condition should already hold, such as a container that just answered,
   stays a single bash call.

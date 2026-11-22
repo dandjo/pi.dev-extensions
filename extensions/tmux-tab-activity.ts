@@ -5,10 +5,10 @@
  * Pi shows the session in the terminal title, "π - <name> - <directory>", or "π - <directory>" while the session has
  * no name. During a run, a compaction, while a subagent works (subagents.ts, "subagents:state" on the event bus; not
  * one that waits for an instruction, an answer, or a usage limit), or while a background wait runs (wait.ts and
- * gitlab.ts, "background-waits:state"), this extension writes it as "π - ␟⠹ <name> - <directory>" (an unnamed session's
- * directory as its name): ␟ marks the title of a working session, and the spinner's frame follows it, which the tab
- * formats below put in place of the π. The frames are those of Pi's own spinner (pi-tui's Loader),
- * ⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏, one every 80 ms, each taken from the clock, so all tabs show the same frame. It stops when Pi settles,
+ * gitlab.ts, "background-waits:state"; not a repeating one, such as a keepalive), this extension writes it as
+ * "π - ␟⠹ <name> - <directory>" (an unnamed session's directory as its name): ␟ marks the title of a working session,
+ * and the spinner's frame follows it, which the tab formats below put in place of the π. The frames are those of Pi's
+ * own spinner (pi-tui's Loader), ⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏, one every 80 ms, each taken from the clock, so all tabs show the same frame. It stops when Pi settles,
  * no subagent works, and no background wait runs, pauses while an ask_user_question dialog waits (the tab's bell shows
  * then), and puts Pi's own title back. A run that waits for a usage limit to reset (auto-continue.ts,
  * "auto-continue:state") does not count as work meanwhile, nor does a run that only waits in agent calls of its own
@@ -203,7 +203,8 @@ export default function (pi: ExtensionAPI) {
 		pi.events.on(WAITS_STATE, (data) => {
 			const { tool, waits: list } = (data ?? {}) as { tool?: unknown; waits?: unknown };
 			if (typeof tool !== "string") return;
-			const now = Array.isArray(list) ? list.length : 0;
+			// A repeating wait (a keepalive, say) runs for hours without anyone waiting for it: it does not count as work.
+			const now = Array.isArray(list) ? list.filter((wait) => (wait as { repeat?: unknown } | null)?.repeat !== true).length : 0;
 			if (!waiting() && now > 0 && !timer) setup = null;
 			waits.set(tool, now);
 			void update();

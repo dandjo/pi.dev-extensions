@@ -15,6 +15,10 @@
  *   brings the result into the conversation: while Pi works, with its next step, so it is not stale by the time it
  *   comes; when Pi is idle, it starts a turn. list: true and /waits list the
  *   background waits, gitlab_pipeline's too; cancel: "<id>" or /waits cancel <id> stops one.
+ * - repeat: true (shell commands only, in the background) is for recurring background work, a keepalive or a token
+ *   renewal: the command runs every interval until the wait is cancelled or the session ends (or its timeout, when one
+ *   is given). The condition (default "failure") raises an alert: a message comes when it holds, the wait goes on, and
+ *   the next alert comes only after a check where it did not hold. tmux-tab-activity.ts does not count it as work.
  * - Background waits go on over /reload, and a result that comes while Pi reloads arrives once it has. Another session
  *   (/new, /resume, /fork) ends them, as they belong to the conversation that started them; the next session names
  *   them in a notice. A wait for a tool, which only gets to the background by a message from the user, calls the tool
@@ -51,6 +55,8 @@ const TOOL = "wait";
 type Until = "match" | "nomatch" | "success" | "failure" | "change";
 /** How a wait ended; "ended": a wait for a tool, at the /reload of the runtime whose tool context it used. */
 type Status = "met" | "timeout" | "cancelled" | "aborted" | "ended";
+/** A repeating wait whose condition holds: a message, and the wait goes on. */
+type Alert = "alert";
 
 interface Check {
 	ok: boolean;
@@ -67,14 +73,17 @@ interface Spec {
 	until: Until;
 	regex?: RegExp;
 	intervalMs: number;
+	/** Infinity: a repeating wait without a timeout, which runs until it is cancelled or the session ends. */
 	timeoutMs: number;
+	/** Runs the command every interval and raises an alert when the condition holds, instead of ending then. */
+	repeat?: boolean;
 }
 
 interface WaitDetails {
 	id?: string;
 	label: string;
 	condition: string;
-	status: Status | "running" | "background";
+	status: Status | Alert | "running" | "background";
 	checks: number;
 	elapsedMs: number;
 }
@@ -104,6 +113,8 @@ interface Run {
 	last?: Check;
 	/** When the next check is due; none before the first. */
 	nextAt?: number;
+	/** A repeating wait: its condition held at the last check, so an alert went out already. */
+	alerting?: boolean;
 }
 
 // A copy of BackgroundWaitView from wait.ts, the event-bus contract between wait.ts, gitlab.ts, background-agents.ts,
@@ -116,8 +127,10 @@ interface BackgroundWaitView {
 	tool: string;
 	/** What is awaited. */
 	label: string;
-	/** When the wait ends, in words. */
+	/** When the wait ends, in words; for a repeating wait, when it raises an alert. */
 	until: string;
+	/** Repeats its check until it is cancelled or the session ends, and does not end when until holds. */
+	repeat?: boolean;
 	startedAt: number;
 	checks: number;
 	/** What the last check found, in one line. */
@@ -127,7 +140,7 @@ interface BackgroundWaitView {
 	/** The end of the last check's output, where it says more than last. */
 	output?: string;
 	intervalMs: number;
-	/** When it gives up. */
+	/** When it gives up; Infinity for a repeating wait without a timeout. */
 	deadline: number;
 }
 
@@ -280,12 +293,17 @@ async function pause(ms: number, signal: AbortSignal, interrupted?: () => boolea
 	}
 }
 
-function resultText(spec: Spec, status: Status, checks: number, elapsedMs: number, last: Check | undefined, id?: string): string {
+function resultText(spec: Spec, status: Status | Alert, checks: number, elapsedMs: number, last: Check | undefined, id?: string): string {
 	const who = id ? `Background wait ${id} (${spec.label})` : "Waited";
 	const span = `${formatDuration(elapsedMs)}, ${checks} check${checks === 1 ? "" : "s"}`;
 	const head = {
+		alert:
+			`${who}: alert after ${span}: ${describeCondition(spec)}. It goes on running the command every ` +
+			`${formatDuration(spec.intervalMs)}; the next alert comes only after a check without one.`,
 		met: `${id ? `${who}: condition` : "Condition"} met after ${span}: ${describeCondition(spec)}.`,
-		timeout: `${id ? `${who} gave up` : "Gave up"} after ${span}; condition not met: ${describeCondition(spec)}.`,
+		timeout: spec.repeat
+			? `${who} ended after ${span}, as its timeout says.`
+			: `${id ? `${who} gave up` : "Gave up"} after ${span}; condition not met: ${describeCondition(spec)}.`,
 		cancelled: `${id ? `${who} was cancelled` : "Cancelled"} after ${span}.`,
 		aborted: `Aborted after ${span}.`,
 		ended: `${who} ended with the /reload after ${span}: a wait for a tool cannot outlive the runtime it calls the tool through. Not yet: ${describeCondition(spec)}. Wait again to go on.`,
@@ -302,6 +320,7 @@ function view(entry: Background): BackgroundWaitView {
 		tool: TOOL,
 		label: spec.label,
 		until: describeCondition(spec),
+		...(spec.repeat ? { repeat: true } : {}),
 		startedAt: entry.started,
 		checks: entry.checks,
 		last: entry.last,
@@ -354,7 +373,9 @@ function listText(views: BackgroundWaitView[]): string {
 	return views
 		.map((v) => {
 			const span = `${v.checks} check${v.checks === 1 ? "" : "s"} in ${formatDuration(now - v.startedAt)}, every ${formatDuration(v.intervalMs)}`;
-			return `${v.id}  ${v.label} (${v.tool}): until ${v.until}; ${span}, gives up at ${clock(v.deadline)}${v.last ? `; last: ${v.last}` : ""}`;
+			const end = Number.isFinite(v.deadline) ? `gives up at ${clock(v.deadline)}` : "runs until cancelled or the session ends";
+			const what = v.repeat ? `repeats, alerts when ${v.until}` : `until ${v.until}`;
+			return `${v.id}  ${v.label} (${v.tool}): ${what}; ${span}, ${end}${v.last ? `; last: ${v.last}` : ""}`;
 		})
 		.join("\n");
 }
@@ -367,7 +388,8 @@ export default function (pi: ExtensionAPI) {
 
 	/**
 	 * Runs checks until the condition holds, the time is up, or the wait is stopped; in the foreground also until the
-	 * user sends a message ("handover"), and then run says where it stands, for the background to go on from there.
+	 * user sends a message ("handover"), and then run says where it stands, for the background to go on from there. A
+	 * repeating wait calls alert when the condition holds after a check where it did not, and goes on.
 	 */
 	async function loop(
 		spec: Spec,
@@ -376,6 +398,7 @@ export default function (pi: ExtensionAPI) {
 		run: Run,
 		progress: (checks: number, elapsedMs: number, last: Check) => void,
 		interrupted?: () => boolean,
+		alert?: (last: Check) => void,
 	): Promise<Status | "handover"> {
 		for (;;) {
 			if (run.nextAt !== undefined) {
@@ -400,7 +423,12 @@ export default function (pi: ExtensionAPI) {
 								: run.baseline !== undefined && last.output !== run.baseline;
 			if (spec.until === "change" && run.baseline === undefined) run.baseline = last.output;
 			const elapsedMs = Date.now() - run.started;
-			if (met) return "met";
+			if (spec.repeat) {
+				if (met && !run.alerting) alert?.(last);
+				run.alerting = met;
+				// A change is measured against the output of the last alert, so the same change alerts once.
+				if (met && spec.until === "change") run.baseline = last.output;
+			} else if (met) return "met";
 			if (elapsedMs >= spec.timeoutMs) return "timeout";
 			progress(run.checks, elapsedMs, last);
 			run.nextAt = Date.now() + Math.min(spec.intervalMs, spec.timeoutMs - elapsedMs);
@@ -424,10 +452,16 @@ export default function (pi: ExtensionAPI) {
 		if (run.last) note(run.last);
 		shared.waits.set(id, entry);
 		publish();
-		void loop(spec, safe(check), entry.abort.signal, run, (_checks, _elapsedMs, last) => {
+		const alert = (last: Check) => {
+			const elapsedMs = Date.now() - run.started;
+			const details: WaitDetails = { id, label: spec.label, condition: describeCondition(spec), status: "alert", checks: run.checks, elapsedMs };
+			deliver({ content: resultText(spec, "alert", run.checks, elapsedMs, last, id), details });
+		};
+		const progress = (_checks: number, _elapsedMs: number, last: Check) => {
 			note(last);
 			publish();
-		}).then((status) => {
+		};
+		void loop(spec, safe(check), entry.abort.signal, run, progress, undefined, alert).then((status) => {
 			if (shared.waits.get(id) === entry) shared.waits.delete(id);
 			publish();
 			if (status === "aborted" || status === "handover") return;
@@ -534,6 +568,9 @@ export default function (pi: ExtensionAPI) {
 			'"success" (exit 0, or the tool call succeeds; the default otherwise), "failure", or "change" (output differs from the first check). ' +
 			"Returns the last output. When the user sends a message meanwhile, the wait goes on in the background and the call returns at once with its id. " +
 			"background: true (shell commands only) returns at once and a message brings the result later; it goes on over /reload. " +
+			"repeat: true (shell commands only, in the background) is for recurring background work such as a keepalive or a token renewal: " +
+			'the command runs every interval until cancelled or the session ends (timeout only when given); the condition (default "failure") ' +
+			"raises an alert by message, the wait goes on, and the next alert comes only after a check without one. " +
 			"list: true lists the background waits (gitlab_pipeline's too), cancel: id stops one. " +
 			'Examples: {command: "docker service ps web --format {{.CurrentState}}", match: "^Running"}; ' +
 			'{tool: "gitlab", args: {path: "/projects/42/pipelines/1234"}, match: "\\"status\\": \\"(success|failed|canceled)\\""}; ' +
@@ -542,6 +579,7 @@ export default function (pi: ExtensionAPI) {
 		promptGuidelines: [
 			"wait: use it instead of sleep in bash when you wait for something that has not happened yet (CI pipeline, deploy, container or service start, a file or URL appearing); one wait call replaces a poll per model request.",
 			"wait: not for a single check: when the condition should already hold (a container that just answered, a reload that just ran), check it once with bash or the tool itself, and wait only if it does not hold yet.",
+			"wait: for background work that repeats (keepalive, token renewal, periodic check), use wait with repeat: true instead of nohup or & in bash: only then it is listed in the panel and the user can stop it.",
 			"wait: for GitLab pipelines and jobs, use gitlab_pipeline (action wait) where it is loaded, else poll the gitlab tool with wait (tool and args); never curl with a token.",
 		],
 		parameters: Type.Object({
@@ -555,9 +593,17 @@ export default function (pi: ExtensionAPI) {
 				}),
 			),
 			interval: Type.Optional(Type.Number({ description: "Seconds between checks (default 30, at least 2)" })),
-			timeout: Type.Optional(Type.Number({ description: "Minutes before giving up (default 30, at most 1440)" })),
+			timeout: Type.Optional(
+				Type.Number({ description: "Minutes before giving up (default 30, at most 1440; with repeat: none unless given)" }),
+			),
 			label: Type.Optional(Type.String({ description: "Short description of what is awaited, shown to the user" })),
 			background: Type.Optional(Type.Boolean({ description: "Return at once and report by message later (command only)" })),
+			repeat: Type.Optional(
+				Type.Boolean({
+					description:
+						'Recurring background work (command only, implies background): run every interval until cancelled or the session ends; the condition (default "failure") raises an alert',
+				}),
+			),
 			cancel: Type.Optional(Type.String({ description: "Id of a background wait to cancel (no other parameters)" })),
 			list: Type.Optional(Type.Boolean({ description: "List the background waits, gitlab_pipeline's too (no other parameters)" })),
 		}),
@@ -580,7 +626,9 @@ export default function (pi: ExtensionAPI) {
 					throw new Error(`match is not a valid regular expression: ${(error as Error).message}`);
 				}
 			}
-			const until = (params.until ?? (regex ? "match" : "success")) as Until;
+			const repeat = params.repeat === true;
+			if (repeat && !params.command) throw new Error("repeat works with command only");
+			const until = (params.until ?? (regex ? "match" : repeat ? "failure" : "success")) as Until;
 			if ((until === "match" || until === "nomatch") && !regex) throw new Error(`until "${until}" needs match`);
 			const spec: Spec = {
 				label: params.label?.trim() || oneLine(params.command ?? `${params.tool} ${JSON.stringify(params.args ?? {})}`, 80),
@@ -590,11 +638,22 @@ export default function (pi: ExtensionAPI) {
 				until,
 				regex,
 				intervalMs: Math.max(2, params.interval ?? 30) * 1000,
-				timeoutMs: Math.min(Math.max(0.1, params.timeout ?? 30), 1440) * 60_000,
+				timeoutMs:
+					repeat && params.timeout === undefined ? Number.POSITIVE_INFINITY : Math.min(Math.max(0.1, params.timeout ?? 30), 1440) * 60_000,
+				...(repeat ? { repeat } : {}),
 			};
 
 			const cwd = ctx.cwd;
 			const runCheck = (s: AbortSignal) => runCommand(spec.command as string, cwd, checkTimeout(spec), s);
+			if (repeat) {
+				const entry = startBackground(spec, runCheck);
+				const details: WaitDetails = { id: entry.id, label: spec.label, condition: describeCondition(spec), status: "background", checks: 0, elapsedMs: 0 };
+				const end = Number.isFinite(spec.timeoutMs) ? `for ${formatDuration(spec.timeoutMs)}` : "until it is cancelled or the session ends";
+				const text =
+					`Repeating in the background as ${entry.id}: runs the command every ${formatDuration(spec.intervalMs)} ${end}. ` +
+					`A message brings an alert when ${describeCondition(spec)}, and the next one only after a check without one; carry on or end your turn.`;
+				return { content: [{ type: "text", text }], details };
+			}
 			if (params.background) {
 				if (!spec.command) throw new Error("background works with command only; wait for a tool in the foreground");
 				const entry = startBackground(spec, runCheck);
@@ -659,9 +718,12 @@ export default function (pi: ExtensionAPI) {
 			if (args.list) return new Text(text + theme.fg("muted", "list"), 0, 0);
 			const what = args.label || (args.command ? oneLine(String(args.command), 80) : `${args.tool ?? "?"}`);
 			text += theme.fg("accent", what);
-			const until = args.until ?? (args.match ? "match" : "success");
-			text += theme.fg("muted", ` until ${until}${args.match ? ` /${oneLine(String(args.match), 40)}/` : ""}`);
-			if (args.background) text += theme.fg("dim", " (background)");
+			const until = args.until ?? (args.match ? "match" : args.repeat ? "failure" : "success");
+			const condition = `${until}${args.match ? ` /${oneLine(String(args.match), 40)}/` : ""}`;
+			if (args.repeat) text += theme.fg("muted", ` every ${formatDuration(Math.max(2, args.interval ?? 30) * 1000).replace(/ 0s$/, "")}, alert on ${condition}`);
+			else text += theme.fg("muted", ` until ${condition}`);
+			if (args.repeat) text += theme.fg("dim", " (repeat)");
+			else if (args.background) text += theme.fg("dim", " (background)");
 			return new Text(text, 0, 0);
 		},
 
