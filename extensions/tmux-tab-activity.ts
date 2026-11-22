@@ -9,8 +9,8 @@
  * "π - ␟⠹ <name> - <directory>" (an unnamed session's directory as its name): ␟ marks the title of a working session,
  * and the spinner's frame follows it, which the tab formats below put in place of the π. The frames are those of Pi's
  * own spinner (pi-tui's Loader), ⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏, one every 80 ms, each taken from the clock, so all tabs show the same frame. It stops when Pi settles,
- * no subagent works, and no background wait runs, pauses while an ask_user_question dialog waits (the tab's bell shows
- * then), and puts Pi's own title back. A run that waits for a usage limit to reset (auto-continue.ts,
+ * no subagent works, and no background wait runs, pauses while an ask_user_question dialog waits (its mark, the pane
+ * option @pi_ask, shows then), and puts Pi's own title back. A run that waits for a usage limit to reset (auto-continue.ts,
  * "auto-continue:state") does not count as work meanwhile, nor does a run that only waits in agent calls of its own
  * whose subagents all wait (for an instruction, an answer, or a usage limit).
  *

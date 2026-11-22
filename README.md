@@ -972,8 +972,8 @@ spinners of all tabs turn in step.
   it, which the tab formats below put in place of the `π`. The frames are
   Pi's own, `⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏`, one every 80 ms, each taken from the clock, so all
   tabs show the same frame.
-- It pauses while an `ask_user_question` dialog waits, when the tab's bell takes
-  over, while a run waits for a usage limit to reset
+- It pauses while an `ask_user_question` dialog waits, when the dialog's mark
+  takes over, while a run waits for a usage limit to reset
   ([auto-continue](#auto-continue)), and while a run only waits in its own
   `agent` calls whose subagents all wait (for your instruction, an answer, or
   a usage limit). It puts Pi's own title back when Pi settles, no subagent
@@ -1111,9 +1111,20 @@ that ask through it, such as setup wizards, work unchanged.
 - The highlighted option has the selection background, as in Claude Code,
   and an arrow (`→`) in front, as in Pi's own lists.
 - The dialog rings the terminal bell as it opens, so the terminal marks a
-  session that waits for an answer; tmux sets the bell flag of its window,
-  which `window-status-bell-style` can make blink in the tab.
-  `{"bell": false}` in `~/.pi/agent/ask-user-question.json` turns that off.
+  session that waits for an answer. In tmux it rings the terminals of the
+  session's clients directly and sets the pane option `@pi_ask` while it is
+  open, so tmux can ignore every other program's bell and the tabs can mark
+  the window whose Pi asks, the active one too:
+
+  ```conf
+  set -g bell-action none
+  %hidden PI_ASK="#{P:#{?@pi_ask,1,}}"
+  set -g window-status-style "#{?$PI_ASK,nodim#,bold#,blink,dim}"
+  set -g window-status-current-style "reverse#{?$PI_ASK,#,blink,}"
+  ```
+
+  `{"bell": false}` in `~/.pi/agent/ask-user-question.json` turns the bell
+  and the mark off.
 - In fullscreen mode (`tuiMode`) the mouse works as well: the highlight follows
   the pointer and goes back to the option chosen with the keys when the pointer
   leaves the options; a key acts on the option highlighted, which then becomes
