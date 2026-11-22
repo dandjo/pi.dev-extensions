@@ -23,6 +23,7 @@ names `extensions/`, which holds one file per extension.
 | `web-tools.ts`              | Adds `web_fetch`: reads a page locally and lets a small model answer from it              | —                                                                |
 | `openproject.ts`            | Adds `openproject`: reads and changes OpenProject through its API v3, as you              | An OpenProject API token for each instance                       |
 | `gitlab.ts`                 | Adds `gitlab` and `gitlab_pipeline`: GitLab through its API, as you, and its CI in brief  | A GitLab personal access token for each instance                 |
+| `onepassword.ts`            | Adds the `onepassword_*` tools: 1Password items and `op run`, one approval per session    | The 1Password CLI, signed in through the 1Password app           |
 | `memory.ts`                 | Keeps a memory per project, shared with Claude Code's auto memory when it is there        | —                                                                |
 | `session-title.ts`          | Names each session after its first prompt and shows it in the terminal title              | —                                                                |
 | `tmux-tab-activity.ts`      | Turns Pi's spinner in its tmux tab while Pi, a subagent, or a background wait works       | tmux 3.2 or later, set up as its section describes               |
@@ -80,7 +81,7 @@ missing. `web_search` comes from the npm package `pi-web-access`; see
 ## Set up Pi
 
 Follow the steps in order — together they are the complete setup: Pi itself,
-the Claude subscription, all twenty-seven extensions, and the browser
+the Claude subscription, all twenty-nine extensions, and the browser
 connection. Every step except the Chrome switch in step 4 is a shell command,
 so an agent can carry them out as well.
 
@@ -171,7 +172,7 @@ Install this repository as a Pi package:
 pi install git:github.com/dandjo/pi.dev-extensions
 ```
 
-Pi clones it into `~/.pi/agent/git/` and loads all twenty-seven extensions
+Pi clones it into `~/.pi/agent/git/` and loads all twenty-nine extensions
 from there; `pi list` shows the package. [package-update](#package-update)
 brings new versions at every start, new and renamed extensions included, and
 reloads Pi once it is idle; `/update` fetches them at once. There is no build
@@ -886,6 +887,47 @@ out.
   lists the names it has.
 - The guidelines tell the model to play, retry, cancel, and run only what you
   asked for, and a deploy job only on your word for that deploy.
+
+## onepassword
+
+Adds tools for 1Password through its CLI `op`, signed in through the
+1Password app (Settings → Developer → Integrate with 1Password CLI). Without
+`op` on the PATH it adds nothing. The tools reach every vault your account
+can see.
+
+- You approve Pi once per session, not once per command. The app ties an
+  approval to a terminal session, on Linux to the terminal and a start time,
+  for 10 minutes of inactivity, which every use renews, and at most 12 hours.
+  Pi's `bash` tool starts each command without a terminal, so `op` there asks
+  every time; these tools start `op` from Pi's own process, in Pi's terminal.
+  On macOS, `op` 2.40 and later shares one approval among a program's calls
+  anyway.
+- No secret value reaches the model:
+  - `onepassword_items` lists items by id, title, category, and vault,
+    optionally of one vault, category, or tag, or with part of the title.
+  - `onepassword_item` shows an item's fields by section, label, and type,
+    whether each is set, and its `op://` reference; of the websites only the
+    host, of the notes only whether there are any, since a URL or a note can
+    hold a password.
+  - `onepassword_run` runs a shell command with secrets in environment
+    variables given as `op://` references (`op run`): `op` resolves them for
+    that command alone and masks their values in its output. The command
+    runs without a terminal, as the `bash` tool's do.
+  - `onepassword_write` creates or changes an item: text fields from values
+    in the call, secret fields (concealed, one-time password) only from a
+    generated password, a command's output, or a file. The item goes to `op`
+    in a private temporary file, removed at once, never as command
+    arguments, which other processes can read. 1Password keeps earlier values
+    in the item's history.
+
+For example, a registry login without the token in the conversation:
+
+```json
+{
+  "command": "printenv TOKEN | docker login -u ci --password-stdin registry.example.com",
+  "env": { "TOKEN": "op://Shared/Registry/token" }
+}
+```
 
 ## memory
 
