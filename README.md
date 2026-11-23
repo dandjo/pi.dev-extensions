@@ -25,6 +25,7 @@ names `extensions/`, which holds one file per extension.
 | `gitlab.ts`                 | Adds `gitlab` and `gitlab_pipeline`: GitLab through its API, as you, and its CI in brief  | A GitLab personal access token for each instance                 |
 | `onepassword.ts`            | Adds the `onepassword_*` tools: 1Password items and `op run`, one approval per session    | The 1Password CLI, signed in through the 1Password app           |
 | `vault.ts`                  | Adds the `vault_*` tools: HashiCorp Vault KV secrets, commands with secrets, OIDC login   | `VAULT_ADDR`; the `vault` CLI for `vault_login`                  |
+| `drupal-org.ts`             | Adds `drupal_org`: drupal.org's web UI as you, in a Chrome profile of its own             | Chrome or Chromium; one sign-in with `/drupal-org login`         |
 | `memory.ts`                 | Keeps a memory per project, shared with Claude Code's auto memory when it is there        | —                                                                |
 | `session-title.ts`          | Names each session after its first prompt and shows it in the terminal title              | —                                                                |
 | `tmux-tab-activity.ts`      | Turns Pi's spinner in its tmux tab while Pi or a subagent works                           | tmux 3.2 or later, set up as its section describes               |
@@ -82,7 +83,7 @@ missing. `web_search` comes from the npm package `pi-web-access`; see
 ## Set up Pi
 
 Follow the steps in order — together they are the complete setup: Pi itself,
-the Claude subscription, all thirty extensions, and the browser
+the Claude subscription, all thirty-one extensions, and the browser
 connection. Every step except the Chrome switch in step 4 is a shell command,
 so an agent can carry them out as well.
 
@@ -173,7 +174,7 @@ Install this repository as a Pi package:
 pi install git:github.com/dandjo/pi.dev-extensions
 ```
 
-Pi clones it into `~/.pi/agent/git/` and loads all thirty extensions
+Pi clones it into `~/.pi/agent/git/` and loads all thirty-one extensions
 from there; `pi list` shows the package. [package-update](#package-update)
 brings new versions at every start, new and renamed extensions included, and
 reloads Pi once it is idle; `/update` fetches them at once. There is no build
@@ -979,6 +980,50 @@ For example, a database dump with the password from Vault:
   "env": { "DB_PASSWORD": "secret/app/database#password" }
 }
 ```
+
+## drupal-org
+
+Adds the tool `drupal_org`, with which the model uses drupal.org as you:
+comment on an issue and change its status, priority, version, assignment,
+or tags; create an issue; publish a release; give credit on an issue's
+contribution record; whatever else drupal.org offers only in its web UI.
+It drives a headless Chrome with a profile of its own, apart from your
+Chrome and its logins.
+
+- `/drupal-org login` opens Chrome with that profile at drupal.org's login.
+  Sign in there and close the window; the profile in
+  `~/.pi/agent/drupal-org/chrome-profile` keeps the login.
+  `/drupal-org status` shows whether it is signed in, `/drupal-org logout`
+  deletes the profile.
+- The tool's actions:
+  - `open` loads a page and returns its title, Drupal's messages, its text,
+    and its forms: each field with name, type, label, value, and options,
+    and the form's buttons.
+  - `page` returns the current page again; `offset` reads its text on.
+  - `links` lists the page's links, `filter` keeps those that match.
+  - `submit` fills a form of the current page and presses one of its
+    buttons, then returns the resulting page. A form in several steps, such
+    as a new release, goes on in the same tab.
+- The tool saves without asking: it submits what the model sends. Tell the
+  model what to post; the tool's guidelines ask it to submit only what you
+  asked for.
+- A release needs its tag pushed with git first. Reading issues and releases
+  needs no login: drupal.org's public API, and for projects whose issues
+  moved to GitLab, the `gitlab` tool with host `git.drupalcode.org`, serve
+  for that.
+- Only https pages of drupal.org and its subdomains open. Page text is
+  third-party content; the tool's description tells the model never to
+  follow instructions in it.
+- One Chrome serves all sessions. Each session opens a tab of its own and
+  closes it after ten minutes unused or when the session ends; the last tab
+  closes Chrome. A Chrome window you opened yourself on the same profile
+  keeps the tool out; close it first.
+- drupal.org's bot challenge answers a headless Chrome with a CAPTCHA. Chrome
+  therefore starts with its usual user agent and without the automation
+  flag. Should the CAPTCHA come all the same, solve it in the window of
+  `/drupal-org login`.
+- `DRUPAL_ORG_CHROME` names the Chrome binary where it is not found on its
+  own.
 
 ## memory
 
