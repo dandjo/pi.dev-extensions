@@ -11,8 +11,7 @@
  *   translates them. A subagent never gets ask_user_question, the cron and loop tools, or cross-session messaging;
  *   agent only up to three levels deep. MCP servers start only when the subagent's tools name an MCP tool.
  * - Model: the call's model, else the definition's, else a provider's default, else the defaultModel of
- *   ~/.pi/agent/subagents.json, else the current model, at the parent's thinking level unless the definition sets
- *   effort. A model is a full id, inherit (the current model), a
+ *   ~/.pi/agent/subagents.json, else the current model. A model is a full id, inherit (the current model), a
  *   tier, or a model family a provider names:
  *   - small and large stay within the current model's provider: the model ~/.pi/agent/subagents.json names for the
  *     provider and tier ({"tiers": {"<provider>": {"small": "<model-id>", "large": "<model-id>"}}}), else the newest
@@ -30,6 +29,10 @@
  *     newest; only lines of the current model's name (gemini, not gemma) and no special-purpose models (SPECIAL).
  *     Each rung says what work it is for, and the model is told to take the weakest that does a task reliably.
  *     Without list prices there is no order, and no ladder.
+ * - Thinking: the definition's effort, else the level ~/.pi/agent/subagents.json names for the model
+ *   ({"thinking": {"<provider>/<model-id>": "high"}}), else the level Pi itself starts that model at
+ *   (modelThinkingLevels, else defaultThinkingLevel, else medium), not the parent's; clamped to what the model can.
+ *   A resumed agent on another model gets that model's level, unless its definition set effort.
  * - Explore runs on small at medium effort, without the context files, and reports after at most 30 turns: a search
  *   of many steps costs a fraction there of what it costs in a long conversation, and only the report comes back.
  *   (Claude Code's own Explore keeps the parent's model; a user agent named Explore with model: inherit does the same
@@ -90,13 +93,14 @@
  */
 
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
-import type { Api, Model, Usage } from "@earendil-works/pi-ai";
+import { type Api, clampThinkingLevel, type Model, type ModelThinkingLevel, type Usage } from "@earendil-works/pi-ai";
 import {
 	type ExtensionAPI,
 	type ExtensionContext,
 	getAgentDir,
 	getMarkdownTheme,
 	parseFrontmatter,
+	SettingsManager,
 	type Theme,
 	type ToolRenderers,
 	type ToolRenderResultOptions,
@@ -237,6 +241,8 @@ interface Meta {
 	description: string;
 	model: string;
 	thinking: string;
+	/** The definition's effort, which a model change on resume keeps. */
+	effort?: string;
 	tools: string[];
 	noMcp: boolean;
 	noContext: boolean;
@@ -636,6 +642,27 @@ function configuredDefault(): string | undefined {
 	} catch {
 		return undefined;
 	}
+}
+
+/** The thinking level of a subagent's model without an effort of its own (see the header). */
+function modelThinking(ctx: ExtensionContext, ref: string): string {
+	const models = ctx.modelRegistry.getAvailable();
+	const model =
+		models.find((m) => `${m.provider}/${m.id}` === ref) ??
+		models.find((m) => m.provider === ctx.model?.provider && m.id === ref) ??
+		models.find((m) => m.id === ref);
+	const key = model ? `${model.provider}/${model.id}` : ref;
+	let level: string | undefined;
+	try {
+		level = JSON.parse(readFileSync(path.join(getAgentDir(), "subagents.json"), "utf8"))?.thinking?.[key];
+	} catch {
+		// no subagents.json
+	}
+	if (typeof level !== "string" || !THINKING.has(level.trim())) {
+		const settings = SettingsManager.create(ctx.cwd, getAgentDir(), { projectTrusted: ctx.isProjectTrusted() });
+		level = (model && settings.getModelThinkingLevel(model.provider, model.id)) || settings.getDefaultThinkingLevel() || "medium";
+	}
+	return model ? clampThinkingLevel(model, level.trim() as ModelThinkingLevel) : level.trim();
 }
 
 /** The model ~/.pi/agent/subagents.json names for a provider and tier. */
@@ -1964,6 +1991,7 @@ export default function (pi: ExtensionAPI) {
 							const old = live(meta.agentId);
 							if (old) end(old);
 							meta.model = resolved.ref;
+							meta.thinking = meta.effort ?? modelThinking(ctx, resolved.ref);
 						}
 					}
 				} else {
@@ -1989,7 +2017,8 @@ export default function (pi: ExtensionAPI) {
 						type: def.name,
 						description: params.description,
 						model: resolved.ref,
-						thinking: effort ?? ctx.thinkingLevel ?? pi.getThinkingLevel(),
+						thinking: effort ?? modelThinking(ctx, resolved.ref),
+						...(effort ? { effort } : {}),
 						tools: noMcp ? tools.filter((t) => t !== "tool_search") : tools,
 						noMcp,
 						noContext: def.omitClaudeMd === true,

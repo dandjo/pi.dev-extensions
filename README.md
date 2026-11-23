@@ -1338,6 +1338,13 @@ interrupt it, and answer its questions, and it stays alive after its report.
     a Claude provider that is `haiku`, `sonnet`, `opus`, `fable`. A provider
     without list prices gets no ladder. The ladder is renewed on a switch to
     another model.
+- Thinking: a subagent does not take the session's thinking level but the
+  one Pi starts its model at: `modelThinkingLevels` for that model, else
+  `defaultThinkingLevel`, else medium. A definition's `effort` overrides it,
+  and so does `~/.pi/agent/subagents.json` for subagents alone, such as
+  `{"thinking": {"<provider>/<model-id>": "high"}}`. The level is clamped
+  to what the model can, and a resumed agent on another model gets that
+  model's level unless its definition sets `effort`.
 - `Explore` runs on `small` at medium effort, without the context files, and
   reports after at most 30 turns. A search of many steps costs a fraction
   there of what each step costs in a long conversation, and only the report
