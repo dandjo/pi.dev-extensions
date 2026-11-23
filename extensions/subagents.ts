@@ -24,6 +24,12 @@
  *     large), with a note in the result.
  *   - The agent tool offers the tiers and the families the current provider has, renewed on a switch to another
  *     provider.
+ *   - It also offers a ladder: the newest model of each line of the current model's maker on its provider (a line is
+ *     the id without its version numbers: claude-opus-4-8 and claude-opus-5-5 are one), from the weakest to the
+ *     strongest by list price, at most MAX_RUNGS besides the current model, which stands in place of its line's
+ *     newest; only lines of the current model's name (gemini, not gemma) and no special-purpose models (SPECIAL).
+ *     Each rung says what work it is for, and the model is told to take the weakest that does a task reliably.
+ *     Without list prices there is no order, and no ladder.
  * - Explore runs on small at medium effort, without the context files, and reports after at most 30 turns: a search
  *   of many steps costs a fraction there of what it costs in a long conversation, and only the report comes back.
  *   (Claude Code's own Explore keeps the parent's model; a user agent named Explore with model: inherit does the same
@@ -704,6 +710,96 @@ async function resolveModel(ctx: ExtensionContext, requested: string | undefined
 	return { ref: currentRef, note: `Model "${wanted}" was not found; the subagent uses ${current.id}.` };
 }
 
+/** The most rungs the ladder offers. */
+const MAX_RUNGS = 6;
+
+/** A model's line: its id without the maker, version numbers, dates, and release tags. */
+function line(id: string): string {
+	return id
+		.toLowerCase()
+		.replace(/^.*\//, "")
+		.split(/[-_.:@]/)
+		.map((token) => token.replace(/\d+/g, ""))
+		.filter((token) => token && token !== "v" && !["latest", "preview", "exp", "experimental"].includes(token))
+		.join("-");
+}
+
+/** Models made for one kind of work, which no general rung should be. */
+const SPECIAL = /computer-use|robotics|research|customtools|embed|tts|audio|image|live|realtime|transcribe|moderation|guard|search|ocr/i;
+
+/**
+ * The ladder (see the header): the current model's provider, from the weakest model to the strongest. Only lines of
+ * the current model's name (gemini, not gemma) and no special-purpose models.
+ */
+function modelLadder(ctx: ExtensionContext): Model<Api>[] {
+	const current = ctx.model;
+	if (!current || !(price(current) > 0)) return [];
+	const currentMaker = maker(current.id);
+	const name = line(current.id).split("-")[0];
+	const lines = new Map<string, Model<Api>[]>();
+	for (const model of ctx.modelRegistry.getAvailable()) {
+		if (model.provider !== current.provider || !model.input.includes("text") || maker(model.id) !== currentMaker) continue;
+		if (!(price(model) > 0) || SPECIAL.test(model.id) || line(model.id).split("-")[0] !== name) continue;
+		const key = line(model.id);
+		lines.set(key, [...(lines.get(key) ?? []), model]);
+	}
+	lines.set(line(current.id), [current]);
+	let rungs = [...lines.values()].map((models) => newest(models)!).sort((a, b) => price(a) - price(b));
+	if (rungs.length > MAX_RUNGS) {
+		const keep = new Set([rungs.indexOf(current)]);
+		for (let i = 0; i < MAX_RUNGS; i++) keep.add(Math.round((i * (rungs.length - 1)) / (MAX_RUNGS - 1)));
+		rungs = [...keep].sort((a, b) => a - b).map((i) => rungs[i]);
+	}
+	return rungs.length > 1 ? rungs : [];
+}
+
+/** The work a rung is for, by its place on a ladder of the given length. */
+function rungUse(index: number, length: number): string {
+	if (index === 0) return "mechanical work: searching, listing, collecting facts, summarizing what it is given";
+	if (length >= 4 && index === length - 1) return "only when the rung below is not enough, or a mistake would be expensive";
+	if (index === length - 1 || (length >= 4 && index === length - 2)) {
+		return "judgement: unclear bugs, design and plans, reviews, security, changes across many files";
+	}
+	return "well-specified implementation, routine fixes, research";
+}
+
+/** The name a call gives a rung: a family that resolves to it as resolveModel does, else its id. */
+function rungName(ctx: ExtensionContext, model: Model<Api>, current: Model<Api>, families: string[]): string {
+	for (const family of families) {
+		if (!model.id.toLowerCase().includes(family)) continue;
+		const target = current.id.toLowerCase().includes(family)
+			? current
+			: newest(ctx.modelRegistry.getAvailable().filter((m) => m.provider === current.provider && m.id.toLowerCase().includes(family)));
+		if (target?.id === model.id) return family;
+	}
+	return model.id;
+}
+
+const dollars = (n: number) => `$${Number(n.toFixed(2))}`;
+
+/** The model parameter's text: the ladder with what each rung is for, the other names, and the default. */
+function modelDescription(ctx: ExtensionContext, families: string[]): string {
+	const current = ctx.model;
+	const rungs = modelLadder(ctx);
+	const fallback = defaultModel();
+	const defaults = `Defaults to the agent definition's model, else ${fallback ? `"${fallback}"` : "the current model"}.`;
+	if (!current || rungs.length === 0) {
+		const named = ["small or large (a cheaper or a stronger model of the current provider)", ...families, "or a full model id"];
+		return `Optional model for this agent: ${named.join(", ")}. ${defaults}`;
+	}
+	const lines = rungs.map((model, i) => {
+		const name = rungName(ctx, model, current, families);
+		const facts = [...(name === model.id ? [] : [model.id]), `${dollars(model.cost.input)}/${dollars(model.cost.output)}`];
+		if (model === current) facts.push("the current model");
+		return `${i + 1}. ${name} (${facts.join(", ")}): ${rungUse(i, rungs.length)}`;
+	});
+	return [
+		"Optional model for this agent. Choose by what the task needs: the weakest rung that does it reliably. From the weakest and cheapest to the strongest, with the list price per million input/output tokens:",
+		...lines,
+		`Also small, large, inherit (the current model)${families.length ? `, ${families.join(", ")}` : ""}, or a full model id. ${defaults}`,
+	].join("\n");
+}
+
 function resolveTools(
 	def: AgentDef,
 	registered: Set<string>,
@@ -1291,8 +1387,7 @@ function cleanup(): void {
 // --- Extension ------------------------------------------------------------------------------------------------------
 
 /** The agent tool's parameters; a fork is not offered `fork`, which it must not use. */
-function agentParams(families: string[], canFork = !process.env.PI_SUBAGENT_FORK) {
-	const named = ["small or large (a cheaper or a stronger model of the current provider)", ...families, "or a full model id"];
+function agentParams(modelText: string, canFork = !process.env.PI_SUBAGENT_FORK) {
 	return Type.Object({
 		description: Type.String({ description: "A short (3-5 word) description of the task" }),
 		prompt: Type.String({ description: "The task for the agent to perform" }),
@@ -1300,9 +1395,7 @@ function agentParams(families: string[], canFork = !process.env.PI_SUBAGENT_FORK
 			Type.String({ description: "The type of specialized agent to use for this task. Defaults to general-purpose." }),
 		),
 		model: Type.Optional(
-			Type.String({
-				description: `Optional model for this agent: ${named.join(", ")}. Defaults to the agent definition's model, else the current model.`,
-			}),
+			Type.String({ description: modelText }),
 		),
 		run_in_background: Type.Optional(
 			Type.Boolean({ description: "Set to true to run this agent in the background. You are notified when it completes." }),
@@ -1754,7 +1847,7 @@ export default function (pi: ExtensionAPI) {
 		void done.then((result) => deliver(result));
 	});
 
-	/** The families the registered agent tool offers. */
+	/** The model text of the registered agent tool: the families and the ladder it offers. */
 	let offeredKey = "";
 
 	// The agent tool's renderers. Pi rebuilds the conversation on /reload before session_start registers the tool: the
@@ -1824,8 +1917,8 @@ export default function (pi: ExtensionAPI) {
 
 	function register(ctx: ExtensionContext): void {
 		const agents = discoverAgents(ctx.cwd, ctx.isProjectTrusted());
-		const offered = offeredFamilies(ctx);
-		offeredKey = offered.join(",");
+		const modelText = modelDescription(ctx, offeredFamilies(ctx));
+		offeredKey = modelText;
 		pi.registerTool<Params, RunDetails>({
 			name: "agent",
 			label: "Agent",
@@ -1833,8 +1926,9 @@ export default function (pi: ExtensionAPI) {
 			promptSnippet: "Delegate a task to a subagent with its own context window (Explore, Plan, general-purpose, …)",
 			promptGuidelines: [
 				"agent: hand a search that takes more than a few greps or reads (where something is defined, how a feature works across files, which files use something) to Explore with a thoroughness, instead of reading file after file in this conversation: Explore runs on a small model with its own context, and only its report enters this one. Read or grep yourself when you know the file or need one or two lookups.",
+				"agent: choose the model of each call by what the task needs, from the ladder in the model parameter: the weakest rung that does it reliably; a stronger one for judgement (unclear bugs, design, reviews, security), and the strongest only when a mistake would be expensive or a weaker agent's work fell short. A stronger model is slower and costs more; a weaker one that fails costs a second run. Without model the definition's or the default model runs, which may not fit the task.",
 			],
-			parameters: agentParams(offered),
+			parameters: agentParams(modelText),
 			executionMode: "parallel",
 
 			async execute(toolCallId, params, signal, onUpdate, ctx) {
@@ -2087,9 +2181,9 @@ export default function (pi: ExtensionAPI) {
 		if (DEPTH === 0) setTimeout(cleanup, 5_000).unref();
 	});
 
-	// Another provider may have other families: the agent tool offers those it has.
+	// Another model has another ladder, another provider other families: the agent tool offers those it has.
 	pi.on("model_select", (_event, ctx) => {
-		if (active && canSpawn() && offeredFamilies(ctx).join(",") !== offeredKey) register(ctx);
+		if (active && canSpawn() && modelDescription(ctx, offeredFamilies(ctx)) !== offeredKey) register(ctx);
 	});
 
 	pi.on("session_shutdown", (event) => {

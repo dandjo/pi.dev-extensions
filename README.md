@@ -1326,6 +1326,18 @@ interrupt it, and answer its questions, and it stays alive after its report.
     `sonnet` to the current model), with a note in the result.
   - The tool offers the tiers and the families the current provider has, and
     renews the offer on a switch to another provider.
+  - It also offers a ladder, from the weakest model to the strongest, and the
+    model is told to take the weakest rung that does a task reliably. A rung
+    is the newest model of each line of the current model's maker on its
+    provider (`claude-opus-4-8` and `claude-opus-5-5` are one line), ordered
+    by list price, with the current model in place of its line's newest; no
+    special-purpose models, at most six rungs besides the current model.
+    Each rung says what it is for: mechanical work (search, lists, facts),
+    well-specified implementation, judgement (unclear bugs, design, reviews,
+    security), and the strongest only when the rung below is not enough. On
+    a Claude provider that is `haiku`, `sonnet`, `opus`, `fable`. A provider
+    without list prices gets no ladder. The ladder is renewed on a switch to
+    another model.
 - `Explore` runs on `small` at medium effort, without the context files, and
   reports after at most 30 turns. A search of many steps costs a fraction
   there of what each step costs in a long conversation, and only the report
