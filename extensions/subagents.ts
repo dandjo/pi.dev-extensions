@@ -29,6 +29,10 @@
  *     newest; only lines of the current model's name (gemini, not gemma) and no special-purpose models (SPECIAL).
  *     Each rung says what work it is for, and the model is told to take the weakest that does a task reliably.
  *     Without list prices there is no order, and no ladder.
+ *   - ~/.pi/agent/subagents.json may define the ladder per provider instead ({"ladder": {"<provider>": [...]}},
+ *     see configuredLadder): its models in its order, the weakest first, each a model id or a part of ids (opus),
+ *     with the work it is for or the default text of its place. An empty list turns the ladder off; one that names
+ *     fewer than two available models does too. A provider without an entry keeps the ladder above.
  * - Thinking: the definition's effort, else the level ~/.pi/agent/subagents.json names for the model
  *   ({"thinking": {"<provider>/<model-id>": "high"}}), else the level Pi itself starts that model at
  *   (modelThinkingLevels, else defaultThinkingLevel, else medium), not the parent's; clamped to what the model can.
@@ -758,9 +762,12 @@ const SPECIAL = /computer-use|robotics|research|customtools|embed|tts|audio|imag
  * The ladder (see the header): the current model's provider, from the weakest model to the strongest. Only lines of
  * the current model's name (gemini, not gemma) and no special-purpose models.
  */
-function modelLadder(ctx: ExtensionContext): Model<Api>[] {
+function modelLadder(ctx: ExtensionContext): Rung[] {
 	const current = ctx.model;
-	if (!current || !(price(current) > 0)) return [];
+	if (!current) return [];
+	const configured = configuredLadder(ctx, current);
+	if (configured) return configured;
+	if (!(price(current) > 0)) return [];
 	const currentMaker = maker(current.id);
 	const name = line(current.id).split("-")[0];
 	const lines = new Map<string, Model<Api>[]>();
@@ -776,6 +783,48 @@ function modelLadder(ctx: ExtensionContext): Model<Api>[] {
 		const keep = new Set([rungs.indexOf(current)]);
 		for (let i = 0; i < MAX_RUNGS; i++) keep.add(Math.round((i * (rungs.length - 1)) / (MAX_RUNGS - 1)));
 		rungs = [...keep].sort((a, b) => a - b).map((i) => rungs[i]);
+	}
+	return rungs.length > 1 ? rungs.map((model) => ({ model })) : [];
+}
+
+/** A rung of the ladder: its model, and the work it is for when the ladder of subagents.json says so. */
+interface Rung {
+	model: Model<Api>;
+	use?: string;
+}
+
+/**
+ * The ladder ~/.pi/agent/subagents.json defines for the current model's provider, or undefined when it defines none:
+ *
+ *   {"ladder": {"claude-sdk": ["haiku", {"model": "claude-sonnet-5-5", "use": "implementation"}, "opus"]}}
+ *
+ * An entry is a model id of that provider ("<provider>/" before it may stay), or a part of ids, which names the
+ * newest available model whose id holds it (the current model when its id does); an object adds `use`, the work the
+ * rung is for. The order is the file's, the weakest first. Models the provider does not offer are left out; an empty
+ * list, or one with fewer than two models left, gives no ladder.
+ */
+function configuredLadder(ctx: ExtensionContext, current: Model<Api>): Rung[] | undefined {
+	let entries: unknown;
+	try {
+		entries = JSON.parse(readFileSync(path.join(getAgentDir(), "subagents.json"), "utf8"))?.ladder?.[current.provider];
+	} catch {
+		return undefined;
+	}
+	if (!Array.isArray(entries)) return undefined;
+	const models = ctx.modelRegistry.getAvailable().filter((m) => m.provider === current.provider);
+	const rungs: Rung[] = [];
+	for (const entry of entries) {
+		const raw = typeof entry === "string" ? entry : typeof entry?.model === "string" ? entry.model : "";
+		const trimmed = raw.trim();
+		const wanted = trimmed.startsWith(`${current.provider}/`) ? trimmed.slice(current.provider.length + 1) : trimmed;
+		if (!wanted) continue;
+		const part = wanted.toLowerCase();
+		const model =
+			models.find((m) => m.id === wanted) ??
+			(current.id.toLowerCase().includes(part) ? current : newest(models.filter((m) => m.id.toLowerCase().includes(part))));
+		if (!model || rungs.some((rung) => rung.model.id === model.id)) continue;
+		const use = typeof entry?.use === "string" && entry.use.trim() ? entry.use.trim() : undefined;
+		rungs.push({ model: model.id === current.id ? current : model, use });
 	}
 	return rungs.length > 1 ? rungs : [];
 }
@@ -814,14 +863,19 @@ function modelDescription(ctx: ExtensionContext, families: string[]): string {
 		const named = ["small or large (a cheaper or a stronger model of the current provider)", ...families, "or a full model id"];
 		return `Optional model for this agent: ${named.join(", ")}. ${defaults}`;
 	}
-	const lines = rungs.map((model, i) => {
+	const priced = rungs.every(({ model }) => price(model) > 0);
+	// A ladder of subagents.json keeps its own order, which need not rise in price.
+	const cheapestFirst = priced && rungs.every(({ model }, i) => i === 0 || price(rungs[i - 1].model) <= price(model));
+	const lines = rungs.map(({ model, use }, i) => {
 		const name = rungName(ctx, model, current, families);
-		const facts = [...(name === model.id ? [] : [model.id]), `${dollars(model.cost.input)}/${dollars(model.cost.output)}`];
+		const facts = [...(name === model.id ? [] : [model.id])];
+		if (priced) facts.push(`${dollars(model.cost.input)}/${dollars(model.cost.output)}`);
 		if (model === current) facts.push("the current model");
-		return `${i + 1}. ${name} (${facts.join(", ")}): ${rungUse(i, rungs.length)}`;
+		const label = facts.length ? `${name} (${facts.join(", ")})` : name;
+		return `${i + 1}. ${label}: ${use ?? rungUse(i, rungs.length)}`;
 	});
 	return [
-		"Optional model for this agent. Choose by what the task needs: the weakest rung that does it reliably. From the weakest and cheapest to the strongest, with the list price per million input/output tokens:",
+		`Optional model for this agent. Choose by what the task needs: the weakest rung that does it reliably. From the weakest${cheapestFirst ? " and cheapest" : ""} to the strongest${priced ? ", with the list price per million input/output tokens" : ""}:`,
 		...lines,
 		`Also small, large, inherit (the current model)${families.length ? `, ${families.join(", ")}` : ""}, or a full model id. ${defaults}`,
 	].join("\n");

@@ -1338,6 +1338,44 @@ interrupt it, and answer its questions, and it stays alive after its report.
     a Claude provider that is `haiku`, `sonnet`, `opus`, `fable`. A provider
     without list prices gets no ladder. The ladder is renewed on a switch to
     another model.
+  - The ladder can be defined by hand instead, per provider, under `ladder`
+    in `~/.pi/agent/subagents.json`. A provider without an entry keeps the
+    automatic ladder. Example:
+
+    ```json
+    {
+      "ladder": {
+        "claude-sdk": [
+          { "model": "haiku", "use": "searches, lists, summaries" },
+          "claude-sonnet-5-5",
+          { "model": "opus", "use": "design, reviews, unclear bugs" }
+        ]
+      }
+    }
+    ```
+
+    - The key is the provider as Pi names it (`claude-sdk`, `anthropic`,
+      `openai`, …; `pi --list-models` shows it). The ladder applies while
+      the current model is one of that provider.
+    - The list goes from the weakest model to the strongest, in the order
+      written; it is not sorted. The model is told to take the weakest rung
+      that does a task reliably, so the order matters.
+    - An entry is a string or an object with `model` and an optional `use`.
+      `model` is a model id of that provider (a leading `<provider>/` may
+      stay), or a part of ids such as `opus`: then the newest model whose id
+      holds it, or the current model when its id does, so the ladder follows
+      new releases. `use` is the work the rung is for; without it the rung
+      gets the default text of its place (lowest: mechanical work; top:
+      judgement, or only when the rung below is not enough).
+    - Models the provider does not offer are left out, and so are repeats.
+      An empty list turns the ladder off for that provider, and so does one
+      with fewer than two models left. A broken file is ignored.
+    - Prices are shown when every rung has one. The current model is not
+      added; `inherit` reaches it anyway.
+    - The ladder only changes the text the model reads. `small`, `large`,
+      families, and `defaultModel` resolve as before.
+    - Pi reads it at session start and on a switch of model: after an edit,
+      `/reload`.
 - Thinking: a subagent does not take the session's thinking level but the
   one Pi starts its model at: `modelThinkingLevels` for that model, else
   `defaultThinkingLevel`, else medium. A definition's `effort` overrides it,
