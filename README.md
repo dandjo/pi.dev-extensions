@@ -127,11 +127,14 @@ in `~/.pi/agent/settings.json`, next to the `packages` entry the install wrote:
   "compaction": {
     "reserveTokens": 32768,
     "modelOverrides": {
-      "claude-sdk/claude-opus-5-5": { "reserveTokens": 850000 },
-      "claude-sdk/claude-opus-5": { "reserveTokens": 850000 },
-      "claude-sdk/claude-sonnet-5-5": { "reserveTokens": 850000 },
-      "claude-sdk/claude-sonnet-5": { "reserveTokens": 850000 },
-      "claude-sdk/claude-haiku-5-5": { "reserveTokens": 850000 }
+      "claude-sdk/claude-opus-5-5": { "reserveTokens": 700000 },
+      "claude-sdk/claude-opus-5": { "reserveTokens": 700000 },
+      "claude-sdk/claude-sonnet-5-5": { "reserveTokens": 700000 },
+      "claude-sdk/claude-sonnet-5": { "reserveTokens": 700000 },
+      "claude-sdk/claude-haiku-5-5": { "reserveTokens": 700000 },
+      "claude-sdk/claude-fable-5-2": { "reserveTokens": 700000 },
+      "claude-sdk/claude-fable-5-1": { "reserveTokens": 700000 },
+      "claude-sdk/claude-fable-5": { "reserveTokens": 700000 }
     }
   },
   "retry": { "maxRetries": 10, "maxAgentDelayMs": 32000 }
@@ -148,11 +151,13 @@ compacting at 983,616. Pi does recover from the error by compacting and
 retrying, but the turn fails first.
 
 The `modelOverrides` make the models with a 1M context window compact at
-150k tokens instead (1M minus 850,000). Every request reads the whole context
+300k tokens instead (1M minus 700,000). Every request reads the whole context
 again, so a session that grows towards 1M costs most: requests above 150k
-were a quarter of all and caused well over half of the cost. A model with a
-smaller window must not get such an override, since its threshold would fall
-below zero and Pi would compact before every request.
+were a quarter of all and caused well over half of the cost. 300k, raised
+from 150k, pays for the requests between the two and in return compacts half
+as often, so fewer details of a long session are lost to the summary. A model
+with a smaller window must not get such an override, since its threshold would
+fall below zero and Pi would compact before every request.
 
 The `retry` values let Pi retry a dropped connection or an overloaded server
 ten times, after 2, 4, 8, 16, then 32 seconds, as Claude Code retries ten
