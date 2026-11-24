@@ -2,6 +2,10 @@
  * Compact: a tool with which the model compacts the session on its own, as /compact does for the user — when a part of
  * the work is done and its details are no longer needed, before the next part fills the context further.
  *
+ * - The guidelines make the call binding at two points: the user turns to a new task unrelated to the finished one,
+ *   and a finished part of a long task leaves outputs behind that the next part does not need. Worded as an option,
+ *   the tool went almost unused (one call against about 180 compactions by the threshold or /compact by hand).
+ *
  * - compact (focus: what the summary must keep, optional) ends the run after its tool batch (terminate), as Pi's
  *   compaction would abort a run that goes on. Once Pi has settled, the extension compacts the session with focus as
  *   the custom instructions, and a message then starts a turn in which the model continues the task from the summary.
@@ -85,10 +89,11 @@ export default function (pi: ExtensionAPI) {
 			"Compact this session: replace the conversation so far with a summary, as the user's /compact does, to free the context. " +
 			"It ends your turn; once Pi is idle the session is compacted, and a message then lets you continue the task from the summary. " +
 			"focus: what the summary must keep (the task, decisions, open steps, file paths), optional.",
-		promptSnippet: "Compact the session on your own when a finished part of the work fills the context",
+		promptSnippet: "Compact the session whenever a finished task or part of the work no longer needs its details",
 		promptGuidelines: [
-			"compact: call it when the context is large and a finished part of the work no longer needs its details, e.g. before the next part of a long task; not for a short session or in the middle of a step whose details you still need.",
-			"compact: say in focus what you need afterwards (task, decisions, open steps, paths), call it alone, and write nothing after it: it ends your turn.",
+			"compact: you MUST call it, before anything else, when the user turns to a new task unrelated to the one finished before it, and when a finished part of a long task leaves outputs behind (logs, file contents, search results, diffs) that the next part does not need. Do not leave it to Pi's automatic compaction: that comes only at a fixed size and summarises without knowing what matters next.",
+			"compact: skip it only while the session is still short (a few exchanges) or in the middle of a step whose details you still need.",
+			"compact: say in focus what you need afterwards (task, decisions, open steps, paths; for a new task, the user's request in their words), call it alone, and write nothing after it: it ends your turn.",
 		],
 		parameters: Type.Object({
 			focus: Type.Optional(Type.String({ description: "What the summary must keep, as instructions for it" })),

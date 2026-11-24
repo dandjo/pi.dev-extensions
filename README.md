@@ -2232,9 +2232,12 @@ details are no longer needed, before the next part fills the context further.
   model continue all the same, with the error in the message. Esc during the
   compaction or the run, or a message from you meanwhile, drops the
   continuation: you take over.
-- The model is told to compact only when the context is large and a finished
-  part of the work no longer needs its details, never in the middle of a
-  step.
+- The model must compact at two points: when you turn to a new task
+  unrelated to the finished one, and when a finished part of a long task
+  leaves outputs behind (logs, file contents, search results) that the next
+  part does not need. It skips it only while the session is short or in the
+  middle of a step. For a new task, `focus` carries your request in your
+  words.
 - It works in the interactive session only: a subagent ends with its run, and
   so does print mode.
 
