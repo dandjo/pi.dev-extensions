@@ -1534,10 +1534,11 @@ Claude Code, the prompt writes to the agent shown, and Esc interrupts it.
 
 - The panel appears under the editor as soon as a subagent runs: a `main` row,
   then one row per agent, `type › description`, with its model and thinking
-  level (`haiku-5-5 · low`, the maker left out), state, elapsed time, and
-  tokens at the end, and a dimmed rule that sets it apart from the status
-  line below. At most five rows are visible; the window follows the selection,
-  with `↑ N more` and `↓ N more` for the rest. The state carries the colour: an
+  level (`claude-haiku-5-5 · low`; without the maker, `haiku-5-5 · low`, where
+  the descriptions would lose room), state, elapsed time, and tokens at the
+  end, and a dimmed rule that sets it apart from the status line below. At
+  most five rows are visible; the window follows the selection, with
+  `↑ N more` and `↓ N more` for the rest. The state carries the colour: an
   agent that asks you, waits for your instruction, or waits for a usage limit in
   the warning colour, a completed one in green and dimmed, a failed or stopped
   one in red. Finished agents stay 30 seconds, then disappear. The footer reads

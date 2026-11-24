@@ -142,6 +142,8 @@ const FINISHED_TTL_MS = 30_000;
 const TICK_MS = 1_000;
 const TRANSCRIPT_POLL_MS = 500;
 const MAX_NAME_WIDTH = 28;
+/** The room a description keeps in a panel row before the model ids there get short. */
+const FULL_MODEL_DESC_WIDTH = 40;
 /** Pi's own tools, drawn with their definitions while Pi has not drawn a call of them in this session yet. */
 const BUILT_IN_TOOLS: Record<string, (cwd: string) => ToolDefinition<any, any, any>> = {
 	bash: createBashToolDefinition,
@@ -976,15 +978,21 @@ export default function (pi: ExtensionAPI) {
 						: "scheduled";
 		const nameWidth = Math.min(MAX_NAME_WIDTH, Math.max(4, ...list.map((e) => label(e).length)));
 		const now = Date.now();
-		const statuses = visible.map((e) =>
-			e.kind === "agent"
-				? statusText(e.row)
-				: e.kind === "wait"
-					? `${e.wait.id} · ${e.wait.repeat ? `every ${elapsed(e.wait.intervalMs).replace(/ 0s$/, "")}` : elapsed(now - e.wait.startedAt)} · ${e.wait.checks} check${e.wait.checks === 1 ? "" : "s"}`
-					: `${e.task.id} · ${e.task.kind === "loop wakeup" ? "" : `${e.task.schedule} · `}next ${e.task.next}`,
-		);
+		const statusesWith = (short: boolean) =>
+			visible.map((e) =>
+				e.kind === "agent"
+					? statusText(e.row, short)
+					: e.kind === "wait"
+						? `${e.wait.id} · ${e.wait.repeat ? `every ${elapsed(e.wait.intervalMs).replace(/ 0s$/, "")}` : elapsed(now - e.wait.startedAt)} · ${e.wait.checks} check${e.wait.checks === 1 ? "" : "s"}`
+						: `${e.task.id} · ${e.task.kind === "loop wakeup" ? "" : `${e.task.schedule} · `}next ${e.task.next}`,
+			);
 		const description = (e: Entry) =>
 			e.kind === "agent" ? e.row.description : e.kind === "wait" ? `${e.wait.label}${e.wait.last ? ` · ${e.wait.last}` : ""}` : e.task.prompt;
+		// The full model ids while the descriptions keep their room (all of them, or FULL_MODEL_DESC_WIDTH), else short ones.
+		const descNeeds = Math.min(FULL_MODEL_DESC_WIDTH, Math.max(0, ...visible.map((e) => visibleWidth(description(e) || ""))));
+		const roomFor = (list: string[]) => inner - 2 - nameWidth - 3 - Math.max(...list.map((s) => s.length), 0) - 2;
+		const full = statusesWith(false);
+		const statuses = roomFor(full) >= descNeeds ? full : statusesWith(true);
 		const statusWidth = Math.max(...statuses.map((s) => s.length), 0);
 		visible.forEach((entry, i) => {
 			const index = scroll + i + 1;
@@ -1026,8 +1034,8 @@ export default function (pi: ExtensionAPI) {
 		return theme.fg("error", status);
 	}
 
-	function statusText(row: Row): string {
-		const parts: string[] = [modelText(row, true)];
+	function statusText(row: Row, short = true): string {
+		const parts: string[] = [modelText(row, short)];
 		if (row.status === "running" && row.waiting === "limit") parts.push(limitText(row));
 		else if (row.status === "running") parts.push(row.waiting === "instruction" ? "waits for you" : `${row.waiting === "answer" ? "asks you · " : ""}${elapsed(Date.now() - row.startedAt)}`);
 		else parts.push(row.status === "completed" ? `done ${elapsed(row.durationMs ?? 0)}` : row.status === "aborted" ? "stopped" : "failed");
@@ -1241,8 +1249,8 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	/**
-	 * The model of a row and its thinking level, e.g. "claude-haiku-5-5 · low". Short for the panel rows: without the
-	 * maker in front of a named line (haiku-5-5), so the description keeps its room; an id such as gpt-5 stays whole.
+	 * The model of a row and its thinking level, e.g. "claude-haiku-5-5 · low". Short where the panel lacks room: without
+	 * the maker in front of a named line (haiku-5-5), so the description keeps its room; an id such as gpt-5 stays whole.
 	 */
 	function modelText(row: Row, short: boolean): string {
 		const id = row.model.split("/").at(-1) ?? row.model;
