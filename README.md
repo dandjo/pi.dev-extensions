@@ -1192,16 +1192,10 @@ bar shows which sessions are busy. The spinners of all tabs turn in step.
 
 - While an `ask_user_question` dialog is open, its own questions or a
   subagent's, the pane has the option `@pi_ask`, so the tab formats can mark
-  the window, the active one too, which tmux's bell flag never does. Where
-  tmux does not pass Pi's bell on (`bell-action none` and `monitor-bell off`,
-  so that no other program's bell rings or flags a tab; `bell-action` alone
-  still sets the flag), the extension writes the bell to the terminals of the
-  session's clients itself; not when the dialog did not ring. The next Pi in
-  a pane removes a mark a crashed Pi left:
+  the window, the active one too, which tmux's bell flag never does. Nothing
+  rings. The next Pi in a pane removes a mark a crashed Pi left:
 
   ```conf
-  set -g bell-action none
-  set -g monitor-bell off
   %hidden PI_ASK="#{P:#{?@pi_ask,1,}}"
   set -g window-status-style "#{?$PI_ASK,nodim#,bold#,blink,dim}"
   set -g window-status-current-style "reverse#{?$PI_ASK,#,blink,}"
@@ -1304,11 +1298,8 @@ that ask through it, such as setup wizards, work unchanged.
   questions, Esc dismisses.
 - The highlighted option has the selection background, as in Claude Code,
   and an arrow (`→`) in front, as in Pi's own lists.
-- The dialog rings the terminal bell as it opens, so the terminal marks a
-  session that waits for an answer; tmux sets the bell flag of its window,
-  which `window-status-bell-style` can make blink in the tab, and
-  [tmux-tab-activity](#tmux-tab-activity) can mark it on the active tab too.
-  `{"bell": false}` in `~/.pi/agent/ask-user-question.json` turns that off.
+- The dialog rings no bell; [tmux-tab-activity](#tmux-tab-activity) marks
+  the tab of a session that waits for an answer.
 - In fullscreen mode (`tuiMode`) the mouse works as well: the highlight follows
   the pointer and goes back to the option chosen with the keys when the pointer
   leaves the options; a key acts on the option highlighted, which then becomes

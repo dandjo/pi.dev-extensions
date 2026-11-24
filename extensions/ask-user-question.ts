@@ -11,10 +11,8 @@
  *   chosen with the keys when the pointer leaves the options (a key acts on the option highlighted, and makes it the
  *   one chosen with the keys), a tab under the pointer gets a lighter background, a click on an option picks it as Enter does (toggles it in a multi-select), a click on a
  *   tab opens it, a click on the submit line on the Submit tab submits, and the wheel moves the highlight.
- * - The dialog rings the terminal bell (BEL) as it opens, so a terminal or tmux marks the tab of a session that waits
- *   for an answer. {"bell": false} in ~/.pi/agent/ask-user-question.json turns that off. The event
- *   ask-user-question:dialog (QuestionsDialog) tells when a terminal dialog opens and closes, its own questions and a
- *   subagent's alike, and whether it rang, for an extension that marks the tab otherwise (tmux-tab-activity.ts).
+ * - The dialog rings no bell. The event ask-user-question:dialog (QuestionsDialog) tells when a terminal dialog opens
+ *   and closes, its own questions and a subagent's alike, for an extension that marks the tab (tmux-tab-activity.ts).
  * - RPC clients get one select dialog per question. Without any UI the call fails with a note to decide alone.
  * - A subagent (subagents.ts) runs as an RPC client of the session that started it. Where that session says it takes
  *   whole question sets (PI_SUBAGENT_QUESTIONS), the subagent hands its questions over in one editor request titled
@@ -28,9 +26,7 @@
  *   questions ended. Interrupting the run withdraws them.
  */
 
-import { readFileSync } from "node:fs";
-import * as path from "node:path";
-import { type ExtensionAPI, type ExtensionContext, getAgentDir } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
 	Editor,
 	type EditorTheme,
@@ -91,7 +87,7 @@ const ASKER = "ask-user-question:asker";
 const ASKER_REQUEST = "ask-user-question:asker-request";
 /** A terminal dialog opens or closes. */
 const QUESTIONS_DIALOG = "ask-user-question:dialog";
-type QuestionsDialog = { open: boolean; bell: boolean };
+type QuestionsDialog = { open: boolean };
 /** Sends QUESTIONS_DIALOG: set when the extension loads. */
 let emitDialog: (state: QuestionsDialog) => void = () => {};
 /**
@@ -289,21 +285,10 @@ type LineHit =
 	| { kind: "tabs"; spans: { from: number; to: number; tab: number }[] }
 	| { kind: "submit" };
 
-/** Whether the dialog rings the terminal bell as it opens: unless ask-user-question.json says "bell": false. */
-function bellEnabled(): boolean {
-	try {
-		return JSON.parse(readFileSync(path.join(getAgentDir(), "ask-user-question.json"), "utf8"))?.bell !== false;
-	} catch {
-		return true;
-	}
-}
-
 /** Interactive terminal dialog. Resolves to the answers by question index, or undefined when dismissed or closed. */
 function askInTerminal(ctx: ExtensionContext, questions: Question[], signal: AbortSignal, from?: string): Promise<Map<number, Answer> | undefined> {
 	return ctx.ui.custom<Map<number, Answer> | undefined>((tui, theme, _keybindings, finish) => {
-		const bell = bellEnabled();
-		if (bell) tui.terminal.write("\x07");
-		emitDialog({ open: true, bell });
+		emitDialog({ open: true });
 		/** The option under the pointer, on its tab: it has the highlight while the pointer is there. */
 		let hover: { tab: number; index: number } | undefined;
 		// The pointer leaving the dialog: every move first clears what is under the pointer, and the dialog's own move
@@ -318,7 +303,7 @@ function askInTerminal(ctx: ExtensionContext, questions: Question[], signal: Abo
 		});
 		let closed = false;
 		const done = (result: Map<number, Answer> | undefined) => {
-			if (!closed) emitDialog({ open: false, bell });
+			if (!closed) emitDialog({ open: false });
 			closed = true;
 			stopWatching();
 			finish(result);

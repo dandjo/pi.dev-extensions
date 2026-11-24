@@ -42,13 +42,8 @@
  *
  * A question that waits: while a terminal dialog of ask-user-question.ts is open ("ask-user-question:dialog", its own
  * questions and a subagent's), the pane has the option @pi_ask, so the tab formats can mark the window, the active
- * one too, which tmux's bell flag never does. Where tmux does not pass Pi's bell on to the terminal (bell-action none
- * and monitor-bell off, so that no other program's bell rings or flags a tab; also visual-bell on), the extension writes
- * the bell to the terminals of the session's clients itself. Not when the dialog did not ring ("bell": false in
- * ask-user-question.json). The next Pi in a pane removes a mark a crashed Pi left.
+ * one too, which tmux's bell flag never does. Nothing rings. The next Pi in a pane removes a mark a crashed Pi left.
  *
- *   set -g bell-action none
- *   set -g monitor-bell off
  *   %hidden PI_ASK="#{P:#{?@pi_ask,1,}}"
  *   set -g window-status-style "#{?$PI_ASK,nodim#,bold#,blink,dim}"
  *   set -g window-status-current-style "reverse#{?$PI_ASK,#,blink,}"
@@ -65,7 +60,6 @@
  */
 
 import { execFile } from "node:child_process";
-import { appendFile } from "node:fs";
 import path from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
@@ -82,13 +76,10 @@ const SUBAGENTS_REQUEST = "subagents:request";
 /** ask-user-question.ts: a dialog opens and closes (answered, declined, or withdrawn), with its tool call id. */
 const QUESTIONS_OPEN = "ask-user-question:open";
 const QUESTIONS_CLOSE = "ask-user-question:close";
-/** ask-user-question.ts: a terminal dialog opens or closes ({ open, bell }), with its own questions or a subagent's. */
+/** ask-user-question.ts: a terminal dialog opens or closes ({ open }), with its own questions or a subagent's. */
 const QUESTIONS_DIALOG = "ask-user-question:dialog";
 /** The pane option that marks a pane whose Pi waits for an answer, for the tab formats. */
 const ASK_OPTION = "@pi_ask";
-/** Whether tmux passes a bell in the pane on to the terminals of its clients (alerts.c): "1" or "0". */
-const PASSES_BELL =
-	"#{&&:#{monitor-bell},#{&&:#{!=:#{visual-bell},on},#{||:#{==:#{bell-action},any},#{||:#{&&:#{==:#{bell-action},current},#{window_active}},#{&&:#{==:#{bell-action},other},#{!:#{window_active}}}}}}}";
 /** auto-continue.ts: whether the run waits for a usage limit to reset ({ waiting }), and the request for it. */
 const LIMIT_STATE = "auto-continue:state";
 const LIMIT_REQUEST = "auto-continue:state-request";
@@ -192,25 +183,18 @@ export default function (pi: ExtensionAPI) {
 		frame();
 	}
 
-	/** The pane of this Pi, and its terminal dialogs open now that rang: the pane keeps @pi_ask until the last closes. */
+	/** The pane of this Pi, and its terminal dialogs open now: the pane keeps @pi_ask until the last closes. */
 	const pane = process.env.TMUX_PANE;
 	let dialogs = 0;
 
-	async function markQuestion(target: string): Promise<void> {
-		await tmux(["set-option", "-p", "-t", target, ASK_OPTION, "1"]);
-		// Where tmux passes Pi's bell on by itself, ringing here too would ring twice.
-		if ((await tmux(["display-message", "-p", "-t", target, PASSES_BELL]))?.trim() !== "0") return;
-		const ttys = (await tmux(["list-clients", "-t", target, "-F", "#{client_tty}"])) ?? "";
-		for (const tty of ttys.split("\n").filter((line) => line.startsWith("/dev/"))) appendFile(tty, "\x07", () => {});
-	}
-
+	const markQuestion = (target: string) => void tmux(["set-option", "-p", "-t", target, ASK_OPTION, "1"]);
 	const unmarkQuestion = (target: string) => void tmux(["set-option", "-p", "-u", "-t", target, ASK_OPTION]);
 
 	const unsubscribe = [
 		pi.events.on(QUESTIONS_DIALOG, (data) => {
-			const { open, bell } = (data ?? {}) as { open?: unknown; bell?: unknown };
-			if (!pane || bell !== true) return;
-			if (open === true && dialogs++ === 0) void markQuestion(pane);
+			const { open } = (data ?? {}) as { open?: unknown };
+			if (!pane) return;
+			if (open === true && dialogs++ === 0) markQuestion(pane);
 			else if (open === false && dialogs > 0 && --dialogs === 0) unmarkQuestion(pane);
 		}),
 		pi.events.on(QUESTIONS_OPEN, (data) => {
