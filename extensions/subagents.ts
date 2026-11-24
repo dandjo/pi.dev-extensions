@@ -227,6 +227,8 @@ interface RunDetails {
 	/** What the user wrote to the subagent during the run. */
 	userMessages?: string[];
 	model: string;
+	/** The thinking level it runs at; absent in runs recorded before it was kept. */
+	thinking?: string;
 	toolCalls: ToolCallInfo[];
 	toolCount: number;
 	turns: number;
@@ -357,6 +359,8 @@ export interface SubagentView {
 	limit?: string;
 	background: boolean;
 	model: string;
+	/** The thinking level it runs at. */
+	thinking?: string;
 	startedAt: number;
 	durationMs?: number;
 	tokens: number;
@@ -1083,6 +1087,7 @@ function beginRun(child: Child, origin: Run["origin"], onProgress: (details: Run
 				status: "running",
 				origin,
 				model: child.meta.model,
+				thinking: child.meta.thinking,
 				toolCalls: [],
 				toolCount: 0,
 				turns: 0,
@@ -1687,6 +1692,7 @@ export default function (pi: ExtensionAPI) {
 			limit: d.status === "running" && d.waiting === "limit" ? d.limit : undefined,
 			background,
 			model: d.model,
+			thinking: d.thinking,
 			startedAt: d.startedAt,
 			durationMs: d.durationMs,
 			tokens: d.tokens,
@@ -1958,7 +1964,7 @@ export default function (pi: ExtensionAPI) {
 					`${d.toolCount} tool call${d.toolCount === 1 ? "" : "s"}`,
 					d.tokens ? `${formatTokens(d.tokens)} tokens` : "",
 					d.durationMs ? `took ${formatDuration(d.durationMs)}` : "",
-					d.model.split("/").at(-1) ?? "",
+					[d.model.split("/").at(-1), d.thinking].filter(Boolean).join(" · "),
 					d.agentId,
 				]
 					.filter(Boolean)
@@ -2131,6 +2137,7 @@ export default function (pi: ExtensionAPI) {
 						description: meta.description,
 						status: "background",
 						model: current?.model ?? meta.model,
+						thinking: current?.thinking ?? meta.thinking,
 						toolCalls: current ? current.toolCalls.slice(-50) : [],
 						toolCount: current?.toolCount ?? 0,
 						turns: current?.turns ?? 0,

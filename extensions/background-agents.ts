@@ -735,6 +735,8 @@ interface SubagentView {
 	limit?: string;
 	background: boolean;
 	model: string;
+	/** The thinking level it runs at. */
+	thinking?: string;
 	startedAt: number;
 	durationMs?: number;
 	tokens: number;
@@ -1025,7 +1027,7 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	function statusText(row: Row): string {
-		const parts: string[] = [];
+		const parts: string[] = [modelText(row, true)];
 		if (row.status === "running" && row.waiting === "limit") parts.push(limitText(row));
 		else if (row.status === "running") parts.push(row.waiting === "instruction" ? "waits for you" : `${row.waiting === "answer" ? "asks you · " : ""}${elapsed(Date.now() - row.startedAt)}`);
 		else parts.push(row.status === "completed" ? `done ${elapsed(row.durationMs ?? 0)}` : row.status === "aborted" ? "stopped" : "failed");
@@ -1235,7 +1237,17 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	function usageLine(current: Row, theme: Theme): string {
-		return theme.fg("dim", `${compact(current.tokens)} tokens · ${current.toolCount} tool${current.toolCount === 1 ? "" : "s"} · ${current.model.split("/").at(-1)}`);
+		return theme.fg("dim", `${compact(current.tokens)} tokens · ${current.toolCount} tool${current.toolCount === 1 ? "" : "s"} · ${modelText(current, false)}`);
+	}
+
+	/**
+	 * The model of a row and its thinking level, e.g. "claude-haiku-5-5 · low". Short for the panel rows: without the
+	 * maker in front of a named line (haiku-5-5), so the description keeps its room; an id such as gpt-5 stays whole.
+	 */
+	function modelText(row: Row, short: boolean): string {
+		const id = row.model.split("/").at(-1) ?? row.model;
+		const name = short ? id.replace(/^[a-z]+-(?=[a-z])/i, "") : id;
+		return row.thinking ? `${name} · ${row.thinking}` : name;
 	}
 
 	/** A transcript of the agent in `row`, drawn with Pi's settings for `tui`. */
