@@ -38,7 +38,7 @@ names `extensions/`, which holds one file per extension.
 | `background-agents.ts`      | The agent panel below the prompt: ↓ to the agents, Enter opens one, Ctrl+B to background  | `subagents.ts`                                                   |
 | `network-resilience.ts`     | Claude Code's handling of dropped connections: stall notice, restart, network wait        | —                                                                |
 | `auto-continue.ts`          | Waits out a used-up usage limit, quota, or rate limit and continues after the reset       | —                                                                |
-| `context-gc.ts`             | Cuts thinking and long tool outputs of older turns from the context, in batches           | —                                                                |
+| `idle-compaction.ts`        | Summarises an idle conversation in the background; used once the prompt cache expired     | —                                                                |
 | `compact.ts`                | Adds `compact`: the model compacts the session on its own and then continues the task     | —                                                                |
 | `wait.ts`                   | Adds `wait`: checks a command or tool until a condition holds, without model requests     | —                                                                |
 | `package-update.ts`         | Keeps this package current, and reloads Pi when it changes                                | The package installed with `pi install`                          |
@@ -311,8 +311,8 @@ needs nothing. What changes with a provider other than Claude:
   model of a tier per provider where the automatic choice does not fit; see
   [subagents](#subagents).
 - Values that follow Claude's prompt cache can be set per provider:
-  `cacheWarmMinutes` in [network-resilience](#network-resilience) and
-  `coldMinutes` in [context-gc](#context-gc).
+  `cacheWarmMinutes` in [network-resilience](#network-resilience), and
+  `prepareMinutes` and `coldMinutes` in [idle-compaction](#idle-compaction).
 - Side requests ([Small model](#small-model)) run at once; only on
   `claude-sdk` they wait for each other.
 - An extension for another subscription's limits adds status line rows of its
@@ -1981,7 +1981,7 @@ since npm keeps a dependency at the version of `package-lock.json`.
 Brings the fixes of `pi-claude-subscription`'s
 [pull request #4](https://github.com/jkeskikangas/pi-claude-subscription/pull/4)
 into a version without them. Up to 0.2.4, after a change in older messages —
-a cut by [context-gc](#context-gc), any context edit — the provider resumes
+any context edit by an extension — the provider resumes
 Claude Code's transcript at the last unchanged message and sends everything
 after it as one user turn: every later response is lost, without an error.
 With the pull request it writes them into a fork of the transcript instead,
@@ -2161,59 +2161,33 @@ you send a prompt.
   of [claude-login](#claude-login) says that a waiting run or compaction goes
   on with the account `/claude-login` signs in.
 
-## context-gc
+## idle-compaction
 
-Keeps long conversations small. Every request carries the whole context, and
-in a long session most of it is what older turns left behind: the hidden
-thinking of each response, which stays in the context, long tool outputs, and
-long tool inputs.
+Compacts a long conversation you left idle, as the Claude Code desktop app
+does. Every request keeps the prompt cache warm, and Claude's lives an hour;
+the first message after that writes the whole context to the cache anew, at
+the price of the whole context.
 
-- In every turn before the last ten responses, it removes the thinking of the
-  response, cuts tool inputs longer than 2,000 characters (a written file, a
-  long script) to their start and end, and replaces tool outputs longer than
-  4,000 characters with a stub that names the command or file and keeps the
-  first and last lines. Images in tool results go as well. The outputs of
-  `agent` and `ask_user_question` stay.
-- The cuts are Pi's own context edits. The session file keeps everything: the
-  transcript, `/tree`, exports, and the session totals stay complete, and
-  going back with `/tree` to a point before a cut brings the full text back.
-- With Claude, a cut makes the next request write every message to the prompt
-  cache anew, however far back the cut is: Claude Code and Pi's Anthropic
-  provider mark only the last message for the cache, and Anthropic's cache
-  looks back only about 20 blocks from a mark for a stored prefix. A cut
-  costs about as much as the whole context, so it cuts in batches: at the end
-  of a turn, once at least 100k tokens and 30 % of the context can go. When
-  the cache is cold anyway, it cuts whatever it can before the first request,
-  so the cache is built from the smaller context only: after an hour without
-  a request (the lifetime of Claude Code's cache), and after a switch to
-  another model with `/model` or Ctrl+P, whose cache holds nothing of the
-  conversation. That request carries the cuts itself; they are stored at the
-  end of its turn.
-- The system prompt carries a `context_gc` section that tells the model about
-  the stubs: it should run the command or read the file again rather than
-  guess. Its text never changes, so the cached tools and system prompt stay
-  valid.
-- With `pi-claude-subscription` it needs the fixes of that provider's
-  [pull request #4](https://github.com/jkeskikangas/pi-claude-subscription/pull/4):
-  up to 0.2.4, after a change in older messages, the provider resumes its own
-  transcript at the last unchanged message and leaves out every later
-  response. [claude-sdk-resume-fix](#claude-sdk-resume-fix) brings them in.
-- `/gc` cuts at the next request, regardless of the thresholds. `/gc status`
-  shows the passes so far, the context, and what could go now. A notice names
-  every cut.
-- Measured over four days of sessions with Claude (10,000 requests), the cuts
-  took a fifth off the tokens and 8.5 % off the cost at API prices; replayed
-  with the 30 % condition, 12 %. Pi's compaction still runs when the context
-  fills up; it is needed less often.
-- Settings, all optional, in `~/.pi/agent/context-gc.json`: `enabled` (true),
-  `keepRecent` (10 responses), `minResultChars` (4000), `minArgChars` (2000),
-  `batchTokens` (100000), `batchShare` (0.3), `coldMinutes` (60),
-  `coldMinTokens` (5000), `thinking`, `toolResults`, and `toolArgs` (true
-  each), and `keepTools` (`["agent", "ask_user_question"]`). Under
-  `providers`, each of them can be set for one provider and wins there over
-  the top level: `coldMinutes` follows the one-hour cache of `claude-sdk`, and
-  a provider whose cache lives shorter can cut sooner:
-  `{"providers": {"openai": {"coldMinutes": 10}}}`.
+- A conversation of at least 200k tokens that stays idle for 50 minutes after
+  its last request is summarised in the background with Pi's own summariser,
+  on the session's model. The session stays free meanwhile.
+- Your next message after an hour without a request compacts the session with
+  that summary before it goes out, so it carries the small context only. If
+  the summary is still being written, the message waits for it. A message
+  within the hour, while the cache still holds the conversation, drops the
+  summary unused.
+- The summary covers the whole conversation; Pi keeps its recent messages as
+  they are, as with `/compact`. A summary of a conversation that changed
+  meanwhile, by a background result or a message, is dropped.
+- After a start or `/reload`, the time of the last request comes from the
+  session, so a conversation idle long enough already is summarised at once.
+- It works in the interactive session only: a subagent ends with its run, and
+  so does print mode.
+- Settings, all optional, in `~/.pi/agent/idle-compaction.json`: `enabled`
+  (true), `minTokens` (200000), `prepareMinutes` (50), and `coldMinutes`
+  (60). Under `providers`, each of them can be set for one provider and wins
+  there over the top level, for a provider whose cache lives shorter:
+  `{"providers": {"openai": {"prepareMinutes": 5, "coldMinutes": 10}}}`.
 
 ## compact
 

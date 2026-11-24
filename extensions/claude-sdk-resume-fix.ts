@@ -3,7 +3,7 @@
  * edited history", https://github.com/jkeskikangas/pi-claude-subscription/pull/4) into an installed version without
  * them.
  *
- * - Up to 0.2.4 the provider, after a change in older messages (a cut by context-gc, any context edit), resumes Claude
+ * - Up to 0.2.4 the provider, after a change in older messages (any context edit by an extension), resumes Claude
  *   Code's transcript at the last unchanged message and sends everything after it as one user turn: every later
  *   response is lost, without an error. With the pull request it writes them into a fork of the transcript instead,
  *   and the cached part before the change stays cached.
@@ -209,7 +209,7 @@ async function run(): Promise<Outcome> {
 function unknownNotice(version: string): string {
 	return (
 		`The resume fix cannot be applied to ${PACKAGE} ${version}: it knows neither this version nor its files. ` +
-		"After a change in older messages, for example a cut by context-gc, Claude loses the responses that follow it. " +
+		"After a change in older messages, for example a context edit by an extension, Claude loses the responses that follow it. " +
 		`See https://github.com/jkeskikangas/pi-claude-subscription/pull/4; /${COMMAND} shows the state.`
 	);
 }
@@ -217,7 +217,7 @@ function unknownNotice(version: string): string {
 function failedNotice(error: unknown): string {
 	return (
 		`The resume fix for ${PACKAGE} could not be applied: ${error instanceof Error ? error.message : error}. ` +
-		"Until it is, Claude loses the responses after a change in older messages, for example a cut by context-gc."
+		"Until it is, Claude loses the responses after a change in older messages, for example a context edit by an extension."
 	);
 }
 
