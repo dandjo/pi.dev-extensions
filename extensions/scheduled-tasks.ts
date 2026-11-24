@@ -1,16 +1,7 @@
 /**
- * Session-scoped scheduled tasks: Claude Code's /loop and its cron tools CronCreate, CronList, CronDelete, and
- * ScheduleWakeup (https://code.claude.com/docs/en/scheduled-tasks), here cron_create, cron_list, cron_delete, and
- * schedule_wakeup.
+ * Session-scoped scheduled tasks: Claude Code's cron tools CronCreate, CronList, and CronDelete
+ * (https://code.claude.com/docs/en/scheduled-tasks), here cron_create, cron_list, and cron_delete.
  *
- * - /loop <interval> <prompt> runs the prompt now and then on a fixed schedule ("5m", "2h", "every 30 minutes";
- *   s/m/h/d). An interval that no cron step fits is rounded to the nearest one that does, and said so.
- * - /loop <prompt> is self-paced: after each iteration the model calls schedule_wakeup with a delay between one minute
- *   and one hour, or with stop: true when the work is done. An iteration that does neither gets one fallback wakeup
- *   20 minutes later; when that one does not reschedule either, the loop ends. Esc on an empty editor while the loop
- *   waits, or /loop stop, cancels it.
- * - /loop alone runs .claude/loop.md (or .pi/loop.md, ~/.claude/loop.md, ~/.pi/agent/loop.md), read fresh at every
- *   iteration, else a built-in maintenance prompt.
  * - The model schedules tasks itself with cron_create (5-field cron, local time, recurring or one-shot), lists them
  *   with cron_list, and cancels them with cron_delete. /cron does the same by hand: /cron, /cron add|once
  *   <m h dom mon dow> <prompt>, /cron delete <id>|all.
@@ -22,32 +13,18 @@
  *   comes through scheduled-tasks:command and is answered there as text, the list included.
  * - Tasks fire only while this session is open and idle, between turns, one at a time and without catch-up for missed
  *   runs. Recurring tasks expire after 7 days (one last run, then they are deleted); a session holds at most 50.
- *   Tasks are stored in the session and restored on resume, except expired ones, one-shots already due, and
- *   self-paced loops. CLAUDE_CODE_DISABLE_CRON=1 turns all of it off.
+ *   Tasks are stored in the session and restored on resume, except expired ones and one-shots already due.
+ *   CLAUDE_CODE_DISABLE_CRON=1 turns all of it off.
  */
 
-import { type ExtensionAPI, type ExtensionContext, getAgentDir, type Theme } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { Key, matchesKey, Text, type TuiMouseEvent, type TuiMouseEventResult, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { randomBytes } from "node:crypto";
-import { readFileSync } from "node:fs";
-import * as os from "node:os";
-import * as path from "node:path";
 
 const MAX_TASKS = 50;
 const EXPIRY_MS = 7 * 24 * 60 * 60 * 1000;
 const TICK_MS = 1000;
-const FALLBACK_WAKEUP_S = 20 * 60;
-const MIN_WAKEUP_S = 60;
-const MAX_WAKEUP_S = 3600;
-const LOOP_FILE_MAX = 25_000;
-const LOOP_FILE = "\u0000loop.md";
-
-const MAINTENANCE_PROMPT = `Maintenance pass, in this order; stop at the first item that has work:
-1. Continue any unfinished work from this conversation.
-2. Tend to the current branch's merge or pull request: new review comments, failed CI runs, merge conflicts.
-3. When nothing else is pending, run one cleanup pass on code this session touched: look for bugs or simplifications and fix them.
-Do not start new initiatives outside this scope. Irreversible actions such as pushing, merging, or deleting proceed only when they continue something the conversation already authorized. If everything is quiet, say so in one line.`;
 
 interface Task {
 	id: string;
@@ -56,31 +33,18 @@ interface Task {
 	recurring: boolean;
 	createdAt: number;
 	nextRun: number;
-	/** Self-paced loop wakeup: the loop it belongs to. */
-	loop?: string;
 }
 
 /** A scheduled task as other extensions see it (scheduled-tasks:state). */
 export interface ScheduledTaskView {
 	id: string;
-	kind: "recurring" | "one-shot" | "loop wakeup";
+	kind: "recurring" | "one-shot";
 	/** The schedule in words where it has a common shape ("daily at 11:00"), else the cron expression. */
 	schedule: string;
 	nextRun: number;
 	/** nextRun as the status line shows it. */
 	next: string;
 	prompt: string;
-}
-
-interface SelfLoop {
-	id: string;
-	prompt: string;
-	/** The current iteration called schedule_wakeup (or stop). */
-	rescheduled: boolean;
-	/** The pending wakeup is the fallback after an iteration that did not reschedule. */
-	fallback: boolean;
-	/** An iteration of this loop is running. */
-	iterating: boolean;
 }
 
 // --- Cron --------------------------------------------------------------------------------------------------------
@@ -231,74 +195,6 @@ function describeCron(cron: string): string {
 	return cron;
 }
 
-// --- Intervals ---------------------------------------------------------------------------------------------------
-
-const MINUTE_STEPS = [1, 2, 3, 4, 5, 6, 10, 12, 15, 20, 30];
-const HOUR_STEPS = [1, 2, 3, 4, 6, 8, 12];
-
-function nearest(value: number, steps: number[]): number {
-	return steps.reduce((best, step) => (Math.abs(step - value) < Math.abs(best - value) ? step : best), steps[0]);
-}
-
-const UNITS: Record<string, number> = { s: 1, sec: 1, secs: 1, second: 1, seconds: 1, m: 60, min: 60, mins: 60, minute: 60, minutes: 60, h: 3600, hr: 3600, hrs: 3600, hour: 3600, hours: 3600, d: 86400, day: 86400, days: 86400 };
-
-/** Splits "/loop" arguments into an interval in seconds (leading "5m" or trailing "every 2 hours") and the prompt. */
-function splitInterval(args: string): { seconds?: number; prompt: string } {
-	const lead = args.match(/^(\d+)\s*(s|secs?|m|mins?|h|hrs?|d)\b\s*/i);
-	if (lead) return { seconds: Number(lead[1]) * UNITS[lead[2].toLowerCase()], prompt: args.slice(lead[0].length).trim() };
-	const trail = args.match(/\s*\bevery\s+(?:(\d+)\s*)?(seconds?|minutes?|mins?|hours?|hrs?|days?|s|m|h|d)\s*$/i);
-	if (trail) {
-		const unit = trail[2].toLowerCase();
-		return { seconds: Number(trail[1] ?? 1) * (UNITS[unit] ?? UNITS[unit.replace(/s$/, "")]), prompt: args.slice(0, trail.index).trim() };
-	}
-	return { prompt: args.trim() };
-}
-
-/** A cron expression for "every `seconds`", rounded to a clean cron step, with a note when it was rounded. */
-function intervalCron(seconds: number): { cron: string; label: string; note?: string } {
-	const now = new Date();
-	const minutes = Math.max(1, Math.ceil(seconds / 60));
-	const asked = seconds < 60 ? `${seconds}s` : seconds % 3600 === 0 && seconds < 86400 ? `${seconds / 3600}h` : seconds % 86400 === 0 ? `${seconds / 86400}d` : `${minutes}m`;
-	if (minutes < 60) {
-		const step = nearest(minutes, MINUTE_STEPS);
-		const cron = step === 1 ? "* * * * *" : `*/${step} * * * *`;
-		const note =
-			step !== minutes
-				? `${asked} does not map to a clean cron step; running every ${step}m instead.`
-				: seconds % 60 !== 0
-					? `Cron has one-minute granularity; ${seconds}s is rounded up to ${step}m.`
-					: undefined;
-		return { cron, label: `every ${step}m`, note };
-	}
-	if (minutes < 24 * 60) {
-		const hours = Math.max(1, Math.round(minutes / 60));
-		const step = nearest(hours, HOUR_STEPS);
-		const note = step * 60 !== minutes ? `${asked} does not map to a clean cron step; running every ${step}h instead.` : undefined;
-		return { cron: `${now.getMinutes()} ${step === 1 ? "*" : `*/${step}`} * * *`, label: `every ${step}h`, note };
-	}
-	const days = Math.max(1, Math.round(minutes / 1440));
-	const note = days * 1440 !== minutes ? `${asked} does not map to a clean cron step; running every ${days}d instead.` : undefined;
-	return { cron: `${now.getMinutes()} ${now.getHours()} ${days === 1 ? "*" : `*/${days}`} * *`, label: `every ${days}d`, note };
-}
-
-function loopFile(cwd: string): { file: string; text: string } | undefined {
-	const candidates = [
-		path.join(cwd, ".claude", "loop.md"),
-		path.join(cwd, ".pi", "loop.md"),
-		path.join(process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), ".claude"), "loop.md"),
-		path.join(getAgentDir(), "loop.md"),
-	];
-	for (const file of candidates) {
-		try {
-			const text = readFileSync(file, "utf8");
-			return { file, text: text.length > LOOP_FILE_MAX ? text.slice(0, LOOP_FILE_MAX) : text };
-		} catch {
-			// next
-		}
-	}
-	return undefined;
-}
-
 // --- Extension ---------------------------------------------------------------------------------------------------
 
 /**
@@ -330,10 +226,8 @@ export default function (pi: ExtensionAPI) {
 	if (Number(process.env.PI_SUBAGENT_DEPTH || 0) > 0 || process.env.CLAUDE_CODE_DISABLE_CRON === "1") return;
 
 	let tasks: Task[] = [];
-	let loop: SelfLoop | null = null;
 	let ctxRef: ExtensionContext | null = null;
 	let ticker: NodeJS.Timeout | null = null;
-	let unsubscribeInput: (() => void) | null = null;
 	let firing = false;
 	/** The open task manager, which renders afresh when the tasks change. */
 	let manager: { refresh(): void; show(id?: string): void } | null = null;
@@ -341,12 +235,11 @@ export default function (pi: ExtensionAPI) {
 	const newId = () => randomBytes(4).toString("hex");
 
 	function persist(): void {
-		pi.appendEntry("scheduled-tasks", { tasks: tasks.filter((t) => !t.loop) });
+		pi.appendEntry("scheduled-tasks", { tasks });
 	}
 
-	const promptText = (task: Task) => (task.prompt === LOOP_FILE ? "(loop.md / maintenance prompt)" : task.prompt);
-	const kindOf = (task: Task): ScheduledTaskView["kind"] => (task.loop ? "loop wakeup" : task.recurring ? "recurring" : "one-shot");
-	const scheduleOf = (task: Task) => (task.loop ? "loop wakeup" : task.recurring ? describeCron(task.cron) : "once");
+	const kindOf = (task: Task): ScheduledTaskView["kind"] => (task.recurring ? "recurring" : "one-shot");
+	const scheduleOf = (task: Task) => (task.recurring ? describeCron(task.cron) : "once");
 	const byNextRun = () => tasks.slice().sort((a, b) => a.nextRun - b.nextRun);
 
 	/** The tasks for other extensions, and the open task manager brought up to date. */
@@ -357,7 +250,7 @@ export default function (pi: ExtensionAPI) {
 			schedule: scheduleOf(t),
 			nextRun: t.nextRun,
 			next: clock(t.nextRun),
-			prompt: promptText(t).replace(/\s+/g, " "),
+			prompt: t.prompt.replace(/\s+/g, " "),
 		}));
 		pi.events.emit("scheduled-tasks:state", views);
 		manager?.refresh();
@@ -371,26 +264,11 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 		const next = Math.min(...tasks.map((t) => t.nextRun));
-		const label = loop && tasks.some((t) => t.loop) ? "loop waiting" : `${tasks.length} scheduled`;
-		ctxRef.ui.setStatus("scheduled", `↻ ${label} · next ${clock(next)}`);
-	}
-
-	function setWakeupTool(active: boolean): void {
-		const tools = pi.getActiveTools().filter((t) => t !== "schedule_wakeup");
-		pi.setActiveTools(active ? [...tools, "schedule_wakeup"] : tools);
-	}
-
-	function endLoop(reason: string, notify = true): void {
-		if (!loop) return;
-		tasks = tasks.filter((t) => t.loop !== loop?.id);
-		loop = null;
-		setWakeupTool(false);
-		status();
-		if (notify && ctxRef?.hasUI) ctxRef.ui.notify(reason, "info");
+		ctxRef.ui.setStatus("scheduled", `↻ ${tasks.length} scheduled · next ${clock(next)}`);
 	}
 
 	function add(cron: string, prompt: string, recurring: boolean): Task {
-		if (tasks.filter((t) => !t.loop).length >= MAX_TASKS) throw new Error(`A session holds at most ${MAX_TASKS} scheduled tasks; delete one first.`);
+		if (tasks.length >= MAX_TASKS) throw new Error(`A session holds at most ${MAX_TASKS} scheduled tasks; delete one first.`);
 		const spec = parseCron(cron);
 		const now = Date.now();
 		const next = nextRun(spec, now);
@@ -405,42 +283,10 @@ export default function (pi: ExtensionAPI) {
 	function remove(id: string): Task | undefined {
 		const task = tasks.find((t) => t.id === id);
 		if (!task) return undefined;
-		if (task.loop) {
-			endLoop("Pending wakeup cancelled.", false);
-			return task;
-		}
 		tasks = tasks.filter((t) => t.id !== id);
 		persist();
 		status();
 		return task;
-	}
-
-	function scheduleWakeup(seconds: number): Task {
-		if (!loop) throw new Error("No self-paced /loop is running.");
-		tasks = tasks.filter((t) => t.loop !== loop?.id);
-		const at = Date.now() + seconds * 1000;
-		const when = new Date(at);
-		const task: Task = {
-			id: newId(),
-			cron: `${when.getMinutes()} ${when.getHours()} ${when.getDate()} ${when.getMonth() + 1} *`,
-			prompt: loop.prompt,
-			recurring: false,
-			createdAt: Date.now(),
-			nextRun: at,
-			loop: loop.id,
-		};
-		tasks.push(task);
-		status();
-		return task;
-	}
-
-	function iterationPrompt(prompt: string): string {
-		return `${prompt}\n\n(This runs as a self-paced /loop. When this iteration's work is done, call schedule_wakeup: delaySeconds between ${MIN_WAKEUP_S} and ${MAX_WAKEUP_S} with a one-line reason — short while something is about to change, such as a running build; long when nothing is pending — or stop: true once the loop's work is complete and nothing more needs checking.)`;
-	}
-
-	function resolvePrompt(task: Task, ctx: ExtensionContext): string {
-		if (task.prompt !== LOOP_FILE) return task.prompt;
-		return loopFile(ctx.cwd)?.text.trim() || MAINTENANCE_PROMPT;
 	}
 
 	/** Sends a prompt as the next user turn. Skill and prompt-template invocations are expanded; other commands are not. */
@@ -452,16 +298,6 @@ export default function (pi: ExtensionAPI) {
 
 	function fire(task: Task, ctx: ExtensionContext): void {
 		const now = Date.now();
-		const prompt = resolvePrompt(task, ctx);
-		if (task.loop) {
-			tasks = tasks.filter((t) => t.id !== task.id);
-			if (!loop || loop.id !== task.loop) return;
-			loop.rescheduled = false;
-			loop.iterating = true;
-			status();
-			send(iterationPrompt(prompt));
-			return;
-		}
 		if (!task.recurring) {
 			tasks = tasks.filter((t) => t.id !== task.id);
 			persist();
@@ -473,7 +309,7 @@ export default function (pi: ExtensionAPI) {
 			task.nextRun = nextRun(parseCron(task.cron), now) ?? Number.POSITIVE_INFINITY;
 		}
 		status();
-		send(prompt);
+		send(task.prompt);
 	}
 
 	function tick(): void {
@@ -497,7 +333,6 @@ export default function (pi: ExtensionAPI) {
 
 	function restore(ctx: ExtensionContext): void {
 		tasks = [];
-		loop = null;
 		let saved: Task[] = [];
 		for (const entry of ctx.sessionManager.getBranch()) {
 			if (entry.type === "custom" && entry.customType === "scheduled-tasks") saved = (entry.data as { tasks?: Task[] })?.tasks ?? [];
@@ -519,28 +354,15 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_start", (_event, ctx) => {
 		ctxRef = ctx;
 		restore(ctx);
-		setWakeupTool(false);
 		status();
 		if (ticker) clearInterval(ticker);
 		ticker = setInterval(tick, TICK_MS);
 		ticker.unref();
-		unsubscribeInput?.();
-		unsubscribeInput = null;
-		if (ctx.mode === "tui") {
-			unsubscribeInput = ctx.ui.onTerminalInput((data) => {
-				if (data !== "\x1b" || !loop || loop.iterating || !tasks.some((t) => t.loop === loop?.id)) return undefined;
-				if (!ctx.isIdle() || ctx.ui.getEditorText().trim()) return undefined;
-				endLoop("Pending wakeup cancelled.");
-				return { consume: true };
-			});
-		}
 	});
 
 	pi.on("session_shutdown", () => {
 		if (ticker) clearInterval(ticker);
 		ticker = null;
-		unsubscribeInput?.();
-		unsubscribeInput = null;
 		for (const off of unsubscribeEvents) off();
 		ctxRef = null;
 	});
@@ -580,12 +402,11 @@ export default function (pi: ExtensionAPI) {
 					list.forEach((task, i) => {
 						const focused = i === selected;
 						const schedule = truncateToWidth(scheduleOf(task), scheduleWidth, "…", true);
-						const row = `${focused ? theme.fg("accent", "→ ") : "  "}${theme.fg("accent", task.id)}  ${clock(task.nextRun).padEnd(nextWidth)}  ${schedule}  ${theme.fg("muted", promptText(task).replace(/\s+/g, " "))}`;
+						const row = `${focused ? theme.fg("accent", "→ ") : "  "}${theme.fg("accent", task.id)}  ${clock(task.nextRun).padEnd(nextWidth)}  ${schedule}  ${theme.fg("muted", task.prompt.replace(/\s+/g, " "))}`;
 						const cut = truncateToWidth(row, inner, "…");
 						hits[lines.length] = i;
 						lines.push(focused ? theme.bg("selectedBg", cut + " ".repeat(Math.max(0, inner - visibleWidth(cut)))) : cut);
 					});
-					if (loop) lines.push("", theme.fg("muted", `Self-paced loop running: ${loop.prompt === LOOP_FILE ? "loop.md / maintenance prompt" : loop.prompt}`));
 					return lines;
 				};
 
@@ -593,13 +414,13 @@ export default function (pi: ExtensionAPI) {
 					const label = (name: string) => theme.fg("muted", name.padEnd(10));
 					const lines = [
 						`${label("ID")}${theme.fg("accent", task.id)}`,
-						`${label("Schedule")}${scheduleOf(task)}${task.loop ? "" : ` (${task.cron})`} · ${kindOf(task)}`,
+						`${label("Schedule")}${scheduleOf(task)} (${task.cron}) · ${kindOf(task)}`,
 						`${label("Next run")}${clock(task.nextRun)} (${zone()})`,
 						`${label("Created")}${clock(task.createdAt)}`,
 					];
 					if (task.recurring) lines.push(`${label("Expires")}${clock(task.createdAt + EXPIRY_MS)}`);
 					lines.push("", theme.fg("muted", "Prompt"));
-					for (const line of promptText(task).split("\n")) lines.push(...(line ? wrapTextWithAnsi(line, inner) : [""]));
+					for (const line of task.prompt.split("\n")) lines.push(...(line ? wrapTextWithAnsi(line, inner) : [""]));
 					return lines;
 				};
 
@@ -767,26 +588,6 @@ export default function (pi: ExtensionAPI) {
 		}),
 	];
 
-	pi.on("agent_settled", (event) => {
-		if (!loop?.iterating) return;
-		loop.iterating = false;
-		if (event.aborted) {
-			endLoop("Self-paced loop stopped (the iteration was interrupted).");
-			return;
-		}
-		if (loop.rescheduled) {
-			loop.fallback = false;
-			return;
-		}
-		if (loop.fallback) {
-			endLoop("Self-paced loop ended: two iterations in a row did not schedule a next wakeup.");
-			return;
-		}
-		loop.fallback = true;
-		scheduleWakeup(FALLBACK_WAKEUP_S);
-		if (ctxRef?.hasUI) ctxRef.ui.notify(`The loop iteration did not schedule a wakeup; checking again at ${clock(Date.now() + FALLBACK_WAKEUP_S * 1000)}.`, "info");
-	});
-
 	// --- Tools ------------------------------------------------------------------------------------------------------
 
 	pi.registerTool({
@@ -833,7 +634,7 @@ export default function (pi: ExtensionAPI) {
 			const lines = tasks
 				.slice()
 				.sort((a, b) => a.nextRun - b.nextRun)
-				.map((t) => `${t.id} · ${t.loop ? "loop wakeup" : t.cron} · ${t.recurring ? "recurring" : "one-shot"} · next run ${clock(t.nextRun)} · ${t.prompt === LOOP_FILE ? "(loop.md / maintenance prompt)" : t.prompt}`);
+				.map((t) => `${t.id} · ${t.cron} · ${t.recurring ? "recurring" : "one-shot"} · next run ${clock(t.nextRun)} · ${t.prompt}`);
 			const now = `Now: ${clock(Date.now())} (${zone()}).`;
 			return { content: [{ type: "text", text: lines.length ? `${now}\n${lines.join("\n")}` : `${now}\nNo scheduled tasks.` }], details: undefined };
 		},
@@ -847,70 +648,11 @@ export default function (pi: ExtensionAPI) {
 		async execute(_id, params) {
 			const task = remove(params.id.trim());
 			if (!task) throw new Error(`No scheduled task with ID ${params.id}.`);
-			return { content: [{ type: "text", text: `Cancelled ${task.id} (${task.loop ? "loop wakeup" : task.cron}).` }], details: undefined };
-		},
-	});
-
-	pi.registerTool({
-		name: "schedule_wakeup",
-		label: "Schedule wakeup",
-		description: `Schedule the next iteration of the running self-paced /loop. Pick delaySeconds between ${MIN_WAKEUP_S} and ${MAX_WAKEUP_S} from what you observed: short while something is about to change, long when nothing is pending. Pass stop: true instead once the loop's work is complete.`,
-		parameters: Type.Object({
-			delaySeconds: Type.Optional(Type.Number({ description: `Seconds until the next iteration, ${MIN_WAKEUP_S}-${MAX_WAKEUP_S}.` })),
-			reason: Type.Optional(Type.String({ description: "One line on why this delay (or why the loop stops)." })),
-			stop: Type.Optional(Type.Boolean({ description: "End the loop instead of scheduling another iteration." })),
-		}),
-		defaultActive: false,
-		async execute(_id, params) {
-			if (!loop) throw new Error("No self-paced /loop is running.");
-			if (params.stop) {
-				loop.rescheduled = true;
-				endLoop(`Self-paced loop ended${params.reason ? `: ${params.reason}` : "."}`);
-				return { content: [{ type: "text", text: "Loop stopped. No further iterations are scheduled." }], details: undefined };
-			}
-			const seconds = Math.min(MAX_WAKEUP_S, Math.max(MIN_WAKEUP_S, Math.round(params.delaySeconds ?? 600)));
-			loop.rescheduled = true;
-			loop.fallback = false;
-			const task = scheduleWakeup(seconds);
-			const text = `Next iteration at ${clock(task.nextRun)} (in ${Math.round(seconds / 60)} min)${params.reason ? ` — ${params.reason}` : ""}.`;
-			return { content: [{ type: "text", text }], details: undefined };
+			return { content: [{ type: "text", text: `Cancelled ${task.id} (${task.cron}).` }], details: undefined };
 		},
 	});
 
 	// --- Commands ---------------------------------------------------------------------------------------------------
-
-	pi.registerCommand("loop", {
-		description: "Run a prompt repeatedly: /loop [interval] [prompt], /loop stop",
-		handler: async (args, ctx) => {
-			ctxRef = ctx;
-			const text = args.trim();
-			if (text === "stop") {
-				if (loop) endLoop("Self-paced loop stopped.");
-				else ctx.ui.notify("No self-paced loop is running. Fixed-interval loops are cancelled with /cron delete <id>.", "info");
-				return;
-			}
-			const { seconds, prompt: given } = splitInterval(text);
-			const prompt = given || LOOP_FILE;
-			const shown = given || (loopFile(ctx.cwd)?.file.replace(os.homedir(), "~") ?? "the built-in maintenance prompt");
-			try {
-				if (seconds !== undefined) {
-					const { cron, label, note } = intervalCron(seconds);
-					const task = add(cron, prompt, true);
-					ctx.ui.notify(`${note ? `${note}\n` : ""}Loop ${task.id} scheduled ${label} (${cron}); next run ${clock(task.nextRun)}. Runs now, then on schedule. /cron delete ${task.id} stops it.`, "info");
-					send(resolvePrompt(task, ctx));
-					return;
-				}
-				if (loop) endLoop("Replaced the running self-paced loop.", false);
-				loop = { id: newId(), prompt, rescheduled: false, fallback: false, iterating: true };
-				setWakeupTool(true);
-				status();
-				ctx.ui.notify(`Self-paced loop started with ${shown}. Esc while it waits, or /loop stop, ends it.`, "info");
-				send(iterationPrompt(resolvePrompt({ prompt } as Task, ctx)));
-			} catch (error) {
-				ctx.ui.notify(`/loop: ${error instanceof Error ? error.message : error}`, "error");
-			}
-		},
-	});
 
 	pi.registerCommand("cron", {
 		description: "Scheduled tasks: /cron (list), /cron add|once <m h dom mon dow> <prompt>, /cron delete <id>|all",
@@ -944,11 +686,10 @@ export default function (pi: ExtensionAPI) {
 		const list = byNextRun();
 		if (list.length === 0) lines.push("No scheduled tasks.");
 		for (const t of list) {
-			const schedule = t.loop || !t.recurring ? scheduleOf(t) : `${scheduleOf(t)} (${t.cron})`;
-			lines.push(`- ${t.id} · next ${clock(t.nextRun)} · ${schedule} · ${promptText(t).replace(/\s+/g, " ")}`);
+			const schedule = t.recurring ? `${scheduleOf(t)} (${t.cron})` : scheduleOf(t);
+			lines.push(`- ${t.id} · next ${clock(t.nextRun)} · ${schedule} · ${t.prompt.replace(/\s+/g, " ")}`);
 		}
-		if (loop) lines.push("", `Self-paced loop running: ${loop.prompt === LOOP_FILE ? "loop.md / maintenance prompt" : loop.prompt}`);
-		lines.push("", "/cron delete <id> cancels a task; /cron add|once <m h dom mon dow> <prompt> schedules one; /loop stop ends a self-paced loop.");
+		lines.push("", "/cron delete <id> cancels a task; /cron add|once <m h dom mon dow> <prompt> schedules one.");
 		return lines.join("\n");
 	}
 
@@ -968,7 +709,6 @@ export default function (pi: ExtensionAPI) {
 			if (del[1] === "all") {
 				const count = tasks.length;
 				tasks = [];
-				if (loop) endLoop("", false);
 				persist();
 				status();
 				return { message: `Deleted ${count} scheduled task${count === 1 ? "" : "s"}.`, level: "info" };

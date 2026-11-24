@@ -170,7 +170,7 @@ const FORK_NOTE =
 const SESSIONS_ROOT = path.join(getAgentDir(), "subagents");
 
 /** Tools no subagent gets, whatever its definition lists (Claude Code's first filter, plus Pi's own equivalents). */
-const NEVER = new Set(["cron_create", "cron_delete", "cron_list", "schedule_wakeup", "list_agents", "send_message"]);
+const NEVER = new Set(["cron_create", "cron_delete", "cron_list", "list_agents", "send_message"]);
 /** The tool a subagent asks the user with: its dialogs open in the session that started it, when that one has a UI. */
 const ASK = "ask_user_question";
 /**

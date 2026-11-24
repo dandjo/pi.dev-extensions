@@ -40,7 +40,7 @@
  *   the named reset is no longer trusted (Gemini names one of seconds for a used-up daily quota), and the run tries
  *   again at intervals as without one.
  * - Whatever starts a run while the limit holds waits the same way after its first failed request: a subagent's
- *   report, a background wait's result, a message from another session, a scheduled prompt, and /loop. A
+ *   report, a background wait's result, a message from another session, and a scheduled prompt. A
  *   subagent's own Pi process loads this extension as well, so the subagent waits and continues by itself. While a
  *   run waits, messages that arrive are queued as they are during any run, and go to the model when it continues.
  * - In RPC mode, where Pi draws no working line, the wait is a status entry ("auto-continue:wait", without the

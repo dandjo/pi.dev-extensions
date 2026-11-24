@@ -33,7 +33,7 @@ names `extensions/`, which holds one file per extension.
 | `ask-user-question.ts`      | Adds `ask_user_question`, Claude Code's multiple-choice questions                         | —                                                                |
 | `subagents.ts`              | Adds the `agent` tool: subagents in their own Pi process, on a tier or a model of choice  | —                                                                |
 | `btw.ts`                    | `/btw`: a side question about the session that stays out of the conversation              | —                                                                |
-| `scheduled-tasks.ts`        | `/loop`, `/cron`, and the cron tools: prompts on a schedule within the session            | —                                                                |
+| `scheduled-tasks.ts`        | `/cron` and the cron tools: prompts on a schedule within the session                      | —                                                                |
 | `diff.ts`                   | `/diff`: a panel beside the conversation with the changes and each turn's edits           | git                                                              |
 | `background-agents.ts`      | The agent panel below the prompt: ↓ to the agents, Enter opens one, Ctrl+B to background  | `subagents.ts`                                                   |
 | `network-resilience.ts`     | Claude Code's handling of dropped connections: stall notice, restart, network wait        | —                                                                |
@@ -1594,7 +1594,7 @@ Claude Code, the prompt writes to the agent shown, and Esc interrupts it.
   output, kept current while it runs. `x` cancels it there too,
   Esc closes the box.
 - Scheduled tasks ([scheduled-tasks](#scheduled-tasks)) are listed below them,
-  the same way: `scheduled` or `loop`, their prompt, and at the end their id,
+  the same way: `scheduled`, their prompt, and at the end their id,
   schedule, and next run. Enter opens the task in the task manager, `x`
   deletes it. The panel also appears while only waits or tasks are there.
 - In fullscreen mode the row under the pointer gets the arrow and the
@@ -1645,23 +1645,9 @@ without adding anything to it, like Claude Code's
 
 Claude Code's
 [session-scoped scheduled tasks](https://code.claude.com/docs/en/scheduled-tasks):
-`/loop`, `/cron`, and the tools `cron_create`, `cron_list`, `cron_delete`, and
-`schedule_wakeup` (Claude Code's `CronCreate`, `CronList`, `CronDelete`, and
-`ScheduleWakeup`).
+`/cron` and the tools `cron_create`, `cron_list`, and `cron_delete` (Claude
+Code's `CronCreate`, `CronList`, and `CronDelete`).
 
-- `/loop 5m <prompt>` (or `<prompt> every 2 hours`; units `s`, `m`, `h`,
-  `d`) runs the prompt now and then on that schedule. An interval no cron step
-  fits, such as `7m`, is rounded to the nearest one that does, with a notice.
-  `/cron delete <id>` stops it.
-- `/loop <prompt>` without an interval paces itself: after each iteration the
-  model schedules the next one in one to 60 minutes with `schedule_wakeup`, or
-  ends the loop. An iteration that does neither gets one fallback 20 minutes
-  later. Esc on an empty editor while the loop waits, or `/loop stop`, cancels
-  it.
-- `/loop` alone runs `.claude/loop.md` (also `.pi/loop.md`,
-  `~/.claude/loop.md`, `~/.pi/agent/loop.md`), read fresh at every iteration,
-  otherwise a maintenance prompt: continue unfinished work, tend to the
-  branch's merge request, then clean up.
 - "Remind me at 3 pm to …" or "check the pipeline every 10 minutes" makes the
   model schedule a task with `cron_create` — a standard 5-field cron expression
   in local time, recurring or once. `/cron add|once <m h dom mon dow>
@@ -1679,8 +1665,8 @@ Claude Code's
   list as text instead.
 - Tasks fire only while the session is open and idle, between turns, without
   catch-up. Recurring tasks expire after seven days, and a session holds at
-  most 50. They are stored in the session and restored on resume, except
-  self-paced loops. `CLAUDE_CODE_DISABLE_CRON=1` turns all of it off.
+  most 50. They are stored in the session and restored on resume.
+  `CLAUDE_CODE_DISABLE_CRON=1` turns all of it off.
 
 ## diff
 
@@ -2141,7 +2127,7 @@ you send a prompt.
   account just signed in.
 - Whatever starts a run while the limit holds waits the same way after its
   first failed request: a subagent's report, the result of a background
-  wait, a message from another session, a scheduled prompt, and `/loop`.
+  wait, a message from another session, and a scheduled prompt.
   Subagents load the extension in their own Pi process, so they wait
   and continue by themselves, also while the main session is idle. Their row
   in the [agent panel](#background-agents) shows the wait, and the tmux tab

@@ -1233,7 +1233,6 @@ const PI_TO_CLAUDE: Record<string, string> = {
 	cron_create: "CronCreate",
 	cron_list: "CronList",
 	cron_delete: "CronDelete",
-	schedule_wakeup: "ScheduleWakeup",
 	list_agents: "ListAgents",
 	send_message: "SendMessage",
 };

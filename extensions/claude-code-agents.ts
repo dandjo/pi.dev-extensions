@@ -51,7 +51,7 @@ const CLAUDE_TO_PI: Record<string, string[]> = {
 	CronCreate: ["cron_create"],
 	CronList: ["cron_list"],
 	CronDelete: ["cron_delete"],
-	ScheduleWakeup: ["schedule_wakeup"],
+	ScheduleWakeup: [],
 	ListAgents: ["list_agents"],
 	SendMessage: ["send_message"],
 	NotebookEdit: [],

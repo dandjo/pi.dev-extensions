@@ -685,7 +685,7 @@ function viewport(lines: string[], offset: number, rows: number): string[] {
 /** A scheduled task as other extensions see it (scheduled-tasks:state). */
 interface ScheduledTaskView {
 	id: string;
-	kind: "recurring" | "one-shot" | "loop wakeup";
+	kind: "recurring" | "one-shot";
 	/** The schedule in words where it has a common shape ("daily at 11:00"), else the cron expression. */
 	schedule: string;
 	nextRun: number;
@@ -973,9 +973,7 @@ export default function (pi: ExtensionAPI) {
 				? entry.row.type
 				: entry.kind === "wait"
 					? entry.wait.tool
-					: entry.task.kind === "loop wakeup"
-						? "loop"
-						: "scheduled";
+					: "scheduled";
 		const nameWidth = Math.min(MAX_NAME_WIDTH, Math.max(4, ...list.map((e) => label(e).length)));
 		const now = Date.now();
 		const statusesWith = (short: boolean) =>
@@ -984,7 +982,7 @@ export default function (pi: ExtensionAPI) {
 					? statusText(e.row, short)
 					: e.kind === "wait"
 						? `${e.wait.id} · ${e.wait.repeat ? `every ${elapsed(e.wait.intervalMs).replace(/ 0s$/, "")}` : elapsed(now - e.wait.startedAt)} · ${e.wait.checks} check${e.wait.checks === 1 ? "" : "s"}`
-						: `${e.task.id} · ${e.task.kind === "loop wakeup" ? "" : `${e.task.schedule} · `}next ${e.task.next}`,
+						: `${e.task.id} · ${e.task.schedule} · next ${e.task.next}`,
 			);
 		const description = (e: Entry) =>
 			e.kind === "agent" ? e.row.description : e.kind === "wait" ? `${e.wait.label}${e.wait.last ? ` · ${e.wait.last}` : ""}` : e.task.prompt;
