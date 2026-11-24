@@ -12,6 +12,10 @@
  * - A compaction that fails (nothing to compact yet, a usage limit, …) lets the model continue all the same, with the
  *   error in the message. A compaction cancelled with Esc, a run aborted with Esc, and a message from the user
  *   meanwhile drop the continuation: the user takes over.
+ * - The tool declines, and the model goes on with the task, in a run that started after an hour without a request (the
+ *   lifetime of Claude's prompt cache) or right after a compaction: the first request of the run has paid for the whole
+ *   context already, and idle-compaction.ts compacts a large conversation before such a run. A compaction then costs a
+ *   summary and another rebuild of the cache on top, which a short run never earns back.
  * - The tool works in the interactive session only: a subagent (RPC mode) settles once its run ends, so it could not
  *   continue, and print mode ends with the run.
  */
@@ -21,12 +25,17 @@ import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 
 const MESSAGE_TYPE = "compact";
+/** Lifetime of Claude's prompt cache: a run after a longer pause has rebuilt it with its first request. */
+const COLD_MS = 60 * 60_000;
 
 /** due: asked for, compacts once Pi settles; running: compacting. */
 type Stage = "due" | "running";
 
 export default function (pi: ExtensionAPI) {
 	let pending: { stage: Stage; focus?: string } | undefined;
+	let lastResponseAt: number | undefined;
+	/** Why compact declines in the current run, if it does. */
+	let decline: string | undefined;
 
 	function continueRun(error?: string): void {
 		pending = undefined;
@@ -78,8 +87,28 @@ export default function (pi: ExtensionAPI) {
 		return { action: "continue" };
 	});
 
-	pi.on("session_start", () => {
+	pi.on("session_start", (_event, ctx) => {
 		pending = undefined;
+		const messages = ctx.sessionManager.buildSessionProjection().messages;
+		lastResponseAt = [...messages].reverse().find((message) => message.role === "assistant")?.timestamp;
+	});
+
+	pi.on("agent_start", (_event, ctx) => {
+		const branch = ctx.sessionManager.getBranch();
+		const compactedAt = branch.map((entry) => entry.type).lastIndexOf("compaction");
+		const justCompacted =
+			compactedAt >= 0 &&
+			!branch.slice(compactedAt + 1).some((entry) => entry.type === "message" && entry.message.role === "assistant");
+		const paused = lastResponseAt !== undefined && Date.now() - lastResponseAt >= COLD_MS;
+		decline = justCompacted
+			? "the session was compacted just before this run"
+			: paused
+				? `this run started after ${Math.round((Date.now() - (lastResponseAt ?? 0)) / 60_000)} min without a request, so its first request rebuilt the prompt cache already and a compaction would only add a summary and a second rebuild`
+				: undefined;
+	});
+
+	pi.on("message_end", (event) => {
+		if (event.message.role === "assistant") lastResponseAt = Date.now();
 	});
 
 	pi.registerTool({
@@ -92,7 +121,7 @@ export default function (pi: ExtensionAPI) {
 		promptSnippet: "Compact the session whenever a finished task or part of the work no longer needs its details",
 		promptGuidelines: [
 			"compact: you MUST call it, before anything else, when the user turns to a new task unrelated to the one finished before it, and when a finished part of a long task leaves outputs behind (logs, file contents, search results, diffs) that the next part does not need. Do not leave it to Pi's automatic compaction: that comes only at a fixed size and summarises without knowing what matters next.",
-			"compact: skip it only while the session is still short (a few exchanges) or in the middle of a step whose details you still need.",
+			"compact: skip it only while the session is still short (a few exchanges) or in the middle of a step whose details you still need. It declines by itself after a long pause or right after a compaction; then go on with the task.",
 			"compact: say in focus what you need afterwards (task, decisions, open steps, paths; for a new task, the user's request in their words), call it alone, and write nothing after it: it ends your turn.",
 		],
 		parameters: Type.Object({
@@ -102,6 +131,12 @@ export default function (pi: ExtensionAPI) {
 
 		async execute(_id, params, _signal, _onUpdate, ctx) {
 			if (ctx.mode !== "tui") throw new Error("compact works in the interactive session only, not in a subagent or print mode");
+			if (decline) {
+				return {
+					content: [{ type: "text", text: `Not compacted: ${decline}. Go on with the task now, without compacting in this run.` }],
+					details: { declined: decline },
+				};
+			}
 			const focus = params.focus?.trim() || undefined;
 			pending = { stage: "due", focus };
 			const usage = ctx.getContextUsage();

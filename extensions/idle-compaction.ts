@@ -16,7 +16,7 @@
  * - After a start or /reload, the time of the last request comes from the session: a conversation idle long enough
  *   already is summarised at once.
  * - Only in the interactive session: a subagent and print mode end with their run.
- * - Settings, all optional, in ~/.pi/agent/idle-compaction.json: {"enabled": true, "minTokens": 200000,
+ * - Settings, all optional, in ~/.pi/agent/idle-compaction.json: {"enabled": true, "minTokens": 100000,
  *   "prepareMinutes": 50, "coldMinutes": 60}. Under "providers", every key can be set for one provider and wins there
  *   over the top level, for a provider whose cache lives shorter ({"providers": {"openai": {"coldMinutes": 10,
  *   "prepareMinutes": 5}}}).
@@ -42,7 +42,7 @@ interface Settings {
 	coldMinutes: number;
 }
 
-const DEFAULTS: Settings = { enabled: true, minTokens: 200_000, prepareMinutes: 50, coldMinutes: 60 };
+const DEFAULTS: Settings = { enabled: true, minTokens: 100_000, prepareMinutes: 50, coldMinutes: 60 };
 
 interface Summary {
 	text: string;

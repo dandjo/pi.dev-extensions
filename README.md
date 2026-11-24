@@ -126,6 +126,7 @@ in `~/.pi/agent/settings.json`, next to the `packages` entry the install wrote:
   "packages": ["npm:pi-claude-subscription"],
   "compaction": {
     "reserveTokens": 32768,
+    "keepRecentTokens": 8000,
     "modelOverrides": {
       "claude-sdk/claude-opus-5-5": { "reserveTokens": 700000 },
       "claude-sdk/claude-opus-5": { "reserveTokens": 700000 },
@@ -158,6 +159,13 @@ from 150k, pays for the requests between the two and in return compacts half
 as often, so fewer details of a long session are lost to the summary. A model
 with a smaller window must not get such an override, since its threshold would
 fall below zero and Pi would compact before every request.
+
+`keepRecentTokens` is the part of the conversation a compaction keeps as it
+is. Pi estimates it at four characters per token and counts only the thinking
+it sees; with Claude, German text, JSON and code run nearer three, and Opus
+shows next to none of its thinking, which the API counts all the same. Pi's
+default of 20,000 kept 75k tokens in a measured session; 8,000 keeps about
+the 20k it means.
 
 The `retry` values let Pi retry a dropped connection or an overloaded server
 ten times, after 2, 4, 8, 16, then 32 seconds, as Claude Code retries ten
@@ -2168,7 +2176,7 @@ does. Every request keeps the prompt cache warm, and Claude's lives an hour;
 the first message after that writes the whole context to the cache anew, at
 the price of the whole context.
 
-- A conversation of at least 200k tokens that stays idle for 50 minutes after
+- A conversation of at least 100k tokens that stays idle for 50 minutes after
   its last request is summarised in the background with Pi's own summariser,
   on the session's model. The session stays free meanwhile.
 - Your next message after an hour without a request compacts the session with
@@ -2184,7 +2192,7 @@ the price of the whole context.
 - It works in the interactive session only: a subagent ends with its run, and
   so does print mode.
 - Settings, all optional, in `~/.pi/agent/idle-compaction.json`: `enabled`
-  (true), `minTokens` (200000), `prepareMinutes` (50), and `coldMinutes`
+  (true), `minTokens` (100000), `prepareMinutes` (50), and `coldMinutes`
   (60). Under `providers`, each of them can be set for one provider and wins
   there over the top level, for a provider whose cache lives shorter:
   `{"providers": {"openai": {"prepareMinutes": 5, "coldMinutes": 10}}}`.
@@ -2212,6 +2220,11 @@ details are no longer needed, before the next part fills the context further.
   part does not need. It skips it only while the session is short or in the
   middle of a step. For a new task, `focus` carries your request in your
   words.
+- It declines, and the model goes on with the task, in a run that started
+  after an hour without a request or right after a compaction. The first
+  request of such a run has rebuilt the prompt cache already, and
+  [idle-compaction](#idle-compaction) compacts a large conversation before
+  it; a compaction would add a summary and a second rebuild.
 - It works in the interactive session only: a subagent ends with its run, and
   so does print mode.
 
