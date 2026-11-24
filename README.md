@@ -39,6 +39,7 @@ names `extensions/`, which holds one file per extension.
 | `network-resilience.ts`     | Claude Code's handling of dropped connections: stall notice, restart, network wait        | —                                                                |
 | `auto-continue.ts`          | Waits out a used-up usage limit, quota, or rate limit and continues after the reset       | —                                                                |
 | `idle-compaction.ts`        | Summarises an idle conversation in the background; used once the prompt cache expired     | —                                                                |
+| `compaction-cut.ts`         | Cuts a compaction where measured tokens reach the kept part, not where Pi estimates it    | —                                                                |
 | `compact.ts`                | Adds `compact`: the model compacts the session on its own and then continues the task     | —                                                                |
 | `wait.ts`                   | Adds `wait`: checks a command or tool until a condition holds, without model requests     | —                                                                |
 | `package-update.ts`         | Keeps this package current, and reloads Pi when it changes                                | The package installed with `pi install`                          |
@@ -83,7 +84,7 @@ missing. `web_search` comes from the npm package `pi-web-access`; see
 ## Set up Pi
 
 Follow the steps in order — together they are the complete setup: Pi itself,
-the Claude subscription, all thirty-one extensions, and the browser
+the Claude subscription, all thirty-two extensions, and the browser
 connection. Every step except the Chrome switch in step 4 is a shell command,
 so an agent can carry them out as well.
 
@@ -126,7 +127,6 @@ in `~/.pi/agent/settings.json`, next to the `packages` entry the install wrote:
   "packages": ["npm:pi-claude-subscription"],
   "compaction": {
     "reserveTokens": 32768,
-    "keepRecentTokens": 8000,
     "modelOverrides": {
       "claude-sdk/claude-opus-5-5": { "reserveTokens": 700000 },
       "claude-sdk/claude-opus-5": { "reserveTokens": 700000 },
@@ -160,13 +160,6 @@ as often, so fewer details of a long session are lost to the summary. A model
 with a smaller window must not get such an override, since its threshold would
 fall below zero and Pi would compact before every request.
 
-`keepRecentTokens` is the part of the conversation a compaction keeps as it
-is. Pi estimates it at four characters per token and counts only the thinking
-it sees; with Claude, German text, JSON and code run nearer three, and Opus
-shows next to none of its thinking, which the API counts all the same. Pi's
-default of 20,000 kept 75k tokens in a measured session; 8,000 keeps about
-the 20k it means.
-
 The `retry` values let Pi retry a dropped connection or an overloaded server
 ten times, after 2, 4, 8, 16, then 32 seconds, as Claude Code retries ten
 times; Pi's default gives up after three tries within 14 seconds.
@@ -187,7 +180,7 @@ Install this repository as a Pi package:
 pi install git:github.com/dandjo/pi.dev-extensions
 ```
 
-Pi clones it into `~/.pi/agent/git/` and loads all thirty-one extensions
+Pi clones it into `~/.pi/agent/git/` and loads all thirty-two extensions
 from there; `pi list` shows the package. [package-update](#package-update)
 brings new versions at every start, new and renamed extensions included, and
 reloads Pi once it is idle; `/update` fetches them at once. There is no build
@@ -2168,6 +2161,31 @@ you send a prompt.
 - The [tmux tab](#tmux-tab-activity) rests while a run waits, and the notice
   of [claude-login](#claude-login) says that a waiting run or compaction goes
   on with the account `/claude-login` signs in.
+
+## compaction-cut
+
+Places the cut of a compaction by measured token counts. A compaction keeps
+the most recent part of the conversation as it is, `keepRecentTokens` (20,000
+by default), and Pi finds that point with an estimate: four characters per
+token, and only the thinking it can see. With Claude, German text, JSON and
+code run nearer three characters, and Opus shows next to none of its
+thinking, which the API counts all the same: in a measured session Pi's cut
+kept 75k tokens instead of 20k, and the first request after the compaction
+wrote them all to the prompt cache again.
+
+- Every response carries the real size of the request that produced it. The
+  growth from one response's request to the next is the real size of what
+  lies between them: the response with its thinking, and the tool results and
+  messages after it. It shares that growth out over those entries; where no
+  such measure holds (a compaction or a model switch in between, a request
+  that shrank), an entry keeps its estimate.
+- It walks back from the end as Pi does, to the point where
+  `keepRecentTokens` is reached, and moves the cut there when that keeps less
+  than Pi's own cut. It changes the compaction Pi prepared, so Pi's summary,
+  or [idle-compaction](#idle-compaction)'s, covers exactly the part that goes.
+  It never keeps more than Pi would.
+- It acts on `/compact`, the `compact` tool, and the threshold. A compaction
+  that recovers from an overflowing context stays as Pi prepared it.
 
 ## idle-compaction
 
