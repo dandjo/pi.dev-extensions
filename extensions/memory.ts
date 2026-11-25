@@ -22,7 +22,8 @@
  * - /memory lint checks the memory against its rules and the size it costs: index lines over 150 characters, an index
  *   over 200 lines, links to missing files, topic files without an index line or frontmatter, and topic files over
  *   8 KB, which cost that much every time they are read. A file the topic map of an indexed core file links ([[name]]
- *   or a Markdown link) counts as indexed: a subject split into several files needs one index line, not one per file.
+ *   or a Markdown link) counts as indexed, also through further topic maps (index → hub → core file → file): a subject
+ *   split into several files needs one index line, not one per file.
  *   At start, a notice counts what it finds.
  * - The same limits hold when the model writes: a write or edit that would put an index line over 150 characters or
  *   the index over 200 lines, a topic file without frontmatter, or a topic file over 8 KB that grows further is
@@ -451,8 +452,9 @@ function lint(dir: string): Lint {
 			if (!existsSync(path.join(dir, m[1]))) result.missing.push(m[1]);
 		}
 	});
-	// Files the topic maps of indexed files link count as indexed.
-	for (const file of [...linked]) {
+	// Files the topic maps of indexed files link count as indexed, at any depth: a Set's iterator also visits the
+	// entries added while it runs, and each file is read once.
+	for (const file of linked) {
 		let text = "";
 		try {
 			text = readFileSync(path.join(dir, file), "utf8");
