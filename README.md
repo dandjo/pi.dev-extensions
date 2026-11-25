@@ -10,8 +10,7 @@ view, agent panel, and Remote Control for the Claude app, reads and changes
 OpenProject and GitLab, controls your Chrome, keeps requests alive through
 network trouble, continues after a usage limit resets, keeps long conversations
 small, waits for pipelines and deploys without spending requests, keeps itself
-and the Claude Agent SDK current, and fixes how the provider resumes after
-edited history.
+and the Claude Agent SDK current.
 
 Install it as a Pi package (step 3 of the setup below): its `package.json`
 names `extensions/`, which holds one file per extension.
@@ -68,7 +67,6 @@ active.
 | :-------------------------- | :---------------------------------------------------------------------------------------- | :--------------------------------------------------------------- |
 | `claude-sdk-stream-only.ts` | Keeps Claude Code on streamed responses, so a stalled one cannot leave Pi waiting         | `pi-claude-subscription`                                         |
 | `claude-sdk-update.ts`      | Installs a newer Claude Agent SDK, and with it Claude Code, as soon as there is one       | `pi-claude-subscription`, npm                                    |
-| `claude-sdk-resume-fix.ts`  | Fixes pi-claude-subscription 0.2.4, which loses responses after edits in older messages   | `pi-claude-subscription`, GitHub at the first start              |
 
 Every extension is a single file that works on its own. Code that several of
 them need — the [small model](#small-model) choice, the overlay frame,
@@ -84,7 +82,7 @@ missing. `web_search` comes from the npm package `pi-web-access`; see
 ## Set up Pi
 
 Follow the steps in order — together they are the complete setup: Pi itself,
-the Claude subscription, all thirty-two extensions, and the browser
+the Claude subscription, all thirty-one extensions, and the browser
 connection. Every step except the Chrome switch in step 4 is a shell command,
 so an agent can carry them out as well.
 
@@ -180,7 +178,7 @@ Install this repository as a Pi package:
 pi install git:github.com/dandjo/pi.dev-extensions
 ```
 
-Pi clones it into `~/.pi/agent/git/` and loads all thirty-two extensions
+Pi clones it into `~/.pi/agent/git/` and loads all thirty-one extensions
 from there; `pi list` shows the package. [package-update](#package-update)
 brings new versions at every start, new and renamed extensions included, and
 reloads Pi once it is idle; `/update` fetches them at once. There is no build
@@ -1976,35 +1974,6 @@ since npm keeps a dependency at the version of `package-lock.json`.
   start.
 - Works with npm, Pi's default. With an `npmCommand` setting for pnpm or Bun,
   the extension does nothing.
-
-## claude-sdk-resume-fix
-
-Brings the fixes of `pi-claude-subscription`'s
-[pull request #4](https://github.com/jkeskikangas/pi-claude-subscription/pull/4)
-into a version without them. Up to 0.2.4, after a change in older messages —
-any context edit by an extension — the provider resumes
-Claude Code's transcript at the last unchanged message and sends everything
-after it as one user turn: every later response is lost, without an error.
-With the pull request it writes them into a fork of the transcript instead,
-and the cached part before the change stays cached.
-
-- At every start in the terminal, it looks for `pi-claude-subscription` among
-  Pi's packages. When the three files the pull request changes are exactly
-  those of 0.2.4, it fetches the pull request's versions from GitHub at a
-  fixed commit, checks each against the SHA-256 it carries, and puts them in
-  place once all of them have arrived. Pi then reloads as soon as it is at
-  rest, and the provider runs with the fix. Print, JSON, and RPC mode,
-  subagents, and `PI_OFFLINE` skip the check.
-- A reinstall of the package brings the old files back; the next start fixes
-  them again.
-- It warns at every start until someone acts: with an error when the fix
-  cannot be applied — a version or files it does not know, or GitHub not
-  answering with the expected files — since Claude then loses responses after
-  every cut; with a warning when the installed version has the fix itself,
-  since the extension is no longer needed then.
-- `/claude-sdk-resume-fix` shows the state and applies the fix at once.
-- Pi processes starting together patch one at a time, through a lock file in
-  `~/.pi/agent`.
 
 ## network-resilience
 
