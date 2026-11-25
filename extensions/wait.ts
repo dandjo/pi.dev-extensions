@@ -8,7 +8,7 @@
  *   match), no longer matches it ("nomatch"), the check succeeds ("success", the default without match), fails
  *   ("failure"), or its output changes ("change"). It gives up after timeout minutes (default 30). The first check
  *   runs at once.
- * - needResult, required, is the model's decision whether its next step needs the result. A model left to choose
+ * - needResult, required for a wait (not for repeat, cancel, and list), is the model's decision whether its next step needs the result. A model left to choose
  *   waits in the foreground out of habit and does nothing meanwhile, so it has to say each time.
  * - needResult: false returns at once and waits in the background. When the condition holds or the wait gives up, a
  *   message brings the result into the conversation: while Pi works, with its next step, so it is not stale by the
@@ -606,10 +606,12 @@ export default function (pi: ExtensionAPI) {
 				Type.Number({ description: "Minutes before giving up (default 30, at most 1440; with repeat: none unless given)" }),
 			),
 			label: Type.Optional(Type.String({ description: "Short description of what is awaited, shown to the user" })),
-			needResult: Type.Boolean({
-				description:
-					"Does your next step need the result? true: wait here (up to 5 minutes, then in the background). false: return at once, wait in the background, a message brings the result. Ignored with repeat, cancel, and list",
-			}),
+			needResult: Type.Optional(
+				Type.Boolean({
+					description:
+						"Required for a wait: does your next step need the result? true: wait here (up to 5 minutes, then in the background). false: return at once, wait in the background, a message brings the result. Not needed with repeat, cancel, and list",
+				}),
+			),
 			repeat: Type.Optional(
 				Type.Boolean({
 					description:
@@ -639,6 +641,9 @@ export default function (pi: ExtensionAPI) {
 				}
 			}
 			const repeat = params.repeat === true;
+			if (!repeat && typeof params.needResult !== "boolean") {
+				throw new Error("needResult is required with a wait: true when your next step needs the result, false to wait in the background and go on");
+			}
 			if (repeat && !params.command) throw new Error("repeat works with command only");
 			const until = (params.until ?? (regex ? "match" : repeat ? "failure" : "success")) as Until;
 			if ((until === "match" || until === "nomatch") && !regex) throw new Error(`until "${until}" needs match`);
