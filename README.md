@@ -847,10 +847,8 @@ out.
     until it settles — success, failed, canceled, skipped, or held at a
     manual job — for at most `timeout` minutes (30, at most 180). The checks
     cost no model requests, and the tool row shows the state meanwhile. A
-    message from you sends the wait to the background, as with `wait`, where
-    it goes on with the checks it made. A failed pipeline or job
-    comes with the last 15 lines of the logs of its failed jobs (at most
-    three).
+    failed pipeline or job comes with the last 15 lines of the logs of its
+    failed jobs (at most three).
   - `log`: the end of a job log (`lines`, 60, at most 500), or with `grep`
     the lines matching a regular expression, case-insensitive, with their line
     numbers. Colour codes, timestamps, section markers, and the progress a
@@ -864,13 +862,19 @@ out.
   - `stop_wait` ends the background wait `waitId`; the pipeline or job
     itself goes on.
   - `list` lists the background waits, those of [wait](#wait) too.
-- `background: true`, with `wait` or with `wait: true`, returns at once with
-  an id (`gp1`) and waits on its own, for at most `timeout` minutes (120
-  there). Your messages do not stop it. When the job or pipeline settles or
-  the time is up, a message brings the result into the conversation: while
-  Pi works, with its next step, so the result is not stale by the time it
-  comes; when Pi is idle, it starts a turn. `/gitlab-waits` lists the
-  background waits with their last state, `/gitlab-waits stop <id>` ends one.
+- `needResult` is required with `wait` and with `wait: true`, as with
+  [wait](#wait): the model says each time whether its next step needs the
+  result. `false` returns at once with an id (`gp1`) and waits on its own,
+  for at most `timeout` minutes (120 there). Your messages do not stop it.
+  When the job or pipeline settles or the time is up, a message brings the
+  result into the conversation: while Pi works, with its next step, so the
+  result is not stale by the time it comes; when Pi is idle, it starts a
+  turn. `/gitlab-waits` lists the background waits with their last state,
+  `/gitlab-waits stop <id>` ends one.
+- `needResult: true` waits in the foreground. A message from you, or five
+  minutes without a result, sends the wait to the background, where it goes
+  on with the checks it made. Without a terminal, in a subagent or in print
+  mode, every wait is in the foreground.
 - Background waits go on over `/reload`, and a result that comes while Pi
   reloads arrives once it has. Another session (`/new`, `/resume`, `/fork`)
   ends them, as they belong to the conversation that started them, and names
@@ -2230,20 +2234,27 @@ is a request that reads the whole context.
   default when it is given), `nomatch` (no longer matches), `success` (exit 0,
   or the tool call succeeds; the default otherwise), `failure`, or `change`
   (the output differs from the first check).
-- In the foreground the call returns when the condition holds, with the last
-  output; the tool row counts the checks meanwhile, and Esc stops it. When
-  you send a message meanwhile, the wait makes way for it: it goes on in the
-  background with the checks it made, the [agent panel](#background-agents)
-  lists it, and the result comes as a message. A wait for a tool gets to the
-  background only this way; it calls the tool through the runtime it started
-  in, so a `/reload` ends it, and a message says so.
-- `background: true`, for shell commands, returns at once. When the condition
-  holds or the wait gives up, a message brings the result into the
-  conversation: while Pi works, with its next step; when Pi is idle, it
-  starts a turn. `/waits` and the tool's
-  `list: true` list the background waits, those of
+- `needResult` is required: the model says each time whether its next step
+  needs the result. Left to choose, models wait in the foreground out of
+  habit and do nothing meanwhile. The guidelines say `true` only when the
+  very next step depends on the result and nothing else is left to do.
+- `needResult: false` returns at once, and the model goes on with what does
+  not depend on the result, or ends its turn. When the condition holds or the
+  wait gives up, a message brings the result into the conversation: while Pi
+  works, with its next step; when Pi is idle, it starts a turn. `/waits` and
+  the tool's `list: true` list the background waits, those of
   [`gitlab_pipeline`](#gitlab_pipeline) too; `/waits cancel <id>` or the
   tool's `cancel` stops one.
+- `needResult: true` waits in the foreground: the call returns when the
+  condition holds, with the last output; the tool row counts the checks
+  meanwhile, and Esc stops it. When you send a message meanwhile, or after
+  five minutes without a result, the wait goes on in the background with the
+  checks it made, the [agent panel](#background-agents) lists it, and the
+  result comes as a message; a model that needs it ends its turn until then.
+- A wait for a tool calls the tool through the runtime it started in, so a
+  `/reload` ends it, and a message says so.
+- Without a terminal, in a subagent or in print mode, every wait is in the
+  foreground: nobody would take a result that comes after the run.
 - `repeat: true`, for shell commands, is for background work that recurs,
   such as a keepalive or a token renewal: the command runs every `interval`
   seconds until the wait is cancelled or the session ends (a `timeout` only

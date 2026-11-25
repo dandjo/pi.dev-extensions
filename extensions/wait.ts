@@ -8,21 +8,26 @@
  *   match), no longer matches it ("nomatch"), the check succeeds ("success", the default without match), fails
  *   ("failure"), or its output changes ("change"). It gives up after timeout minutes (default 30). The first check
  *   runs at once.
- * - In the foreground the call returns when the condition holds, with the last output; Esc stops it. The tool row
- *   shows the checks so far. When the user sends a message meanwhile, the wait goes on in the background with the
- *   checks it made, and the call returns at once with its id, so a long wait never shuts the user out.
- * - background: true (shell commands only) returns at once. When the condition holds or the wait gives up, a message
- *   brings the result into the conversation: while Pi works, with its next step, so it is not stale by the time it
- *   comes; when Pi is idle, it starts a turn. list: true and /waits list the
- *   background waits, gitlab_pipeline's too; cancel: "<id>" or /waits cancel <id> stops one.
+ * - needResult, required, is the model's decision whether its next step needs the result. A model left to choose
+ *   waits in the foreground out of habit and does nothing meanwhile, so it has to say each time.
+ * - needResult: false returns at once and waits in the background. When the condition holds or the wait gives up, a
+ *   message brings the result into the conversation: while Pi works, with its next step, so it is not stale by the
+ *   time it comes; when Pi is idle, it starts a turn. list: true and /waits list the background waits,
+ *   gitlab_pipeline's too; cancel: "<id>" or /waits cancel <id> stops one.
+ * - needResult: true waits in the foreground: the call returns when the condition holds, with the last output; Esc
+ *   stops it. The tool row shows the checks so far. When the user sends a message meanwhile, or after DETACH_MS, the
+ *   wait goes on in the background with the checks it made, and the call returns at once with its id, so a long wait
+ *   never shuts the user out and a model that needs the result ends its turn until the result starts the next one.
+ * - Without a terminal (subagents, print, JSON, and RPC mode) every wait is in the foreground: nobody would take a
+ *   result that comes after the run.
  * - repeat: true (shell commands only, in the background) is for recurring background work, a keepalive or a token
  *   renewal: the command runs every interval until the wait is cancelled or the session ends (or its timeout, when one
  *   is given). The condition (default "failure") raises an alert: a message comes when it holds, the wait goes on, and
  *   the next alert comes only after a check where it did not hold. tmux-tab-activity.ts does not count it as work.
  * - Background waits go on over /reload, and a result that comes while Pi reloads arrives once it has. Another session
  *   (/new, /resume, /fork) ends them, as they belong to the conversation that started them; the next session names
- *   them in a notice. A wait for a tool, which only gets to the background by a message from the user, calls the tool
- *   through the context of its tool call, which the runtime takes along: it ends at /reload, and a message says so.
+ *   them in a notice. A wait for a tool calls the tool through the context of its tool call, which the runtime takes
+ *   along: it ends at /reload, and a message says so.
  * - Other extensions see the background waits on the event bus: "background-waits:state" carries { tool, waits }
  *   whenever they change and on "background-waits:request"; "background-waits:cancel" with { id } stops one.
  *   background-agents.ts lists them in its panel below the prompt, tmux-tab-activity.ts counts them as work, and
@@ -46,6 +51,8 @@ const RESULT_CHARS = 2000;
 const RESULT_LINES = 40;
 const NUDGE_SLEEP_S = 15;
 const NUDGE_WINDOW_MS = 10 * 60_000;
+/** How long a wait whose result the model needs stays in the foreground before it goes on in the background. */
+const DETACH_MS = 5 * 60_000;
 /** The event-bus contract with gitlab.ts, background-agents.ts, and tmux-tab-activity.ts. */
 const STATE = "background-waits:state";
 const REQUEST = "background-waits:request";
@@ -566,8 +573,9 @@ export default function (pi: ExtensionAPI) {
 			"every interval seconds (default 30) until the condition holds, at most timeout minutes (default 30). " +
 			'until: "match" (output matches the regex match; the default when match is given), "nomatch" (no longer matches), ' +
 			'"success" (exit 0, or the tool call succeeds; the default otherwise), "failure", or "change" (output differs from the first check). ' +
-			"Returns the last output. When the user sends a message meanwhile, the wait goes on in the background and the call returns at once with its id. " +
-			"background: true (shell commands only) returns at once and a message brings the result later; it goes on over /reload. " +
+			"needResult (required) decides how: false returns at once and waits in the background, a message brings the result later, with your next step or as a turn of its own; " +
+			"true waits here and returns the last output, until the user sends a message or 5 minutes pass: then it goes on in the background and the call returns with its id. " +
+			"Background waits go on over /reload, a wait for a tool ends with it. " +
 			"repeat: true (shell commands only, in the background) is for recurring background work such as a keepalive or a token renewal: " +
 			'the command runs every interval until cancelled or the session ends (timeout only when given); the condition (default "failure") ' +
 			"raises an alert by message, the wait goes on, and the next alert comes only after a check without one. " +
@@ -577,6 +585,7 @@ export default function (pi: ExtensionAPI) {
 			'{command: "curl -fsS https://example.com/health", until: "success", interval: 10}.',
 		promptSnippet: "Wait for a pipeline, deploy, or service without polling (checks run without model requests)",
 		promptGuidelines: [
+			"wait: needResult: true only when your very next step needs the result and nothing else is left to do until then (a check that decides what you do next); otherwise needResult: false, go on with the work that does not depend on it, and end your turn when nothing is left: the result arrives as a message and starts the next turn. Never wait here for something you only report on.",
 			"wait: use it instead of sleep in bash when you wait for something that has not happened yet (CI pipeline, deploy, container or service start, a file or URL appearing); one wait call replaces a poll per model request.",
 			"wait: not for a single check: when the condition should already hold (a container that just answered, a reload that just ran), check it once with bash or the tool itself, and wait only if it does not hold yet.",
 			"wait: for background work that repeats (keepalive, token renewal, periodic check), use wait with repeat: true instead of nohup or & in bash: only then it is listed in the panel and the user can stop it.",
@@ -597,7 +606,10 @@ export default function (pi: ExtensionAPI) {
 				Type.Number({ description: "Minutes before giving up (default 30, at most 1440; with repeat: none unless given)" }),
 			),
 			label: Type.Optional(Type.String({ description: "Short description of what is awaited, shown to the user" })),
-			background: Type.Optional(Type.Boolean({ description: "Return at once and report by message later (command only)" })),
+			needResult: Type.Boolean({
+				description:
+					"Does your next step need the result? true: wait here (up to 5 minutes, then in the background). false: return at once, wait in the background, a message brings the result. Ignored with repeat, cancel, and list",
+			}),
 			repeat: Type.Optional(
 				Type.Boolean({
 					description:
@@ -654,9 +666,9 @@ export default function (pi: ExtensionAPI) {
 					`A message brings an alert when ${describeCondition(spec)}, and the next one only after a check without one; carry on or end your turn.`;
 				return { content: [{ type: "text", text }], details };
 			}
-			if (params.background) {
-				if (!spec.command) throw new Error("background works with command only; wait for a tool in the foreground");
-				const entry = startBackground(spec, runCheck);
+			const check = spec.command ? runCheck : (s: AbortSignal) => runTool(ctx, spec.tool as string, spec.args, s);
+			if (params.needResult === false && ctx.hasUI) {
+				const entry = startBackground(spec, check);
 				const details: WaitDetails = { id: entry.id, label: spec.label, condition: describeCondition(spec), status: "background", checks: 0, elapsedMs: 0 };
 				return {
 					content: [
@@ -664,7 +676,8 @@ export default function (pi: ExtensionAPI) {
 							type: "text",
 							text:
 								`Waiting in the background as ${entry.id}: ${describeCondition(spec)}, checking every ${formatDuration(spec.intervalMs)} ` +
-								`for up to ${formatDuration(spec.timeoutMs)}. A message brings the result; until then carry on or end your turn.`,
+								`for up to ${formatDuration(spec.timeoutMs)}.${spec.tool ? " It calls the tool through this runtime, so a /reload ends it." : ""} ` +
+								"A message brings the result; until then carry on, or end your turn when nothing is left.",
 						},
 					],
 					details,
@@ -675,9 +688,10 @@ export default function (pi: ExtensionAPI) {
 			const onAbort = () => abort.abort();
 			signal?.addEventListener("abort", onAbort, { once: true });
 			if (signal?.aborted) abort.abort();
-			const check = spec.command ? runCheck : (s: AbortSignal) => runTool(ctx, spec.tool as string, spec.args, s);
 			const condition = describeCondition(spec);
 			const run: Run = { started: Date.now(), checks: 0 };
+			// With a terminal, a wait in the foreground makes way after DETACH_MS; without one nobody takes a later result.
+			const detachAt = ctx.hasUI ? run.started + DETACH_MS : Number.POSITIVE_INFINITY;
 			try {
 				const status = await loop(
 					spec,
@@ -689,19 +703,24 @@ export default function (pi: ExtensionAPI) {
 						const line = oneLine(last.output.trim().split("\n").at(-1) ?? "", 100);
 						onUpdate?.({ content: [{ type: "text", text: `${checks} checks, ${formatDuration(elapsedMs)}${line ? `: ${line}` : ""}` }], details });
 					},
-					() => ctx.hasPendingMessages(),
+					() => ctx.hasPendingMessages() || Date.now() >= detachAt,
 				);
 				if (status === "aborted") throw new Error("wait aborted");
 				const elapsedMs = Date.now() - run.started;
 				if (status === "handover") {
-					// The user wrote: the wait makes way for them and goes on in the background, from where it stands.
+					// The user wrote, or the wait took too long: it goes on in the background, from where it stands.
+					const byUser = ctx.hasPendingMessages();
 					const entry = startBackground(spec, check, run);
 					const details: WaitDetails = { id: entry.id, label: spec.label, condition, status: "background", checks: run.checks, elapsedMs };
 					const bound = spec.tool ? " It calls the tool through this runtime, so a /reload ends it." : "";
+					const why = byUser ? "The user sent a message" : `No result after ${formatDuration(elapsedMs)}`;
+					const meanwhile = byUser
+						? "answer the user meanwhile"
+						: "go on with work that does not depend on it, or end your turn now: the result starts the next one";
 					const text =
-						`The user sent a message, so the wait goes on in the background as ${entry.id}: ${condition}, checking every ` +
+						`${why}, so the wait goes on in the background as ${entry.id}: ${condition}, checking every ` +
 						`${formatDuration(spec.intervalMs)}; ${run.checks} check${run.checks === 1 ? "" : "s"} in ${formatDuration(elapsedMs)} so far, ` +
-						`gives up at ${clock(run.started + spec.timeoutMs)}.${bound} A message brings the result; answer the user meanwhile.` +
+						`gives up at ${clock(run.started + spec.timeoutMs)}.${bound} A message brings the result; ${meanwhile}.` +
 						(run.last ? `\nLast output:\n${tail(run.last.output)}` : "");
 					return { content: [{ type: "text", text }], details };
 				}
@@ -723,7 +742,7 @@ export default function (pi: ExtensionAPI) {
 			if (args.repeat) text += theme.fg("muted", ` every ${formatDuration(Math.max(2, args.interval ?? 30) * 1000).replace(/ 0s$/, "")}, alert on ${condition}`);
 			else text += theme.fg("muted", ` until ${condition}`);
 			if (args.repeat) text += theme.fg("dim", " (repeat)");
-			else if (args.background) text += theme.fg("dim", " (background)");
+			else if (args.needResult === false) text += theme.fg("dim", " (background)");
 			return new Text(text, 0, 0);
 		},
 

@@ -979,13 +979,16 @@ function forgetToken(instance: ConfiguredInstance): boolean {
  * - status: the pipeline and its jobs as a table (stage, job, status, time, runner, id), trigger jobs with their
  *   downstream pipeline, and the manual jobs waiting to be played.
  * - wait polls a job, or the pipeline, until it settles, without model requests: success, failed, canceled, skipped,
- *   or held at a manual job; a failed pipeline or job comes with the end of the logs of its failed jobs. When the user
- *   sends a message meanwhile, the wait goes on in the background with the checks it made, and the call returns at
- *   once with its id, like the wait tool.
+ *   or held at a manual job; a failed pipeline or job comes with the end of the logs of its failed jobs.
+ * - needResult is required with wait, and with wait: true on play, retry, and run: the model's decision whether its
+ *   next step needs the result, as with the wait tool. true waits in the foreground; when the user sends a message
+ *   meanwhile, or after CI_DETACH_MS, the wait goes on in the background with the checks it made, and the call
+ *   returns at once with its id. Without a terminal (subagents, print, JSON, and RPC mode) every wait is in the
+ *   foreground.
  * - log: the end of a job log, or the lines matching grep with their numbers, without colour codes, timestamps,
  *   section markers, and the lines a carriage return overwrote.
  * - play, retry, cancel, and run change state; with wait: true they wait for the job or pipeline afterwards.
- * - background: true (with wait, or with wait: true) returns at once with an id. The wait goes on without stopping for
+ * - needResult: false returns at once with an id. The wait goes on without stopping for
  *   the user's messages, and a message brings its result into the conversation: while Pi works, with its next step,
  *   so it is not stale by the time it comes; when Pi is idle, it starts a turn.
  *   stop_wait (waitId) or /gitlab-waits stop <id> ends one; list and /gitlab-waits list them, those of the wait tool
@@ -1012,6 +1015,8 @@ const CI_BACKGROUND_TIMEOUT_MIN = 120;
 const CI_RETRIES = 3;
 const CI_MESSAGE_TYPE = "gitlab_pipeline";
 const CI_MAX_TIMEOUT_MIN = 180;
+/** How long a wait whose result the model needs stays in the foreground before it goes on in the background. */
+const CI_DETACH_MS = 5 * 60_000;
 /** The event-bus contract with wait.ts, background-agents.ts, and tmux-tab-activity.ts. */
 const WAITS_STATE = "background-waits:state";
 const WAITS_REQUEST = "background-waits:request";
@@ -1254,18 +1259,18 @@ const CiParams = {
 		}),
 	),
 	wait: Type.Optional(Type.Boolean({ description: "play, retry, run: wait for the job or pipeline afterwards, as action wait does" })),
-	background: Type.Optional(
+	needResult: Type.Optional(
 		Type.Boolean({
 			description:
-				"wait, or play/retry/run with wait: true: return at once and report the result by message later, " +
-				"with the next step or as a turn of its own",
+				"Required with wait, and with wait: true on play/retry/run: does your next step need the result? true: wait here " +
+				"(up to 5 minutes, then in the background). false: return at once, wait in the background, a message brings the result",
 		}),
 	),
 	waitId: Type.Optional(Type.String({ description: "stop_wait: the id of the background wait, as gp1" })),
 	interval: Type.Optional(Type.Number({ description: `wait: seconds between checks (default ${CI_INTERVAL_S}, 5 to 300)` })),
 	timeout: Type.Optional(
 		Type.Number({
-			description: `wait: minutes before giving up (default ${CI_TIMEOUT_MIN}, in the background ${CI_BACKGROUND_TIMEOUT_MIN}; at most ${CI_MAX_TIMEOUT_MIN})`,
+			description: `wait: minutes before giving up (default ${CI_TIMEOUT_MIN}, with needResult: false ${CI_BACKGROUND_TIMEOUT_MIN}; at most ${CI_MAX_TIMEOUT_MIN})`,
 		}),
 	),
 	lines: Type.Optional(Type.Integer({ description: `log: lines from the end (default ${CI_LOG_LINES}, at most ${CI_MAX_LOG_LINES})` })),
@@ -1635,14 +1640,14 @@ export default function (pi: ExtensionAPI) {
 			"instances and tokens. status: the pipeline and a table of its jobs (stage, job, status, time, runner, id), " +
 			"trigger jobs with their downstream pipeline, and the manual jobs waiting to be played. wait: checks a job, or " +
 			"the pipeline, every interval seconds without model requests until it settles (success, failed, canceled, " +
-			"skipped, or held at a manual job), at most timeout minutes; when the user sends a message meanwhile, it goes on " +
-			"in the background and the call returns at once with its id. A failed pipeline or job comes with the end of " +
+			"skipped, or held at a manual job), at most timeout minutes. A failed pipeline or job comes with the end of " +
 			"the logs of its failed jobs. log: the end of a job log, or the " +
 			"lines matching grep, without colour codes and timestamps. play starts a manual job (with variables), retry runs " +
 			"a job again (without job: the failed jobs of the pipeline), cancel stops a job or the pipeline, run starts a " +
-			"pipeline for ref (with variables); with wait: true they wait afterwards. background: true (with wait) returns at " +
-			"once with an id, and a message brings the result later, with your next step or as a turn of its own; it goes " +
-			"on over /reload. stop_wait " +
+			"pipeline for ref (with variables); with wait: true they wait afterwards. Every wait needs needResult. false returns " +
+			"at once with an id, and a message brings the result later, with your next step or as a turn of its own; true " +
+			"waits here until the user sends a message or 5 minutes pass, then it goes on in the background. Background " +
+			"waits go on over /reload. stop_wait " +
 			"with waitId ends such a wait, the pipeline itself goes on; list lists the background waits, the wait tool's too. " +
 			"The project defaults to the one of " +
 			"the working directory's origin remote; the pipeline is pipeline (its id), the head pipeline of mr, or the " +
@@ -1652,7 +1657,7 @@ export default function (pi: ExtensionAPI) {
 			"Use gitlab_pipeline for CI pipelines and jobs (their state, waiting for them, job logs, manual jobs, retries) instead of the gitlab tool or wait: it answers in a few lines and waits without model requests.",
 			"gitlab_pipeline: play, retry, cancel, and run only what the user asked for; a deploy job, to production above all, only on the user's word for that deploy.",
 			"gitlab_pipeline: without project it acts on the project of the working directory's origin remote; a web URL of a pipeline, job, or merge request in project names that one.",
-			"gitlab_pipeline: wait in the background (background: true) when there is other work to do meanwhile or the pipeline takes long; then carry on or end the turn, the result arrives as a message.",
+			"gitlab_pipeline: needResult: true only when your very next step needs the outcome and nothing else is left to do until then (a deploy to check right after, a failure to fix); otherwise needResult: false, go on with the work that does not depend on it, and end your turn when nothing is left: the result arrives as a message and starts the next turn. Never wait here for a pipeline you only report on.",
 		],
 		parameters: ciParameters(instances),
 		annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
@@ -1665,10 +1670,14 @@ export default function (pi: ExtensionAPI) {
 				return { content: [{ type: "text", text: stopCiWait(id) }], details: { host: "", project: "", action } };
 			}
 			if (action === "list") return { content: [{ type: "text", text: ciListText(allWaits()) }], details: { host: "", project: "", action } };
-			const background = params.background === true;
-			if (background && action !== "wait" && !(params.wait && (action === "play" || action === "retry" || action === "run"))) {
-				throw new Error("background works with action wait, or with wait: true on play, retry, and run");
+			const waits = action === "wait" || (params.wait === true && (action === "play" || action === "retry" || action === "run"));
+			if (waits && typeof params.needResult !== "boolean") {
+				throw new Error(
+					"needResult is required with a wait: true when your next step needs the result, false to wait in the background and go on",
+				);
 			}
+			// Without a terminal nobody takes a result that comes after the run: every wait is in the foreground there.
+			const background = waits && params.needResult === false && ctx.hasUI;
 			const target = ciTarget(instances, params.host as string | undefined, params.project, ctx.cwd);
 			const { instance } = target;
 			const P = target.project;
@@ -1815,7 +1824,9 @@ export default function (pi: ExtensionAPI) {
 			let moved: CiWait | undefined;
 			/** Set while a wait runs in the foreground: hands it to the background, from where it stands. */
 			let handOver: ((started: number, checks: number, found: string) => void) | undefined;
-			const interrupted = () => !background && !moved && handOver !== undefined && ctx.hasPendingMessages();
+			/** When a wait in the foreground makes way for the background by itself; set as it starts, with a terminal. */
+			let detachAt = Number.POSITIVE_INFINITY;
+			const interrupted = () => !background && !moved && handOver !== undefined && (ctx.hasPendingMessages() || Date.now() >= detachAt);
 			type Polled<T> = { outcome: "settled" | "timeout"; value: T; checks: number; elapsedMs: number };
 			const poll = async <T>(check: () => Promise<{ settled: boolean; progress: string; value: T }>): Promise<Polled<T>> => {
 				const started = Date.now();
@@ -1937,14 +1948,20 @@ export default function (pi: ExtensionAPI) {
 				// stands; the call returns then, and the result comes as a message.
 				let handed: (text: string) => void = () => {};
 				const handedOver = new Promise<string>((resolve) => (handed = resolve));
+				if (ctx.hasUI) detachAt = Date.now() + CI_DETACH_MS;
 				handOver = (started, checks, found) => {
+					const byUser = ctx.hasPendingMessages();
 					const entry = register(what, started, checks, found);
 					moved = entry;
 					const span = ciDuration((Date.now() - started) / 1000) || "0s";
+					const why = byUser ? "The user sent a message" : `No result after ${span}`;
+					const meanwhile = byUser
+						? "answer the user meanwhile"
+						: "go on with work that does not depend on it, or end your turn now: the result starts the next one";
 					handed(
-						`The user sent a message, so the wait goes on in the background as ${entry.id} for ${entry.what}, checking every ` +
+						`${why}, so the wait goes on in the background as ${entry.id} for ${entry.what}, checking every ` +
 							`${every}; ${checks} check${checks === 1 ? "" : "s"} in ${span} so far, the last: ${found}. Gives up at ` +
-							`${ciClock(started + timeoutMs)}. A message brings the result; answer the user meanwhile.`,
+							`${ciClock(started + timeoutMs)}. A message brings the result; ${meanwhile}.`,
 					);
 				};
 				const running = run();
@@ -2090,7 +2107,7 @@ export default function (pi: ExtensionAPI) {
 					(host ? theme.fg("muted", `${host} `) : "") +
 					theme.fg("muted", `${args.action ?? "?"}${which.length > 0 ? " " : ""}`) +
 					theme.fg("accent", which.join(" ")) +
-					(args.background ? theme.fg("dim", " (background)") : args.wait ? theme.fg("dim", " (wait)") : ""),
+					(args.needResult === false && (args.action === "wait" || args.wait) ? theme.fg("dim", " (background)") : args.wait ? theme.fg("dim", " (wait)") : ""),
 				0,
 				0,
 			);
