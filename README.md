@@ -41,6 +41,7 @@ names `extensions/`, which holds one file per extension.
 | `compaction-cut.ts`         | Cuts a compaction where measured tokens reach the kept part, not where Pi estimates it    | —                                                                |
 | `compact.ts`                | Adds `compact`: the model compacts the session on its own and then continues the task     | —                                                                |
 | `wait.ts`                   | Adds `wait`: checks a command or tool until a condition holds, without model requests     | —                                                                |
+| `bash-timeout.ts`           | Stops a bash call without its own timeout after two minutes, as Claude Code does          | —                                                                |
 | `package-update.ts`         | Keeps this package current, and reloads Pi when it changes                                | The package installed with `pi install`                          |
 
 **Claude Code's formats, any model** (`claude-code-*`). They read Claude Code's
@@ -82,7 +83,7 @@ missing. `web_search` comes from the npm package `pi-web-access`; see
 ## Set up Pi
 
 Follow the steps in order — together they are the complete setup: Pi itself,
-the Claude subscription, all thirty-one extensions, and the browser
+the Claude subscription, all thirty-two extensions, and the browser
 connection. Every step except the Chrome switch in step 4 is a shell command,
 so an agent can carry them out as well.
 
@@ -178,7 +179,7 @@ Install this repository as a Pi package:
 pi install git:github.com/dandjo/pi.dev-extensions
 ```
 
-Pi clones it into `~/.pi/agent/git/` and loads all thirty-one extensions
+Pi clones it into `~/.pi/agent/git/` and loads all thirty-two extensions
 from there; `pi list` shows the package. [package-update](#package-update)
 brings new versions at every start, new and renamed extensions included, and
 reloads Pi once it is idle; `/update` fetches them at once. There is no build
@@ -2282,6 +2283,28 @@ is a request that reads the whole context.
 - A bash call that sleeps 15 seconds or more right after another bash call
   that did is refused, with a pointer to `wait`; running it again goes
   through. `{"nudge": false}` in `~/.pi/agent/wait.json` turns that off.
+
+## bash-timeout
+
+Gives the bash tool a default timeout, as Claude Code has. Pi runs a command
+without a time limit unless the model gives one, so a command that never ends
+holds the session until you press Esc: a test script that left its browser
+open ran for 42 minutes.
+
+- A bash call without `timeout` stops after 120 seconds, as in Claude Code;
+  Pi ends the command with everything it started. A call with its own
+  `timeout` keeps it.
+- The model learns of the default from a guideline for the bash tool, so it
+  gives `timeout` itself for a build, a test run, or an install that takes
+  longer. With `pi-claude-subscription`, which renders the prompt itself, the
+  guideline goes into its list of guidelines; a `SYSTEM.md` of your own
+  without such a list goes without, and the hint below tells the model.
+- A call the default stopped comes back with a hint: run it again with the
+  timeout it needs, use [wait](#wait) for something that has not happened
+  yet, or close the process that did not end, such as a browser or a server.
+- `{"seconds": n}` in `~/.pi/agent/bash-timeout.json` changes the default;
+  `0` turns it off. Your own `!` commands are not tool calls and run without
+  a limit.
 
 ## Small model
 
