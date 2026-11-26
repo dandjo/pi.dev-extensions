@@ -198,8 +198,8 @@ function messageText(content: string | ReadonlyArray<{ type: string; text?: stri
 }
 
 /**
- * A background wait's result message in one line, in the colours of Pi's custom messages: [label] and what was awaited
- * on the left, the outcome on the right. A click or ctrl+o opens the whole text as Pi draws it. Copied in wait.ts and
+ * A background wait's result message in one line between padding lines, in the colours of Pi's custom messages:
+ * [label] and what was awaited on the left, the outcome on the right. A click or ctrl+o opens the whole text as Pi draws it. Copied in wait.ts and
  * gitlab.ts, which keep it alike.
  */
 function resultLine(
@@ -233,7 +233,8 @@ function resultLine(
 			const start = truncateToWidth(`${tag} ${theme.fg("customMessageText", left)}`, room, "…");
 			const gap = Math.max(end ? 2 : 0, inner - visibleWidth(start) - visibleWidth(end));
 			const line = " ".repeat(pad) + start + " ".repeat(gap) + end;
-			return [paint(line + " ".repeat(Math.max(0, width - visibleWidth(line))))];
+			const blank = paint(" ".repeat(width));
+			return [blank, paint(line + " ".repeat(Math.max(0, width - visibleWidth(line)))), blank];
 		},
 		invalidate() {
 			full.invalidate();

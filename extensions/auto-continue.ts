@@ -702,7 +702,7 @@ export default function (pi: ExtensionAPI) {
 			: d?.resetAt !== undefined
 				? `${head} · resets ${when(d.resetAt)} · the run continues after the reset`
 				: `${head} · no reset time named · the run tries again at intervals`;
-		const box = new Box(outputPad, 0, (t) => theme.bg("customMessageBg", t));
+		const box = new Box(outputPad, 1, (t) => theme.bg("customMessageBg", t));
 		box.addChild(new Text(theme.fg("dim", `› ${line}`), 0, 0));
 		return box;
 	});

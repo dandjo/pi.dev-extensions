@@ -1353,7 +1353,7 @@ export default function (pi: ExtensionAPI) {
 			return theme.fg("dim", `› Message from @${quoteName(label)}: ${first}${more ? " (ctrl+o to expand)" : ""}`);
 		};
 		const text = new Text(draw(state.open), 0, 0);
-		const box = new Box(outputPad, 0, (t) => theme.bg("customMessageBg", t));
+		const box = new Box(outputPad, 1, (t) => theme.bg("customMessageBg", t));
 		box.addChild(text);
 		const clicked = state;
 		return new MouseRegion(box, (event) => {
@@ -1365,7 +1365,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerMessageRenderer<NoticeDetails>(NOTICE_TYPE, (message, { outputPad }, theme) => {
-		const box = new Box(outputPad, 0, (t) => theme.bg("customMessageBg", t));
+		const box = new Box(outputPad, 1, (t) => theme.bg("customMessageBg", t));
 		box.addChild(new Text(theme.fg("dim", `› ${message.details?.line ?? "Cross-session notice"}`), 0, 0));
 		return box;
 	});
