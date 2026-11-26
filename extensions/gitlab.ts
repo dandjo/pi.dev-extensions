@@ -36,6 +36,10 @@
  * - A second tool, gitlab_pipeline, shows, waits for, and drives CI pipelines and jobs in a few lines, a rollout's jobs
  *   and the checks of its site in one call (chain), with the same instances, tokens, and rules; "pipelines": false in
  *   gitlab.json leaves it out. Its section below says more.
+ * - A third tool, gitlab_work, does in one call what takes several gitlab calls otherwise: issue templates, creating,
+ *   updating, and reading issues (their iteration set with GraphQL), creating and merging merge requests, and what is
+ *   deployed where, with the same instances, tokens, and rules; "work": false in gitlab.json leaves it out. Its section
+ *   below says more.
  */
 
 import { randomBytes } from "node:crypto";
@@ -1273,7 +1277,7 @@ const CI_LOG_PREFIX = /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?Z [0-9a-f]{2}[OE
 const CI_SECTION = /section_(?:start|end):\d+:[^\s\r\x1b]+/g;
 
 /** The project of a call and what its web URL named. */
-type CiTarget = { instance: Instance; project: string; pipeline?: number; job?: number; mr?: number };
+type CiTarget = { instance: Instance; project: string; pipeline?: number; job?: number; mr?: number; issue?: number };
 
 const ciText = (value: Json | undefined): string =>
 	value === null || value === undefined ? "" : typeof value === "object" ? JSON.stringify(value) : String(value);
@@ -1297,6 +1301,50 @@ function ciObject(value: Json, what: string): JsonObject {
 function ciOneLine(text: string, max: number): string {
 	const line = text.replace(/\s+/g, " ").trim();
 	return line.length > max ? `${line.slice(0, max - 1)}…` : line;
+}
+
+/**
+ * A request of gitlab_pipeline and gitlab_work: the body of an answer below 400 as text. An answer of 400 or more
+ * throws, masked, with the method, the path, the status, GitLab's message, and a hint; the error carries status and
+ * detail, GitLab's message alone.
+ */
+async function apiRequest(
+	instance: Instance,
+	token: string,
+	method: "GET" | "POST" | "PUT",
+	path: string,
+	query: Record<string, unknown> | undefined,
+	body: unknown,
+	signal: AbortSignal | undefined,
+	mask: (text: string) => string,
+): Promise<string> {
+	const url = requestUrl(instance, path, query);
+	const payload: Payload | undefined = body === undefined ? undefined : { contentType: "application/json", data: JSON.stringify(body) };
+	const { response } = await send(instance, token, method, url, payload, signal);
+	const text = new TextDecoder().decode(await readLimited(response));
+	if (response.status < 400) return text;
+	const rerun = response.status === 401 && forgetToken(instance);
+	let message = text.trim();
+	try {
+		const parsed = JSON.parse(message) as Json;
+		if (isObject(parsed)) message = ciMessage(parsed.message ?? parsed.error ?? parsed.errors ?? parsed);
+	} catch {
+		// not JSON: the text itself
+	}
+	const hint = [STATUS_HINTS[response.status], rerun ? "Its token command runs again at the next call." : ""];
+	const error = new Error(
+		mask([`${method} ${url.pathname}: HTTP ${response.status}`, ciOneLine(message, 300), ...hint].filter(Boolean).join(" — ")),
+	);
+	throw Object.assign(error, { status: response.status, detail: mask(message) });
+}
+
+/** The JSON of an answer, redacted; anything else throws with its start. */
+function apiJson(text: string, mask: (text: string) => string): Json {
+	try {
+		return redact(JSON.parse(text) as Json);
+	} catch {
+		throw new Error(`GitLab answered with something other than JSON: ${ciOneLine(mask(text), 200)}`);
+	}
 }
 
 function ciDuration(seconds: number | undefined): string {
@@ -1344,7 +1392,7 @@ function ciTarget(instances: Instance[], host: string | undefined, project: stri
 			named ?? instances.find((candidate) => url.origin === candidate.origin && within(url.pathname, candidate.basePath));
 		if (!instance || url.origin !== instance.origin) throw new Error(`${given} is not on a configured instance (${names})`);
 		const { project: name, page } = webPage(instance, url);
-		const item = /^(pipelines|jobs|merge_requests)\/(\d+)/.exec(page);
+		const item = /^(pipelines|jobs|merge_requests|issues|work_items)\/(\d+)/.exec(page);
 		if (!name) throw new Error(`${given} names no project`);
 		const id = item ? Number(item[2]) : undefined;
 		return {
@@ -1353,6 +1401,7 @@ function ciTarget(instances: Instance[], host: string | undefined, project: stri
 			pipeline: item?.[1] === "pipelines" ? id : undefined,
 			job: item?.[1] === "jobs" ? id : undefined,
 			mr: item?.[1] === "merge_requests" ? id : undefined,
+			issue: item?.[1] === "issues" || item?.[1] === "work_items" ? id : undefined,
 		};
 	}
 	if (given) {
@@ -1499,11 +1548,11 @@ async function ciProbe(url: URL, signal: AbortSignal | undefined): Promise<CiPro
 	}
 }
 
-/** Whether gitlab.json leaves gitlab_pipeline in: everything but "pipelines": false. */
-function ciToolWanted(): boolean {
+/** Whether gitlab.json keeps a tool: all but "pipelines": false (gitlab_pipeline) and "work": false (gitlab_work). */
+function toolWanted(key: "pipelines" | "work"): boolean {
 	try {
 		const config = JSON.parse(readFileSync(CONFIG_FILE, "utf8")) as unknown;
-		return !(isObject(config as Json) && (config as JsonObject).pipelines === false);
+		return !(isObject(config as Json) && (config as JsonObject)[key] === false);
 	} catch {
 		return true;
 	}
@@ -1715,6 +1764,911 @@ function ciParameters(instances: Instance[]) {
 	return instances.length > 1 ? all : (Type.Object(CiParams) as unknown as typeof all);
 }
 
+/**
+ * The gitlab_work tool: in one call what takes several gitlab calls otherwise, through the instances, tokens, and
+ * requests of the gitlab tool.
+ *
+ * - The project is found as for gitlab_pipeline (ciTarget); a web URL of an issue or merge request gives iid too.
+ * - issue_template lists a project's issue templates, or shows one. issue_create checks a description against the
+ *   headings of template, assigns the token's own user unless assignee says otherwise, and sets the group's current
+ *   iteration with GraphQL (issueSetIteration; REST ignores iteration_id) where there is exactly one; with several it
+ *   names them and sets none rather than guess. issue_update makes the REST changes and the iteration's in one call.
+ * - issue_view fetches the issue, its notes, related merge requests, and linked issues in parallel; a part that fails
+ *   shows its error in its section.
+ * - mr_create returns the open merge request of the source branch where there is one already, and tries once more
+ *   after WORK_BRANCH_RETRY_MS when GitLab does not know the source branch yet (a push just landed).
+ * - mr_merge polls detailed_merge_status every WORK_MERGE_EVERY_MS while GitLab works it out, in the foreground only,
+ *   bounded by timeout. A pipeline still running ends the call with a note unless wait_for_pipeline waits for it or
+ *   when_pipeline_succeeds sets auto-merge; a status that blocks the merge is reported at once. The merge sends the sha
+ *   it checked, so a commit pushed meanwhile is not merged unseen.
+ * - deployed shows the last successful deployment of each environment, or without environments the latest successful
+ *   job of each name matching jobs, and with contains whether each runs that commit (merge_base).
+ */
+const WORK_ACTIONS = ["issue_template", "issue_create", "issue_update", "issue_view", "mr_create", "mr_merge", "deployed"] as const;
+type WorkAction = (typeof WORK_ACTIONS)[number];
+/** issue_view shows this many notes, the newest, each cut to WORK_NOTE_CHARS. */
+const WORK_NOTES = 20;
+const WORK_NOTE_CHARS = 500;
+const WORK_MERGE_EVERY_MS = 5_000;
+const WORK_MERGE_TIMEOUT_MIN = 10;
+const WORK_MAX_MERGE_TIMEOUT_MIN = 30;
+const WORK_BRANCH_RETRY_MS = 2_000;
+/** deployed reads this many pages of 100 successful jobs at most, and this many environments. */
+const WORK_JOB_PAGES = 5;
+const WORK_ENVIRONMENTS = 50;
+/** GitLab takes a description of up to 1 MB. */
+const WORK_MAX_DESCRIPTION_BYTES = 1024 * 1024;
+/** Merge statuses GitLab is still working out. */
+const MERGE_PENDING = new Set(["checking", "unchecked", "preparing", "approvals_syncing"]);
+/** Why a merge status blocks the merge, and what helps. */
+const MERGE_BLOCKS: Record<string, string> = {
+	conflict: "it has merge conflicts: rebase the source branch or resolve them",
+	discussions_not_resolved: "its open threads must be resolved first",
+	not_approved: "it lacks required approvals",
+	requested_changes: "a reviewer requested changes",
+	draft_status: "it is a draft: mark it ready first",
+	blocked_status: "another merge request blocks it",
+	merge_request_blocked: "a merge request it depends on must be merged first",
+	need_rebase: "the target branch moved on: rebase the source branch first",
+	ci_must_pass: "its pipeline must succeed first",
+	not_open: "it is not open",
+	commits_status: "its source branch is missing or has no commits",
+	jira_association_missing: "its title or description must name a Jira issue",
+	status_checks_must_pass: "external status checks must pass first",
+	locked_paths: "files it changes are locked",
+	locked_lfs_files: "LFS files it changes are locked",
+	security_policy_violations: "a security policy blocks it",
+	title_regex: "its title does not match the pattern the project requires",
+	merge_time: "it may be merged only after a set time",
+};
+const ITERATION_FIELDS = "id title startDate dueDate iterationCadence { id title }";
+const CURRENT_ITERATIONS_QUERY = `query($path: ID!) { project(fullPath: $path) { group { iterations(state: current, includeAncestors: true, first: 20) { nodes { ${ITERATION_FIELDS} } } } } }`;
+const ISSUE_ITERATION_QUERY = `query($path: ID!, $iid: String!) { project(fullPath: $path) { issue(iid: $iid) { iteration { ${ITERATION_FIELDS} } } } }`;
+const SET_ITERATION_MUTATION = `mutation($path: ID!, $iid: String!, $iteration: IterationID) { issueSetIteration(input: {projectPath: $path, iid: $iid, iterationId: $iteration}) { errors issue { iteration { ${ITERATION_FIELDS} } } } }`;
+const DEPLOY_JOBS_QUERY = `query($path: ID!, $after: String) { project(fullPath: $path) { jobs(statuses: [SUCCESS], first: 100, after: $after) { pageInfo { hasNextPage endCursor } nodes { name refName finishedAt pipeline { ... on Pipeline { sha user { username } } } } } } }`;
+
+const workMessage = (error: unknown) => (error instanceof Error ? error.message : String(error));
+
+/** Sleeps ms, or throws once signal aborts. */
+function workSleep(ms: number, signal: AbortSignal | undefined): Promise<void> {
+	return new Promise((resolve, reject) => {
+		const aborted = () => reject(new Error("gitlab_work: aborted"));
+		if (signal?.aborted) return aborted();
+		const timer = setTimeout(() => {
+			signal?.removeEventListener("abort", onAbort);
+			resolve();
+		}, ms);
+		const onAbort = () => {
+			clearTimeout(timer);
+			aborted();
+		};
+		signal?.addEventListener("abort", onAbort, { once: true });
+	});
+}
+
+/** The description of a call: description, or the UTF-8 text of descriptionFile. */
+function workDescription(text: string | undefined, file: string | undefined): string | undefined {
+	if (text !== undefined && file !== undefined) throw new Error("give description or descriptionFile, not both");
+	if (file === undefined) return text;
+	const resolved = localPath(file);
+	let data: Buffer;
+	try {
+		const stat = statSync(resolved);
+		if (!stat.isFile()) throw new Error("not a regular file");
+		if (stat.size > WORK_MAX_DESCRIPTION_BYTES) throw new Error(`larger than ${formatSize(WORK_MAX_DESCRIPTION_BYTES)}`);
+		data = readFileSync(resolved);
+	} catch (error) {
+		throw new Error(`descriptionFile: ${resolved} cannot be read (${workMessage(error)})`);
+	}
+	try {
+		return new TextDecoder("utf-8", { fatal: true }).decode(data);
+	} catch {
+		throw new Error(`descriptionFile: ${resolved} is not UTF-8 text`);
+	}
+}
+
+/** The Markdown headings of a text (ATX, # to ######) as they stand, those in fenced code left out. */
+function workHeadings(markdown: string): string[] {
+	const out: string[] = [];
+	let fence = "";
+	for (const line of markdown.split(/\r?\n/)) {
+		const marker = /^ {0,3}(`{3,}|~{3,})/.exec(line)?.[1];
+		if (marker) {
+			if (!fence) fence = marker;
+			else if (marker[0] === fence[0] && marker.length >= fence.length) fence = "";
+			continue;
+		}
+		if (!fence && /^ {0,3}#{1,6}[ \t]+\S/.test(line)) out.push(line.trim());
+	}
+	return out;
+}
+
+/** A heading compared by its text alone: without its #s, case, and extra spaces. */
+const workHeadingKey = (heading: string) =>
+	heading.replace(/^#+\s*/, "").replace(/\s+#+$/, "").replace(/\s+/g, " ").trim().toLowerCase();
+
+/** The headings of a template that the description lacks, or has out of their order. */
+function workMissingHeadings(template: string, description: string): string[] {
+	const found = workHeadings(description).map(workHeadingKey);
+	const missing: string[] = [];
+	let at = 0;
+	for (const heading of workHeadings(template)) {
+		const index = found.indexOf(workHeadingKey(heading), at);
+		if (index < 0) missing.push(heading);
+		else at = index + 1;
+	}
+	return missing;
+}
+
+/** Labels as GitLab takes them, comma-separated; undefined when not given. */
+function workLabels(value: string | string[] | undefined): string | undefined {
+	if (value === undefined) return undefined;
+	return (Array.isArray(value) ? value : value.split(",")).map((label) => label.trim()).filter(Boolean).join(",");
+}
+
+/** An iteration of REST (start_date, numeric id) or GraphQL (startDate, gid) as "Cadence Title start – due (gid)". */
+function workIteration(iteration: JsonObject): string {
+	const cadence = isObject(iteration.iterationCadence) ? ciText(iteration.iterationCadence.title) : "";
+	const start = ciText(iteration.startDate ?? iteration.start_date);
+	const due = ciText(iteration.dueDate ?? iteration.due_date);
+	const id = ciText(iteration.id);
+	const gid = id.startsWith("gid://") ? id : `gid://gitlab/Iteration/${id}`;
+	return [cadence, ciText(iteration.title), start || due ? `${start} – ${due}` : "", `(${gid})`].filter(Boolean).join(" ");
+}
+
+/** The usernames of a list of users, as @name, or none. */
+function workUsers(value: Json | undefined): string {
+	const users = Array.isArray(value) ? value.filter(isObject) : [];
+	return users.map((user) => `@${ciText(user.username)}`).join(", ") || "none";
+}
+
+/** An issue in one line: state, assignees, labels, due date, milestone, confidential. */
+function workIssueLine(issue: JsonObject): string {
+	const labels = Array.isArray(issue.labels) ? issue.labels.map(ciText).join(", ") : "";
+	return [
+		ciText(issue.state),
+		`assignee ${workUsers(issue.assignees)}`,
+		`labels ${labels || "none"}`,
+		issue.due_date ? `due ${ciText(issue.due_date)}` : "",
+		isObject(issue.milestone) ? `milestone ${ciText(issue.milestone.title)}` : "",
+		issue.confidential === true ? "confidential" : "",
+	]
+		.filter(Boolean)
+		.join(" · ");
+}
+
+/** A merge request in one line: branches, merge status, people, labels, and what happens at the merge. */
+function workMrLine(mr: JsonObject): string {
+	const labels = Array.isArray(mr.labels) ? mr.labels.map(ciText).join(", ") : "";
+	return [
+		`${ciText(mr.source_branch)} → ${ciText(mr.target_branch)}`,
+		ciText(mr.state),
+		`merge status ${ciText(mr.detailed_merge_status) || ciText(mr.merge_status) || "unknown"}`,
+		`assignee ${workUsers(mr.assignees)}`,
+		`reviewer ${workUsers(mr.reviewers)}`,
+		`labels ${labels || "none"}`,
+		mr.draft === true ? "draft" : "",
+		mr.squash === true ? "squash" : "",
+		mr.force_remove_source_branch === true || mr.should_remove_source_branch === true ? "removes the source branch" : "",
+	]
+		.filter(Boolean)
+		.join(" · ");
+}
+
+const LabelsParam = (description: string) =>
+	Type.Optional(Type.Union([Type.String(), Type.Array(Type.String())], { description }));
+
+const WorkParams = {
+	action: StringEnum(WORK_ACTIONS, {
+		description:
+			"issue_template: a project's issue templates, or one's content; issue_create: an issue, assigned and in the current iteration; issue_update: change an issue, its iteration too; issue_view: an issue with its notes, merge requests, links, and iteration; mr_create: a merge request, or the open one of its source branch; mr_merge: merge once mergeable, or set auto-merge; deployed: what each environment runs",
+	}),
+	project: Type.Optional(
+		Type.String({
+			description:
+				"group/project, its id, or a web URL of the project or of one of its issues or merge requests (which gives iid); default the project of the working directory's origin remote",
+		}),
+	),
+	iid: Type.Optional(Type.Integer({ description: "issue_update, issue_view: the issue's iid; mr_merge: the merge request's iid" })),
+	template: Type.Optional(
+		Type.String({
+			description:
+				"issue_template: the template to show (without it, the list); issue_create: the template the description follows, its headings checked in order",
+		}),
+	),
+	title: Type.Optional(Type.String({ description: "issue_create, mr_create (required), issue_update: the title" })),
+	description: Type.Optional(Type.String({ description: "issue_create, issue_update, mr_create: the description, Markdown" })),
+	descriptionFile: Type.Optional(
+		Type.String({ description: "Instead of description, the path of a local UTF-8 file holding it, for a long text" }),
+	),
+	assignee: Type.Optional(
+		Type.String({
+			description:
+				"Username or user id, several separated by commas, or none; issue_create and mr_create default to the token's own user",
+		}),
+	),
+	reviewer: Type.Optional(Type.String({ description: "mr_create: username or user id, several separated by commas" })),
+	labels: LabelsParam("issue_create, mr_create: the labels; issue_update: replaces all labels"),
+	add_labels: LabelsParam("issue_update: labels to add"),
+	remove_labels: LabelsParam("issue_update: labels to remove"),
+	iteration: Type.Optional(
+		Type.String({
+			description:
+				"issue_create (default current), issue_update: current (the group's current iteration, set only when there is exactly one), none (create: skip; update: unset), or an iteration's gid or id",
+		}),
+	),
+	due_date: Type.Optional(Type.String({ description: "issue_create, issue_update: YYYY-MM-DD" })),
+	milestone_id: Type.Optional(Type.Integer({ description: "issue_create, issue_update: the milestone's id" })),
+	confidential: Type.Optional(Type.Boolean({ description: "issue_create, issue_update: confidential or not" })),
+	state_event: Type.Optional(StringEnum(["close", "reopen"] as const, { description: "issue_update: close or reopen the issue" })),
+	source_branch: Type.Optional(Type.String({ description: "mr_create: the branch to merge (required), pushed already" })),
+	target_branch: Type.Optional(Type.String({ description: "mr_create: the branch to merge into; default the default branch" })),
+	remove_source_branch: Type.Optional(
+		Type.Boolean({ description: "mr_create (default true), mr_merge: remove the source branch with the merge" }),
+	),
+	squash: Type.Optional(
+		Type.Boolean({ description: "mr_create (default the project's setting), mr_merge: squash the commits at the merge" }),
+	),
+	draft: Type.Optional(Type.Boolean({ description: "mr_create: create it as a draft" })),
+	sha: Type.Optional(
+		Type.String({ description: "mr_merge: merge only if the head of the source branch is this commit (or starts so)" }),
+	),
+	when_pipeline_succeeds: Type.Optional(
+		Type.Boolean({ description: "mr_merge: with a pipeline still running, set auto-merge and return instead of waiting" }),
+	),
+	wait_for_pipeline: Type.Optional(
+		Type.Boolean({
+			description:
+				"mr_merge: with a pipeline still running, wait here for it (within timeout); without it or when_pipeline_succeeds the call reports the pipeline and merges nothing",
+		}),
+	),
+	timeout: Type.Optional(
+		Type.Number({
+			description: `mr_merge: minutes to wait for a mergeable status (default ${WORK_MERGE_TIMEOUT_MIN}, at most ${WORK_MAX_MERGE_TIMEOUT_MIN})`,
+		}),
+	),
+	contains: Type.Optional(
+		Type.String({ description: "deployed: a commit sha, tag, or branch: whether each deployment contains it" }),
+	),
+	jobs: Type.Optional(
+		Type.String({
+			description:
+				"deployed, for a project without environments: a regular expression (case-insensitive) for the names of the deploy jobs; default deploy",
+		}),
+	),
+};
+
+function workParameters(instances: Instance[]) {
+	const all = Type.Object({ host: Type.Optional(hostParameter(instances, "GitLab")), ...WorkParams });
+	return instances.length > 1 ? all : (Type.Object(WorkParams) as unknown as typeof all);
+}
+
+/** What a call does about an issue's iteration: set gid (null unsets it), or name the candidates, or note why not. */
+type IterationPlan = { gid?: string | null; candidates?: JsonObject[]; note?: string };
+
+function registerWorkTool(pi: ExtensionAPI, instances: Instance[]): void {
+	/** The token's own user of each instance, asked once a session. */
+	const selves = new Map<string, Promise<JsonObject>>();
+
+	pi.registerTool({
+		name: "gitlab_work",
+		label: "GitLab work",
+		description:
+			"Do in one call what takes several gitlab calls, with the gitlab tool's instances and tokens. issue_template: a " +
+			"project's issue templates, or the content of one. issue_create: an issue, assigned to the token's user unless " +
+			"assignee says otherwise, in the group's current iteration (several current ones: none is set, they are listed); " +
+			"with template, the description must keep the template's headings in order, or nothing is created. issue_update: " +
+			"title, description, labels (all, or add/remove), assignee, state, due date, milestone, confidential, and the " +
+			"iteration (current, none, or a gid) in one call. issue_view: the issue with its notes (without system notes, " +
+			"the newest last), related merge requests, linked issues, and iteration. mr_create: a merge request from " +
+			"source_branch into target_branch (default the default branch), assigned to the token's user, removing the " +
+			"source branch at the merge; an open one of that branch is returned instead. mr_merge: waits without model " +
+			"requests while GitLab checks mergeability (at most timeout minutes), then merges; when_pipeline_succeeds sets " +
+			"auto-merge while the pipeline runs; a blocking status (conflicts, open threads, approvals, draft, failed " +
+			"pipeline, …) is reported at once. deployed: the last successful deployment of each environment (ref, sha, " +
+			"when, by, job), or without environments the latest successful job of each name matching jobs; contains tells " +
+			"whether each runs a commit, tag, or branch. The project defaults to the one of the working directory's origin " +
+			"remote; a web URL of an issue or merge request in project gives iid.",
+		promptSnippet: "GitLab work in one call: issue templates, create/update/view issues with iteration, create and merge MRs, deployed",
+		promptGuidelines: [
+			"Use gitlab_work instead of several gitlab calls for issue templates, creating, updating, and reading issues (with notes, merge requests, links, and iteration), creating and merging merge requests, and what is deployed where; the gitlab tool stays for everything else.",
+			"gitlab_work: issue_create, issue_update, and mr_create only for what the user asked for; mr_merge only with the user's approval of that merge or a standing one, never because the merge request looks ready.",
+			"gitlab_work: for an issue from a template, read the template first (issue_template with template), fill in its sections under its headings, and pass template to issue_create, which refuses a description that drops or reorders them.",
+			"gitlab_work: issue_create sets the current iteration by itself; when it lists several current iterations and sets none, set one with issue_update only where the user or the project's convention says which.",
+			"gitlab_work: mr_merge with a pipeline still running reports it and merges nothing; when_pipeline_succeeds (auto-merge) or wait_for_pipeline (wait here) only as the user wants the merge done.",
+		],
+		parameters: workParameters(instances),
+		annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
+
+		async execute(_id, params, signal, onUpdate, ctx) {
+			const action = params.action as WorkAction;
+			const target = ciTarget(instances, params.host as string | undefined, params.project, ctx.cwd);
+			const { instance } = target;
+			const P = target.project;
+			const label = decodeURIComponent(P);
+			const details = { host: instance.name, project: label, action };
+			const token = await resolveToken(
+				instance,
+				CONFIG_FILE,
+				`Create a personal access token in ${instance.base} under User settings → Personal access tokens (scope api, or read_api to read only)`,
+				signal,
+			);
+			const mask = masker([token]);
+			const api = (method: "GET" | "POST" | "PUT", path: string, query?: Record<string, unknown>, body?: unknown) =>
+				apiRequest(instance, token, method, path, query, body, signal, mask);
+			const get = async (path: string, query?: Record<string, unknown>) => apiJson(await api("GET", path, query), mask);
+			const write = async (method: "POST" | "PUT", path: string, body: unknown) =>
+				apiJson(await api(method, path, undefined, body), mask);
+			const graphql = async (query: string, variables: Record<string, unknown>): Promise<JsonObject> => {
+				const answer = ciObject(apiJson(await api("POST", instance.graphql, undefined, { query, variables }), mask), "JSON");
+				const errors = Array.isArray(answer.errors) ? answer.errors.map((error) => ciText(isObject(error) ? error.message : error)) : [];
+				if (errors.length > 0) throw new Error(`GraphQL: ${ciOneLine(errors.join("; "), 300)}`);
+				return isObject(answer.data) ? answer.data : {};
+			};
+			let project: Promise<JsonObject> | undefined;
+			const projectInfo = () => (project ??= get(`/projects/${P}`).then((json) => ciObject(json, "a project")));
+			// GraphQL names a project by its full path only.
+			const fullPath = async () => (/^\d+$/.test(P) ? ciText((await projectInfo()).path_with_namespace) : label);
+			const ownUser = () => {
+				let me = selves.get(instance.name);
+				if (!me) {
+					me = get("/user").then((json) => ciObject(json, "a user"));
+					selves.set(instance.name, me);
+					me.catch(() => selves.delete(instance.name));
+				}
+				return me;
+			};
+			// The user ids of assignee or reviewer: the token's own user when not given and self, none for "none".
+			const people = async (given: string | undefined, self: boolean): Promise<number[] | undefined> => {
+				const wanted = given?.trim() ?? "";
+				if (!wanted) return self ? [Number((await ownUser()).id)] : undefined;
+				if (wanted.toLowerCase() === "none") return [];
+				return Promise.all(
+					wanted
+						.split(",")
+						.map((item) => item.trim())
+						.filter(Boolean)
+						.map(async (item) => {
+							if (/^\d+$/.test(item)) return Number(item);
+							const username = item.replace(/^@/, "");
+							const list = await get("/users", { username });
+							const user = Array.isArray(list) ? list.find(isObject) : undefined;
+							if (!user) throw new Error(`there is no user @${username} on ${instance.name}: give a username or a user id`);
+							return Number(user.id);
+						}),
+				);
+			};
+			const description = workDescription(params.description, params.descriptionFile);
+
+			const templateOf = async (name: string): Promise<string> => {
+				try {
+					const template = ciObject(await get(`/projects/${P}/templates/issues/${encodeURIComponent(name)}`), "a template");
+					return ciText(template.content);
+				} catch (error) {
+					if ((error as { status?: number }).status !== 404) throw error;
+					const names = await templateNames().catch(() => []);
+					throw new Error(`${label} has no issue template ${name}; its templates: ${names.join(", ") || "none"}`);
+				}
+			};
+			const templateNames = async (): Promise<string[]> => {
+				const list = await get(`/projects/${P}/templates/issues`, { per_page: 100 });
+				return (Array.isArray(list) ? list.filter(isObject) : []).map((item) => ciText(item.name ?? item.key));
+			};
+
+			const planIteration = async (given: string): Promise<IterationPlan> => {
+				const value = given.trim();
+				if (value.toLowerCase() === "none") return { gid: null };
+				if (value.toLowerCase() !== "current") {
+					const id = /^\d+$/.test(value) ? value : /^gid:\/\/gitlab\/Iteration\/(\d+)$/.exec(value)?.[1];
+					if (!id) throw new Error(`iteration ${given}: give current, none, or an iteration's gid (gid://gitlab/Iteration/<id>) or id`);
+					return { gid: `gid://gitlab/Iteration/${id}` };
+				}
+				let data: JsonObject;
+				try {
+					data = await graphql(CURRENT_ITERATIONS_QUERY, { path: await fullPath() });
+				} catch (error) {
+					return { note: `none set, the current one is not found (${workMessage(error)})` };
+				}
+				if (!isObject(data.project)) return { note: `none set, GraphQL does not find ${await fullPath()}` };
+				const group = data.project.group;
+				if (!isObject(group)) return { note: "none, the project is not in a group" };
+				const nodes = isObject(group.iterations) && Array.isArray(group.iterations.nodes) ? group.iterations.nodes.filter(isObject) : [];
+				if (nodes.length === 0) return { note: "none, the group has no current iteration" };
+				return nodes.length === 1 ? { gid: ciText(nodes[0].id) } : { candidates: nodes };
+			};
+			// Carries out a plan for issue iid, in words for the answer; a failure is told, the rest being done by then.
+			const applyIteration = async (plan: IterationPlan, iid: number): Promise<string> => {
+				if (plan.candidates) {
+					const list = plan.candidates.map((candidate) => `  ${workIteration(candidate)}`).join("\n");
+					return `iteration: none set, the project has ${plan.candidates.length} current iterations; set one with issue_update iteration: <gid>\n${list}`;
+				}
+				if (plan.gid === undefined) return `iteration: ${plan.note ?? "unchanged"}`;
+				try {
+					const data = await graphql(SET_ITERATION_MUTATION, { path: await fullPath(), iid: String(iid), iteration: plan.gid });
+					const result = isObject(data.issueSetIteration) ? data.issueSetIteration : {};
+					const errors = Array.isArray(result.errors) ? result.errors.map(ciText).filter(Boolean) : [];
+					if (errors.length > 0) throw new Error(errors.join("; "));
+					const set = isObject(result.issue) && isObject(result.issue.iteration) ? result.issue.iteration : undefined;
+					return `iteration: ${set ? workIteration(set) : "none"}`;
+				} catch (error) {
+					return `iteration: NOT set (${workMessage(error)}); the rest is done`;
+				}
+			};
+
+			let head: string;
+			let body = "";
+			let isError = false;
+			switch (action) {
+				case "issue_template": {
+					const name = params.template?.trim();
+					if (name) {
+						head = `Issue template ${name} of ${label}:`;
+						body = await templateOf(name);
+					} else {
+						const names = await templateNames();
+						head = names.length > 0 ? `Issue templates of ${label} (${names.length}):` : `${label} has no issue templates.`;
+						body = names.join("\n");
+					}
+					break;
+				}
+				case "issue_create": {
+					const title = params.title?.trim();
+					if (!title) throw new Error("issue_create needs title");
+					const templateName = params.template?.trim();
+					let checked = "";
+					if (templateName) {
+						const content = await templateOf(templateName);
+						const headings = workHeadings(content);
+						const missing = workMissingHeadings(content, description ?? "");
+						if (missing.length > 0) {
+							throw new Error(
+								`the description lacks ${missing.length} of the ${headings.length} headings of template ${templateName}, or has them ` +
+									`out of order: ${missing.join(" | ")}. Nothing was created: keep every heading of the template in its order ` +
+									"(issue_template with template shows it) and fill in its sections.",
+							);
+						}
+						checked = `template ${templateName}: all ${headings.length} headings in order`;
+					}
+					const iteration = params.iteration?.trim() || "current";
+					const [assignees, plan] = await Promise.all([
+						people(params.assignee, true),
+						iteration.toLowerCase() === "none" ? undefined : planIteration(iteration),
+					]);
+					const issue = ciObject(
+						await write("POST", `/projects/${P}/issues`, {
+							title,
+							description,
+							assignee_ids: assignees?.length ? assignees : undefined,
+							labels: workLabels(params.labels),
+							due_date: params.due_date,
+							milestone_id: params.milestone_id,
+							confidential: params.confidential,
+						}),
+						"an issue",
+					);
+					const iterationLine = plan ? await applyIteration(plan, Number(issue.iid)) : "iteration: none, skipped as asked";
+					head = `Created issue #${ciText(issue.iid)}: ${ciText(issue.title)}\n${ciText(issue.web_url)}`;
+					body = [workIssueLine(issue), iterationLine, checked].filter(Boolean).join("\n");
+					break;
+				}
+				case "issue_update": {
+					const iid = params.iid ?? target.issue;
+					if (iid === undefined) throw new Error("issue_update needs iid, or a web URL of the issue as project");
+					const [assignees, plan] = await Promise.all([
+						people(params.assignee, false),
+						params.iteration?.trim() ? planIteration(params.iteration) : undefined,
+					]);
+					const changes: Record<string, unknown> = {
+						title: params.title?.trim() || undefined,
+						description,
+						assignee_ids: assignees,
+						labels: workLabels(params.labels),
+						add_labels: workLabels(params.add_labels),
+						remove_labels: workLabels(params.remove_labels),
+						state_event: params.state_event,
+						due_date: params.due_date,
+						milestone_id: params.milestone_id,
+						confidential: params.confidential,
+					};
+					for (const key of Object.keys(changes)) if (changes[key] === undefined) delete changes[key];
+					if (Object.keys(changes).length === 0 && !plan) {
+						throw new Error(
+							"issue_update has nothing to change: give title, description, labels, add_labels, remove_labels, assignee, state_event, due_date, milestone_id, confidential, or iteration",
+						);
+					}
+					const path = `/projects/${P}/issues/${iid}`;
+					let issue = Object.keys(changes).length > 0 ? ciObject(await write("PUT", path, changes), "an issue") : undefined;
+					const iterationLine = plan ? await applyIteration(plan, iid) : "";
+					issue ??= ciObject(await get(path), "an issue");
+					const current = isObject(issue.iteration) ? `iteration: ${workIteration(issue.iteration)}` : "";
+					head = `Updated issue #${ciText(issue.iid)}: ${ciText(issue.title)}\n${ciText(issue.web_url)}`;
+					body = [workIssueLine(issue), iterationLine || current].filter(Boolean).join("\n");
+					break;
+				}
+				case "issue_view": {
+					const iid = params.iid ?? target.issue;
+					if (iid === undefined) throw new Error("issue_view needs iid, or a web URL of the issue as project");
+					const path = `/projects/${P}/issues/${iid}`;
+					const [found, notes, mrs, links] = await Promise.allSettled([
+						get(path).then((json) => ciObject(json, "an issue")),
+						get(`${path}/notes`, { per_page: 100, sort: "desc", order_by: "created_at" }),
+						get(`${path}/related_merge_requests`, { per_page: 100 }),
+						get(`${path}/links`),
+					]);
+					signal?.throwIfAborted();
+					if (found.status === "rejected") throw found.reason;
+					const issue = found.value;
+					const list = (json: Json) => (Array.isArray(json) ? json.filter(isObject) : []);
+					const sections: string[] = [];
+					const add = <T>(title: string, result: PromiseSettledResult<T>, render: (value: T) => { title: string; lines: string[] }) => {
+						if (result.status === "rejected") {
+							sections.push(`${title}\nError: ${workMessage(result.reason)}`);
+							return;
+						}
+						const shown = render(result.value);
+						sections.push([shown.title, ...shown.lines].join("\n"));
+					};
+					const { _links: _, ...rest } = issue;
+					sections.push(`Issue\n${JSON.stringify(fold(rest, "top") ?? null, null, 1)}`);
+					add("Notes", notes, (json) => {
+						const own = list(json).filter((note) => note.system !== true);
+						const total = typeof issue.user_notes_count === "number" ? Math.max(issue.user_notes_count, own.length) : own.length;
+						const shown = own.slice(0, WORK_NOTES).reverse();
+						const older = total - shown.length;
+						return {
+							title:
+								total === 0
+									? "Notes: none (system notes left out)"
+									: `Notes: ${shown.length} of ${total}, the newest last (system notes left out${older > 0 ? `, the ${older} oldest too` : ""})`,
+							lines: shown.map((note) => {
+								const author = isObject(note.author) ? `@${ciText(note.author.username)}` : "?";
+								return `— ${author}, ${ciTime(note.created_at)} (note ${ciText(note.id)}):\n${cut(ciText(note.body).trim(), WORK_NOTE_CHARS)}`;
+							}),
+						};
+					});
+					const where = (item: JsonObject, mark: string) =>
+						item.project_id !== issue.project_id && isObject(item.references) ? ciText(item.references.full) : `${mark}${ciText(item.iid)}`;
+					add("Related merge requests", mrs, (json) => {
+						const items = list(json);
+						return {
+							title: `Related merge requests: ${items.length}`,
+							lines: items.map((mr) => `${where(mr, "!")} ${ciText(mr.state)}  ${ciText(mr.title)}  ${ciText(mr.web_url)}`),
+						};
+					});
+					add("Linked issues", links, (json) => {
+						const items = list(json);
+						return {
+							title: `Linked issues: ${items.length}`,
+							lines: items.map(
+								(item) =>
+									`${where(item, "#")} ${ciText(item.state)} ${ciText(item.link_type)}  ${ciText(item.title)}  ${ciText(item.web_url)}`,
+							),
+						};
+					});
+					// REST of GitLab EE carries the iteration (null for none); without the field, GraphQL is asked.
+					const iterationOf = async (): Promise<Json> => {
+						if ("iteration" in issue) return issue.iteration;
+						const data = await graphql(ISSUE_ITERATION_QUERY, { path: await fullPath(), iid: String(iid) });
+						return isObject(data.project) && isObject(data.project.issue) ? (data.project.issue.iteration ?? null) : null;
+					};
+					const [iteration] = await Promise.allSettled([iterationOf()]);
+					add("Iteration", iteration, (value) => ({
+						title: `Iteration: ${isObject(value) ? workIteration(value) : "none"}`,
+						lines: [],
+					}));
+					head = `Issue #${ciText(issue.iid)} of ${label}`;
+					body = sections.join("\n\n");
+					break;
+				}
+				case "mr_create": {
+					const source = params.source_branch?.trim();
+					const title = params.title?.trim();
+					if (!source || !title) throw new Error("mr_create needs source_branch (pushed already) and title");
+					const [info, assignees, reviewers] = await Promise.all([
+						projectInfo(),
+						people(params.assignee, true),
+						people(params.reviewer, false),
+					]);
+					const into = params.target_branch?.trim() || ciText(info.default_branch);
+					if (!into) throw new Error(`${label} has no default branch: give target_branch`);
+					const draft = params.draft === true && !/^(draft:|\[draft\]|\(draft\))/i.test(title);
+					const request = {
+						source_branch: source,
+						target_branch: into,
+						title: draft ? `Draft: ${title}` : title,
+						description,
+						assignee_ids: assignees,
+						reviewer_ids: reviewers,
+						labels: workLabels(params.labels),
+						remove_source_branch: params.remove_source_branch ?? true,
+						squash: params.squash ?? ["always", "default_on"].includes(ciText(info.squash_option)),
+					};
+					let mr: JsonObject | undefined;
+					let note = "";
+					for (let attempt = 1; !mr; attempt++) {
+						try {
+							mr = ciObject(await write("POST", `/projects/${P}/merge_requests`, request), "a merge request");
+						} catch (error) {
+							const status = (error as { status?: number }).status ?? 0;
+							const detail = (error as { detail?: string }).detail ?? "";
+							if (status === 409) {
+								const open = await get(`/projects/${P}/merge_requests`, { state: "opened", source_branch: source, per_page: 20 });
+								mr = Array.isArray(open) ? open.find(isObject) : undefined;
+								if (!mr) throw error;
+								note = `An open merge request of ${source} exists already; nothing was created, here it is.`;
+							} else if (status >= 400 && status < 500 && /source[ _]branch/i.test(detail) && /exist/i.test(detail)) {
+								if (attempt > 1) {
+									throw new Error(`${workMessage(error)} — GitLab does not know ${source}, also after a second try: push it first (git push -u origin ${source})`);
+								}
+								await workSleep(WORK_BRANCH_RETRY_MS, signal);
+								note = `GitLab did not know ${source} at first; created at the second try.`;
+							} else {
+								throw error;
+							}
+						}
+					}
+					const existing = note.startsWith("An open");
+					head = `${existing ? "Found" : "Created"} merge request !${ciText(mr.iid)}: ${ciText(mr.title)}\n${ciText(mr.web_url)}`;
+					body = [workMrLine(mr), note].filter(Boolean).join("\n");
+					break;
+				}
+				case "mr_merge": {
+					const iid = params.iid ?? target.mr;
+					if (iid === undefined) throw new Error("mr_merge needs iid, or a web URL of the merge request as project");
+					const path = `/projects/${P}/merge_requests/${iid}`;
+					const mrOf = async () => ciObject(await get(path), "a merge request");
+					const timeoutMs = Math.min(Math.max(params.timeout ?? WORK_MERGE_TIMEOUT_MIN, 0.1), WORK_MAX_MERGE_TIMEOUT_MIN) * 60_000;
+					const started = Date.now();
+					const span = () => ciDuration((Date.now() - started) / 1000) || "0s";
+					const auto = params.when_pipeline_succeeds === true;
+					const pipelineOf = (mr: JsonObject) => (isObject(mr.head_pipeline) ? mr.head_pipeline : undefined);
+					const blocked = (mr: JsonObject, status: string) => {
+						const pipeline = pipelineOf(mr);
+						const ci = status.startsWith("ci_") && pipeline ? ` (pipeline ${ciText(pipeline.id)} ${ciText(pipeline.status)})` : "";
+						return `!${iid} not merged, ${status}: ${MERGE_BLOCKS[status] ?? "GitLab reports this status"}${ci}.\n${ciText(mr.web_url)}`;
+					};
+					const mergedText = async (mr: JsonObject, already: boolean): Promise<string> => {
+						const commit = ciText(mr.merge_commit_sha)
+							? `merge commit ${ciText(mr.merge_commit_sha).slice(0, 8)}`
+							: ciText(mr.squash_commit_sha)
+								? `squash commit ${ciText(mr.squash_commit_sha).slice(0, 8)}`
+								: `fast-forward to ${ciText(mr.sha).slice(0, 8)}`;
+						const source = ciText(mr.source_branch);
+						let branch = `source branch ${source} kept`;
+						if (mr.force_remove_source_branch === true || mr.should_remove_source_branch === true) {
+							const sourceProject = ciText(mr.source_project_id) || P;
+							branch = await api("GET", `/projects/${sourceProject}/repository/branches/${encodeURIComponent(source)}`).then(
+								() => `source branch ${source} still there, to be removed`,
+								(error) => ((error as { status?: number }).status === 404 ? `source branch ${source} removed` : `source branch ${source}: ${workMessage(error)}`),
+							);
+						}
+						const by = already && isObject(mr.merged_by) ? ` by @${ciText(mr.merged_by.username)}` : "";
+						const when = already && mr.merged_at ? ` on ${ciTime(mr.merged_at)}` : "";
+						return `${already ? "Already merged" : "Merged"} !${iid} into ${ciText(mr.target_branch)}${by}${when}: ${commit}; ${branch}.\n${ciText(mr.web_url)}`;
+					};
+					const merge = async (): Promise<string> => {
+						let mr = await mrOf();
+						for (let checks = 1; ; checks++) {
+							if (mr.state === "merged") return mergedText(mr, true);
+							if (mr.state !== "opened") {
+								isError = true;
+								return `!${iid} not merged: it is ${ciText(mr.state)}.\n${ciText(mr.web_url)}`;
+							}
+							const sha = params.sha?.trim();
+							if (sha && !ciText(mr.sha).startsWith(sha)) {
+								isError = true;
+								return `!${iid} not merged: its head is ${ciText(mr.sha).slice(0, 8)}, not ${sha}. Review the new commits; merge then with that sha.`;
+							}
+							const status = ciText(mr.detailed_merge_status);
+							const pipeline = pipelineOf(mr);
+							const running =
+								status === "ci_still_running" || (status === "ci_must_pass" && pipeline !== undefined && CI_ACTIVE.has(ciText(pipeline.status)));
+							if (status === "mergeable" || (auto && running)) break;
+							if (running && params.wait_for_pipeline !== true) {
+								const which = pipeline ? `pipeline ${ciText(pipeline.id)} is still ${ciText(pipeline.status)}` : "its pipeline is still running";
+								return `!${iid} not merged yet: ${which}. Give when_pipeline_succeeds: true to set auto-merge, or wait_for_pipeline: true to wait here.\n${ciText(mr.web_url)}`;
+							}
+							if (!running && !MERGE_PENDING.has(status)) {
+								isError = true;
+								return blocked(mr, status);
+							}
+							if (Date.now() - started >= timeoutMs) {
+								isError = true;
+								return `Gave up after ${span()} (${checks} checks): !${iid} is still ${status}; nothing merged. Call mr_merge again to go on.`;
+							}
+							onUpdate?.({ content: [{ type: "text", text: mask(`${span()}, ${checks} checks: !${iid} ${status}`) }], details });
+							await workSleep(Math.min(WORK_MERGE_EVERY_MS, Math.max(timeoutMs - (Date.now() - started), 0)), signal);
+							mr = await mrOf();
+						}
+						const request = {
+							sha: ciText(mr.sha),
+							squash: params.squash,
+							should_remove_source_branch: params.remove_source_branch,
+							// auto_merge since GitLab 17.11; merge_when_pipeline_succeeds for older ones.
+							...(auto ? { auto_merge: true, merge_when_pipeline_succeeds: true } : {}),
+						};
+						let result: JsonObject;
+						try {
+							result = ciObject(await write("PUT", `${path}/merge`, request), "a merge request");
+						} catch (error) {
+							const status = (error as { status?: number }).status ?? 0;
+							if (![405, 406, 409, 422].includes(status)) throw error;
+							const now = await mrOf();
+							if (now.state === "merged") return mergedText(now, false);
+							isError = true;
+							const detail = (error as { detail?: string }).detail ?? "";
+							const state = ciText(now.detailed_merge_status) || ciText(now.state);
+							const why = MERGE_BLOCKS[state] ? `: ${MERGE_BLOCKS[state]}` : "";
+							return `GitLab refused the merge of !${iid} (HTTP ${status}${detail ? `: ${ciOneLine(detail, 200)}` : ""}); it now reports ${state}${why}.\n${ciText(now.web_url)}`;
+						}
+						if (result.state === "merged") return mergedText(result, false);
+						if (auto && (result.merge_when_pipeline_succeeds === true || result.auto_merge_enabled === true)) {
+							const pipeline = pipelineOf(result) ?? pipelineOf(mr);
+							const which = pipeline ? `pipeline ${ciText(pipeline.id)}` : "its pipeline";
+							return `Auto-merge set: !${iid} merges into ${ciText(result.target_branch)} once ${which} succeeds.\n${ciText(result.web_url)}`;
+						}
+						// GitLab took the merge and finishes it in the background.
+						while (Date.now() - started < timeoutMs) {
+							await workSleep(WORK_MERGE_EVERY_MS, signal);
+							result = await mrOf();
+							if (result.state === "merged") return mergedText(result, false);
+						}
+						isError = true;
+						return `GitLab took the merge of !${iid} but has not finished it after ${span()}; mr_merge again tells whether it is merged.\n${ciText(result.web_url)}`;
+					};
+					head = await merge();
+					break;
+				}
+				case "deployed": {
+					const wanted = params.contains?.trim();
+					let containsSha = "";
+					if (wanted) {
+						try {
+							containsSha = ciText(ciObject(await get(`/projects/${P}/repository/commits/${encodeURIComponent(wanted)}`), "a commit").id);
+						} catch (error) {
+							if ((error as { status?: number }).status !== 404) throw error;
+							throw new Error(`contains: ${wanted} is no commit, tag, or branch of ${label}; give a sha, a tag, or a branch`);
+						}
+					}
+					// Whether a deployed commit contains the wanted one: it is that commit or descends from it.
+					const verdicts = new Map<string, Promise<string>>();
+					const contains = (sha: string): Promise<string> => {
+						if (!containsSha || !sha) return Promise.resolve("");
+						if (sha === containsSha) return Promise.resolve("✓");
+						let verdict = verdicts.get(sha);
+						if (!verdict) {
+							verdict = get(`/projects/${P}/repository/merge_base`, { refs: [sha, containsSha] }).then(
+								(json) => (ciText(ciObject(json, "a commit").id) === containsSha ? "✓" : "✗"),
+								(error) => `? ${ciOneLine(workMessage(error), 120)}`,
+							);
+							verdicts.set(sha, verdict);
+						}
+						return verdict;
+					};
+					type Row = { name: string; ref: string; sha: string; when: string; by: string; job?: string };
+					const environments = await get(`/projects/${P}/environments`, { states: "available", per_page: 100 });
+					const envs = Array.isArray(environments) ? environments.filter(isObject) : [];
+					let rows: Row[];
+					if (envs.length > 0) {
+						rows = await Promise.all(
+							envs.slice(0, WORK_ENVIRONMENTS).map(async (env): Promise<Row> => {
+								const name = ciText(env.name);
+								try {
+									const list = await get(`/projects/${P}/deployments`, {
+										environment: name,
+										status: "success",
+										order_by: "finished_at",
+										sort: "desc",
+										per_page: 1,
+									});
+									const deployment = Array.isArray(list) ? list.find(isObject) : undefined;
+									if (!deployment) return { name, ref: "", sha: "", when: "no successful deployment", by: "", job: "" };
+									const job = isObject(deployment.deployable) ? deployment.deployable : {};
+									const user = isObject(deployment.user) ? `@${ciText(deployment.user.username)}` : "";
+									return {
+										name,
+										ref: ciText(deployment.ref),
+										sha: ciText(deployment.sha),
+										when: ciTime(job.finished_at ?? deployment.updated_at),
+										by: user,
+										job: ciText(job.name),
+									};
+								} catch (error) {
+									return { name, ref: "", sha: "", when: `error: ${ciOneLine(workMessage(error), 200)}`, by: "", job: "" };
+								}
+							}),
+						);
+						const more = envs.length > WORK_ENVIRONMENTS ? `, the first ${WORK_ENVIRONMENTS} shown` : "";
+						head = `Deployments of ${label}, the last successful one of each of its ${envs.length} environments${more}:`;
+					} else {
+						const pattern = params.jobs?.trim() || "deploy";
+						let regex: RegExp;
+						try {
+							regex = new RegExp(pattern, "i");
+						} catch (error) {
+							throw new Error(`jobs is not a valid regular expression: ${workMessage(error)}`);
+						}
+						const path = await fullPath();
+						// The jobs come newest first: the first of a name is its latest.
+						const newest = new Map<string, JsonObject>();
+						let seen = 0;
+						let after: string | null = null;
+						for (let page = 1; page <= WORK_JOB_PAGES; page++) {
+							const data = await graphql(DEPLOY_JOBS_QUERY, { path, after });
+							if (!isObject(data.project)) throw new Error(`GraphQL does not find ${path}`);
+							const jobs = isObject(data.project.jobs) ? data.project.jobs : {};
+							for (const node of Array.isArray(jobs.nodes) ? jobs.nodes.filter(isObject) : []) {
+								seen++;
+								const name = ciText(node.name);
+								if (regex.test(name) && !newest.has(name)) newest.set(name, node);
+							}
+							const info = isObject(jobs.pageInfo) ? jobs.pageInfo : {};
+							if (info.hasNextPage !== true) break;
+							after = ciText(info.endCursor);
+						}
+						if (newest.size === 0) {
+							throw new Error(
+								`${label} has no environments, and none of its last ${seen} successful jobs matches /${pattern}/i: give jobs, a regular expression for the names of its deploy jobs`,
+							);
+						}
+						rows = [...newest.values()]
+							.map((node) => {
+								const pipeline = isObject(node.pipeline) ? node.pipeline : {};
+								return {
+									name: ciText(node.name),
+									ref: ciText(node.refName),
+									sha: ciText(pipeline.sha),
+									when: ciTime(node.finishedAt),
+									by: isObject(pipeline.user) ? `@${ciText(pipeline.user.username)}` : "",
+								};
+							})
+							.sort((a, b) => a.name.localeCompare(b.name));
+						head = `${label} has no environments; the latest successful job of each name matching /${pattern}/i among its last ${seen} successful jobs:`;
+					}
+					const marks = await Promise.all(rows.map((row) => contains(row.sha)));
+					const environmentsShown = envs.length > 0;
+					const header = [environmentsShown ? "environment" : "job", "ref", "sha", environmentsShown ? "deployed" : "finished", "by"];
+					if (environmentsShown) header.push("job");
+					if (containsSha) header.push(`contains ${wanted === containsSha ? containsSha.slice(0, 8) : wanted}`);
+					const table = rows.map((row, index) => {
+						const cells = [row.name, row.ref, row.sha.slice(0, 8), row.when, row.by];
+						if (environmentsShown) cells.push(row.job ?? "");
+						if (containsSha) cells.push(marks[index]);
+						return cells;
+					});
+					body = ciColumns([header, ...table]);
+					break;
+				}
+				default:
+					throw new Error(`unknown action ${String(action)}`);
+			}
+			return { content: [{ type: "text", text: limited(mask(head), mask(body), false) }], details, isError };
+		},
+
+		renderCall(args, theme) {
+			const host = args.host as string | undefined;
+			const mark = String(args.action ?? "").startsWith("mr_") ? "!" : "#";
+			const which = [
+				args.project,
+				args.iid !== undefined ? `${mark}${args.iid}` : undefined,
+				args.template,
+				args.source_branch ? `${args.source_branch}${args.target_branch ? ` → ${args.target_branch}` : ""}` : undefined,
+				args.title ? `"${ciOneLine(String(args.title), 60)}"` : undefined,
+				args.contains ? `contains ${args.contains}` : undefined,
+			].filter((part) => part !== undefined && part !== "");
+			return new Text(
+				theme.fg("toolTitle", theme.bold("gitlab_work ")) +
+					(host ? theme.fg("muted", `${host} `) : "") +
+					theme.fg("muted", `${args.action ?? "?"}${which.length > 0 ? " " : ""}`) +
+					theme.fg("accent", which.join(" ")) +
+					(args.action === "mr_merge" && args.when_pipeline_succeeds ? theme.fg("dim", " (auto-merge)") : ""),
+				0,
+				0,
+			);
+		},
+	});
+}
+
 export default function (pi: ExtensionAPI) {
 	const loaded = loadInstances(CONFIG_FILE, DEFAULT_TOKEN_ENV, (basePath) => ({
 		api: `${basePath}/api/v4`,
@@ -1910,7 +2864,10 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	if (!ciToolWanted()) return;
+	if (toolWanted("work")) registerWorkTool(pi, instances);
+	// The temp files of all three tools go with the session, whichever tools are on.
+	pi.on("session_shutdown", () => removeTempDirs());
+	if (!toolWanted("pipelines")) return;
 	/** The background waits of the other tools, as "background-waits:state" brings them. */
 	const otherWaits = new Map<string, BackgroundWaitView[]>();
 	const allWaits = () => [...[...ciShared.waits.values()].map(ciView), ...[...otherWaits.values()].flat()];
@@ -1936,7 +2893,6 @@ export default function (pi: ExtensionAPI) {
 		}, 0);
 	});
 	pi.on("session_shutdown", (event) => {
-		removeTempDirs();
 		if (ciShared.live?.pi === pi) ciShared.live = undefined;
 		if (event.reason === "reload") return;
 		// Another session or the end of Pi: the waits belong to the conversation that started them.
@@ -2025,38 +2981,10 @@ export default function (pi: ExtensionAPI) {
 			// The tool call's signal, until a background wait takes over with its own.
 			let active: AbortSignal | undefined = signal;
 
-			const call = async (method: "GET" | "POST", path: string, query?: Record<string, unknown>, body?: unknown): Promise<string> => {
-				const url = requestUrl(instance, path, query);
-				const payload: Payload | undefined =
-					body === undefined ? undefined : { contentType: "application/json", data: JSON.stringify(body) };
-				const { response } = await send(instance, token, method, url, payload, active);
-				const text = new TextDecoder().decode(await readLimited(response));
-				if (response.status < 400) return text;
-				const rerun = response.status === 401 && forgetToken(instance);
-				let message = text.trim();
-				try {
-					const parsed = JSON.parse(message) as Json;
-					if (isObject(parsed)) message = ciMessage(parsed.message ?? parsed.error ?? parsed.errors ?? parsed);
-				} catch {
-					// not JSON: the text itself
-				}
-				const hint = [STATUS_HINTS[response.status], rerun ? "Its token command runs again at the next call." : ""];
-				const error = new Error(
-					mask(
-						[`${method} ${url.pathname}: HTTP ${response.status}`, ciOneLine(message, 300), ...hint].filter(Boolean).join(" — "),
-					),
-				);
-				throw Object.assign(error, { status: response.status });
-			};
-			const json = (text: string): Json => {
-				try {
-					return redact(JSON.parse(text) as Json);
-				} catch {
-					throw new Error(`GitLab answered with something other than JSON: ${ciOneLine(mask(text), 200)}`);
-				}
-			};
-			const get = async (path: string, query?: Record<string, unknown>) => json(await call("GET", path, query));
-			const post = async (path: string, body?: unknown) => json(await call("POST", path, undefined, body));
+			const call = async (method: "GET" | "POST", path: string, query?: Record<string, unknown>, body?: unknown): Promise<string> =>
+				apiRequest(instance, token, method, path, query, body, active, mask);
+			const get = async (path: string, query?: Record<string, unknown>) => apiJson(await call("GET", path, query), mask);
+			const post = async (path: string, body?: unknown) => apiJson(await call("POST", path, undefined, body), mask);
 
 			const jobsOf = async (pipeline: number): Promise<JsonObject[]> => {
 				const jobs: JsonObject[] = [];

@@ -21,7 +21,7 @@ names `extensions/`, which holds one file per extension.
 | `compact-tools.ts`          | Cuts each collapsed tool row to four lines; Ctrl+O shows all of it                        | —                                                                |
 | `web-tools.ts`              | Adds `web_fetch`: reads a page locally and lets a small model answer from it              | —                                                                |
 | `openproject.ts`            | Adds `openproject`: reads and changes OpenProject through its API v3, as you              | An OpenProject API token for each instance                       |
-| `gitlab.ts`                 | Adds `gitlab` and `gitlab_pipeline`: GitLab through its API, as you, and its CI in brief  | A GitLab personal access token for each instance                 |
+| `gitlab.ts`                 | Adds `gitlab`, `gitlab_pipeline`, `gitlab_work`: GitLab's API as you, CI and issues brief | A GitLab personal access token for each instance                 |
 | `onepassword.ts`            | Adds the `onepassword_*` tools: 1Password items and `op run`, one approval per session    | The 1Password CLI, signed in through the 1Password app           |
 | `vault.ts`                  | Adds the `vault_*` tools: HashiCorp Vault KV secrets, commands with secrets, OIDC login   | `VAULT_ADDR`; the `vault` CLI for `vault_login`                  |
 | `drupal-org.ts`             | Adds `drupal_org`: drupal.org's web UI as you, in a Chrome profile of its own             | Chrome or Chromium; one sign-in with `/drupal-org login`         |
@@ -923,6 +923,54 @@ out.
 - The guidelines tell the model to play, retry, cancel, and run only what you
   asked for, and a deploy job only on your word for that deploy; `chain`
   plays exactly the jobs given and never picks an environment itself.
+
+### gitlab_work
+
+A third tool for what takes several `gitlab` calls each time: issues from a
+template, merge requests from creation to merge, and what is deployed where.
+`"work": false` in `gitlab.json` leaves it out. The project is given as for
+[gitlab_pipeline](#gitlab_pipeline) — path, id, web URL (an issue's or merge
+request's URL gives its iid too), or the `origin` remote.
+
+- `action` is one of:
+  - `issue_template`: the project's issue templates, or with `template` the
+    content of one, in one call.
+  - `issue_create`: `title` with `description` (or `descriptionFile` for a
+    long text), assigned to you unless `assignee` names others, with
+    `labels`, `due_date`, `milestone_id`, `confidential`. `iteration`
+    defaults to `current`: the current iteration of the project's group
+    hierarchy, set through `issueSetIteration` after the create, since the
+    REST create ignores it. With several current iterations (several
+    cadences) none is set and the candidates are listed; `none` skips it.
+    With `template`, a description that drops or reorders the template's
+    headings is refused before anything is created.
+  - `issue_update`: iteration, labels (all, or `add_labels` and
+    `remove_labels`), `state_event` close or reopen, assignee, title, and
+    description in one call.
+  - `issue_view`: the issue, its notes without system notes (cut after 500
+    characters, newest last), its related merge requests, its linked issues,
+    and its iteration, fetched in parallel; a part that fails shows its error
+    in its section.
+  - `mr_create`: `source_branch` into `target_branch` (default the default
+    branch), assigned to you, removing the source branch after the merge,
+    with the project's squash setting; `reviewer`, `labels`, and `draft` as
+    wanted. An open merge request of that branch is returned instead of an
+    error, and a branch just pushed that GitLab does not see yet is tried
+    again once.
+  - `mr_merge`: waits while GitLab is still checking (no model requests,
+    `timeout` 10 minutes, at most 30), then merges with the head it checked
+    (`sha` guards against new commits). A block — conflicts, open threads, a
+    missing approval, a draft — is reported at once. A pipeline still
+    running is reported too, unless `when_pipeline_succeeds` sets auto-merge
+    or `wait_for_pipeline` waits for it.
+  - `deployed`: per environment the last successful deployment — ref,
+    commit, time, job, user — from the environments API; a project without
+    environments falls back to its latest successful jobs matching `jobs`
+    (a regular expression, default `deploy`). `contains` (a commit, tag, or
+    branch) adds whether each deployed commit contains it.
+- The guidelines tell the model to prefer `gitlab_work` for these tasks, to
+  create and change only what you asked for, and to merge only on your
+  approval of that merge or a standing one.
 
 ## onepassword
 
