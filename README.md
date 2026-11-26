@@ -485,10 +485,10 @@ edit Korrigiert den Import in src/index.ts                +2 −1 · 0.0s
   `{"describe": false}` in `~/.pi/agent/compact-tools.json` turns it off;
   the model then sees the tools unchanged.
 - Without a description the row is the call as the tool draws it, its first
-  line cut to fit. On the right it shows how many lines the result has and how long the
-  tool ran; while it runs, the time counts up. An edit shows the lines it
-  added and removed.
-  Pi's padding lines above and below the row go too; the background keeps
+  line cut to fit. On the right it shows how many lines the result has and
+  how long the tool ran; while it runs, the time counts up. An edit shows the
+  lines it added and removed.
+- Pi's padding lines above and below the row stay, and the background keeps
   Pi's colours for running, done, and failed.
 - A failed tool shows its count in the error colour, a shell command its exit
   code, and below the row the last line of its output.

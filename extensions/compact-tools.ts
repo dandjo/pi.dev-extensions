@@ -19,9 +19,8 @@
  * One line (the default):
  * - A collapsed row is the call as the tool draws it (or its description), its first line cut to fit, and on the
  *   right how many lines the result has and how long the tool ran ("17 lines · 0.4s"; while it runs the time counts
- *   up). Pi's padding lines
- *   above and below the row go too, so that a row takes one line of the screen; its background keeps Pi's colours
- *   for running, done, and failed.
+ *   up). Pi's padding lines above and below the row stay; its background keeps Pi's colours for running, done, and
+ *   failed.
  * - A failed tool (an error result) shows its count in the error colour, a shell command's exit code with it
  *   ("exit 2 · …"), and below the row the last line of its output, so that the reason shows without expanding.
  * - Expanded, the row is Pi's, in Pi's padding.
@@ -318,7 +317,7 @@ function summary(one: OneLine): string {
 
 /**
  * The whole row in the one-line form, in the frame Pi would give it: collapsed the call's first line with the summary
- * on the right (and a failed tool's last output line below), without padding lines; expanded Pi's row with them.
+ * on the right (and a failed tool's last output line below), expanded Pi's row; either way with Pi's padding lines.
  */
 function frame(row: Row, one: OneLine, width: number): readonly string[] {
 	if (one.frame?.width === width) return one.frame.lines;
@@ -362,6 +361,8 @@ function frame(row: Row, one: OneLine, width: number): readonly string[] {
 		lines = [paint(left + " ".repeat(gap) + right)];
 		if (one.error && one.errorLine) lines.push(paint(truncateToWidth(theme.fg("error", one.errorLine), inner, "…")));
 	}
+	// Pi's padding lines above and below, collapsed too.
+	if (!row.expanded) lines = [paint(""), ...lines, paint("")];
 	one.frame = { width, lines };
 	return lines;
 }
@@ -528,7 +529,7 @@ function compact(tool: string, base: Renderers): Renderers {
 	return {
 		...base,
 		// Pi's box for every tool, edit included, so that a cut row keeps Pi's padding and background; the one-line form
-		// draws that frame itself, without the padding lines.
+		// draws that frame itself, with Pi's padding lines.
 		renderShell: oneLine ? "self" : "default",
 
 		renderCall(args: unknown, theme: Theme, context: RenderContext): Component {
