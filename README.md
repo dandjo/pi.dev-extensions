@@ -805,6 +805,18 @@ written with your permissions.
 - Output over 50 KB is cut and the full response saved to a temp file. Binary
   content, such as artifacts and archives, is saved to a temp file (mode 600)
   up to 100 MB. The temp files of a session are removed when it ends.
+- `path` also takes a web URL of an instance, read as its API path: a project,
+  a merge request, an issue or work item, a pipeline, a job, a commit, a file
+  (`/-/blob/<ref>/<file>`, `/-/raw/…`), or a tree. What follows the number
+  (`/diffs`), the query, and the fragment are dropped; the URL picks its
+  instance. A ref with a slash in it (`feature/x`) is cut at the slash, and
+  other pages of the instance are refused with the forms known.
+- `overview: true` with a GET of one merge request returns in one result the
+  merge request, its approvals, its latest pipelines, its open discussions
+  (unresolved threads and comments, without system notes, bodies cut after
+  500 characters, with `file:line` of a diff note) and its changed files as
+  paths, without the diffs. The parts are fetched in parallel; a part that
+  fails shows its error in its section.
 - GraphQL is there for what REST lacks: an issue's iteration, for one, can
   only be set through `issueSetIteration`. A GraphQL answer with `errors`
   counts as failed. The tool description names `/api/graphql` as the

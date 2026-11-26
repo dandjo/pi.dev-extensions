@@ -30,6 +30,9 @@
  *   whatever the field or the status, and only the paths are shown of the call.
  * - Requests go through the proxy Pi uses for its own HTTP (its httpProxy setting, applied as HTTPS_PROXY and
  *   HTTP_PROXY, and NO_PROXY): https through a CONNECT tunnel, as curl and undici do.
+ * - path also takes a web URL of an instance (a project, merge request, issue, pipeline, job, commit, file, or tree
+ *   page), read as its API path (webApiPath). overview: true with a GET of one merge request returns, in one result, the
+ *   merge request, its approvals, latest pipelines, open discussions, and changed files without diffs (mrOverview).
  * - A second tool, gitlab_pipeline, shows, waits for, and drives CI pipelines and jobs in a few lines, with the same
  *   instances, tokens, and rules; "pipelines": false in gitlab.json leaves it out. Its section below says more.
  */
@@ -164,6 +167,71 @@ function requestUrl(instance: Instance, target: string, query: Record<string, un
 		appendParam(url.searchParams, key, value);
 	}
 	return url;
+}
+
+/**
+ * The project's full path and the page below it (what follows /-/, e.g. merge_requests/12/diffs) of a web URL of an
+ * instance, both without slashes at their ends and decoded, the project without .git.
+ */
+function webPage(instance: Instance, url: URL): { project: string; page: string } {
+	const rest = decodeURIComponent(url.pathname.slice(instance.basePath.length)).replace(/^\/+|\/+$/g, "");
+	// Where /-/ starts in /rest/, one ahead of rest: a page of the instance itself (/-/profile) has no project.
+	const cut = `/${rest}/`.indexOf("/-/");
+	const project = (cut < 0 ? rest : rest.slice(0, Math.max(0, cut - 1))).replace(/\.git$/, "");
+	return { project, page: cut < 0 ? "" : rest.slice(cut + 2).replace(/^\/+/, "") };
+}
+
+/** The web pages webApiPath translates, for its error. */
+const WEB_FORMS =
+	"the project (https://host/group/project) and below it /-/merge_requests/<iid>, /-/issues/<iid>, " +
+	"/-/work_items/<iid>, /-/pipelines/<id>, /-/jobs/<id>, /-/commit/<sha>, /-/blob/<ref>/<file>, /-/raw/<ref>/<file>, " +
+	"and /-/tree/<ref>[/<directory>]";
+
+/**
+ * The instance and the API path of a web URL of a configured instance, for path of the gitlab tool: a project, a merge
+ * request, an issue or work item, a pipeline, a job, a commit, a file (blob, raw), or a tree; what follows the number
+ * (/diffs), the query, and the fragment are dropped. undefined for anything else: a path, an API URL, a URL of another
+ * host. A web URL of an instance that names no such page throws with the forms known. The ref of blob, raw, and tree
+ * is the segment after them: a ref with a slash in it (feature/x) is cut there, and the rest goes to the file path.
+ */
+function webApiPath(instances: Instance[], target: string): { instance: Instance; path: string } | undefined {
+	const trimmed = target.trim();
+	if (!/^https?:\/\//i.test(trimmed)) return undefined;
+	let url: URL;
+	try {
+		url = new URL(trimmed);
+	} catch {
+		return undefined;
+	}
+	const instance = instances.find((candidate) => url.origin === candidate.origin && within(url.pathname, candidate.basePath));
+	if (!instance || owns(instance, url)) return undefined;
+	const unsupported = () =>
+		new Error(
+			`${trimmed} is a web page of ${instance.name} without an API path known here; give an API path, or one of ` +
+				`the web URLs ${WEB_FORMS}`,
+		);
+	const { project, page } = webPage(instance, url);
+	// A project lies in a group or a user's namespace: one segment alone is a group, a user, or a page of the instance.
+	if (!project.includes("/")) throw unsupported();
+	const P = `/projects/${encodeURIComponent(project)}`;
+	if (!page) return { instance, path: P };
+	const [kind, first = "", ...rest] = page.split("/");
+	const file = rest.join("/");
+	const ref = encodeURIComponent(first);
+	if (/^\d+$/.test(first)) {
+		if (kind === "merge_requests" || kind === "issues" || kind === "pipelines" || kind === "jobs") {
+			return { instance, path: `${P}/${kind}/${first}` };
+		}
+		if (kind === "work_items") return { instance, path: `${P}/issues/${first}` };
+	}
+	if (kind === "commit" && /^[0-9a-f]{7,64}$/i.test(first)) return { instance, path: `${P}/repository/commits/${first}` };
+	if ((kind === "blob" || kind === "raw") && first && file) {
+		return { instance, path: `${P}/repository/files/${encodeURIComponent(file)}/raw?ref=${ref}` };
+	}
+	if (kind === "tree" && first) {
+		return { instance, path: `${P}/repository/tree?ref=${ref}${file ? `&path=${encodeURIComponent(file)}` : ""}` };
+	}
+	throw unsupported();
 }
 
 /** A request body and its content type. */
@@ -546,6 +614,11 @@ function userText(value: JsonObject): string | undefined {
 	return typeof value.name === "string" && value.name ? `${value.name} (${marks.join(", ")})` : marks.join(", ");
 }
 
+/** A text cut to max characters, with the number of those left out. */
+function cut(text: string, max: number): string {
+	return text.length > max ? `${text.slice(0, max)} … [${text.length - max} more characters]` : text;
+}
+
 /** Where an object sits: the response itself, an item of a top-level list, or anywhere else. */
 type Place = "top" | "element" | "inner";
 
@@ -566,7 +639,7 @@ function fold(value: Json, place: Place): Json | undefined {
 	for (const [key, item] of Object.entries(value)) {
 		if (key === "avatar_url" || (key === "_links" && place === "element")) continue;
 		if (key === "description" && place === "element" && typeof item === "string" && item.length > LIST_DESCRIPTION_CHARS) {
-			out[key] = `${item.slice(0, LIST_DESCRIPTION_CHARS)} … [${item.length - LIST_DESCRIPTION_CHARS} more characters]`;
+			out[key] = cut(item, LIST_DESCRIPTION_CHARS);
 			continue;
 		}
 		const folded = fold(item, "inner");
@@ -637,7 +710,7 @@ const BaseParams = {
 	method: Type.Optional(StringEnum(["GET", "POST", "PUT", "DELETE"] as const, { description: "HTTP method; default GET" })),
 	path: Type.String({
 		description:
-			"Path below /api/v4, e.g. /projects/42/issues/7, an href from an earlier response, or /api/graphql, the endpoint of the GraphQL API; may carry a query string",
+			"Path below /api/v4, e.g. /projects/42/issues/7, an href from an earlier response, /api/graphql, the endpoint of the GraphQL API, or a web URL of the instance (a project, merge request, issue, pipeline, job, commit, file, or tree page), read as its API path; may carry a query string",
 	}),
 	query: Type.Optional(
 		Type.Object({}, {
@@ -668,7 +741,169 @@ const BaseParams = {
 	raw: Type.Optional(
 		Type.Boolean({ description: "Return REST JSON unfolded and job logs with colour codes; secrets stay masked; default false" }),
 	),
+	overview: Type.Optional(
+		Type.Boolean({
+			description:
+				"Only with a GET of one merge request (/projects/{id}/merge_requests/{iid} or its web URL): the merge request together with its approvals, latest pipelines, open discussions (unresolved threads and comments, bodies cut), and changed files (paths only, no diff), in one result; default false",
+		}),
+	),
 };
+
+/** A merge request's own path below the REST API. */
+const MR_PATH = /^\/projects\/[^/]+\/merge_requests\/\d+$/;
+/** The overview of a merge request cuts the body of a note to this many characters. */
+const OVERVIEW_NOTE_CHARS = 500;
+const OVERVIEW_PIPELINES = 20;
+/** The overview reads the first page of discussions and changed files, this many to a page. */
+const OVERVIEW_PER_PAGE = 100;
+/** The fields of a merge request's approvals the overview shows. */
+const OVERVIEW_APPROVAL_KEYS = [
+	"approved",
+	"approvals_required",
+	"approvals_left",
+	"approved_by",
+	"approval_rules_left",
+	"user_has_approved",
+	"user_can_approve",
+];
+
+/** A part of the overview: its JSON, redacted, and its pagination line. */
+interface OverviewPart {
+	json: Json;
+	page?: string;
+	status: string;
+}
+
+/** A diff position as file:line, the new side first; the file alone without a line. */
+function positionText(position: JsonObject): string | undefined {
+	const file = ciText(position.new_path) || ciText(position.old_path);
+	const line = ciText(position.new_line) || ciText(position.old_line);
+	return file ? (line ? `${file}:${line}` : file) : undefined;
+}
+
+/**
+ * The overview of a merge request (overview: true), its parts fetched in parallel: the merge request, folded unless
+ * raw; its approvals; its latest pipelines; its open discussions, that is the threads that are not resolved, without
+ * system notes; and its changed files without the diffs. A part that fails shows its error in its section; the merge
+ * request itself failing fails the call.
+ */
+async function mrOverview(
+	instance: Instance,
+	token: string,
+	target: URL,
+	raw: boolean,
+	absolute: boolean,
+	signal: AbortSignal | undefined,
+): Promise<{ head: string; body: string }> {
+	const part = async (suffix: string, query?: Record<string, unknown>): Promise<OverviewPart> => {
+		const url = suffix ? requestUrl(instance, target.pathname + suffix, query) : target;
+		const { response } = await send(instance, token, "GET", url, undefined, signal);
+		const text = new TextDecoder().decode(await readLimited(response));
+		let json: Json | undefined;
+		try {
+			json = redact(JSON.parse(text) as Json);
+		} catch {
+			// not JSON: an error page, reported below
+		}
+		const status = `HTTP ${response.status}${response.statusText ? ` ${response.statusText}` : ""}`;
+		if (response.status >= 400 || json === undefined) {
+			const rerun = response.status === 401 && forgetToken(instance);
+			const message = isObject(json) ? ciMessage(json.message ?? json.error ?? json) : text;
+			const hint = [STATUS_HINTS[response.status], rerun ? "Its token command runs again at the next call." : ""];
+			const what = `GET ${url.pathname}: ${status}`;
+			throw new Error([what, ciOneLine(message, 300), ...hint].filter(Boolean).join(" — "));
+		}
+		return { json, page: pagination(response, absolute), status };
+	};
+	const [mr, approvals, pipelines, discussions, diffs] = await Promise.allSettled([
+		part(""),
+		part("/approvals"),
+		part("/pipelines", { per_page: OVERVIEW_PIPELINES }),
+		part("/discussions", { per_page: OVERVIEW_PER_PAGE }),
+		part("/diffs", { per_page: OVERVIEW_PER_PAGE }),
+	]);
+	signal?.throwIfAborted();
+	if (mr.status === "rejected") throw mr.reason;
+
+	const list = (json: Json) => (Array.isArray(json) ? json.filter(isObject) : []);
+	const sections = [`Merge request\n${JSON.stringify(raw ? mr.value.json : (fold(mr.value.json, "top") ?? null), null, 1)}`];
+	const add = (
+		title: string,
+		result: PromiseSettledResult<OverviewPart>,
+		render: (json: Json) => { title?: string; value: Json | undefined },
+	) => {
+		if (result.status === "rejected") {
+			const reason: unknown = result.reason;
+			sections.push(`${title}\nError: ${reason instanceof Error ? reason.message : String(reason)}`);
+			return;
+		}
+		const shown = render(result.value.json);
+		// Only a part with more pages names its pagination: the first is all the overview shows.
+		const page = result.value.page?.includes("; next page: ") ? result.value.page : undefined;
+		const lines = [shown.title ?? title, page, JSON.stringify(shown.value ?? null, null, 1)];
+		sections.push(lines.filter(Boolean).join("\n"));
+	};
+	add("Approvals", approvals, (json) => {
+		if (!isObject(json)) return { value: json };
+		const picked: JsonObject = {};
+		for (const key of OVERVIEW_APPROVAL_KEYS) if (json[key] !== undefined) picked[key] = json[key];
+		// approved_by holds {user: {…}} each: the user alone, which fold turns into its line.
+		if (Array.isArray(json.approved_by)) {
+			picked.approved_by = json.approved_by.map((item) => (isObject(item) && isObject(item.user) ? item.user : item));
+		}
+		return { value: fold(picked, "top") };
+	});
+	add("Pipelines", pipelines, (json) => ({
+		value: fold(
+			list(json).map((pipeline) => ({
+				id: pipeline.id ?? null,
+				status: pipeline.status ?? null,
+				ref: pipeline.ref ?? null,
+				sha: ciText(pipeline.sha).slice(0, 8),
+				created_at: pipeline.created_at ?? null,
+				web_url: pipeline.web_url ?? null,
+			})),
+			"top",
+		),
+	}));
+	add("Discussions", discussions, (json) => {
+		const threads = list(json);
+		const open = threads.flatMap((thread): Json[] => {
+			const notes = list(thread.notes ?? null).filter((note) => note.system !== true);
+			const resolvable = notes.some((note) => note.resolvable === true);
+			const resolved = resolvable && notes.every((note) => note.resolvable !== true || note.resolved === true);
+			if (notes.length === 0 || resolved) return [];
+			const position = notes.map((note) => note.position).find(isObject);
+			return [
+				{
+					id: thread.id ?? null,
+					resolvable,
+					resolved,
+					position: (position && positionText(position)) ?? null,
+					notes: notes.map((note) => ({
+						author: note.author ?? null,
+						created_at: note.created_at ?? null,
+						body: cut(ciText(note.body), OVERVIEW_NOTE_CHARS),
+					})),
+				},
+			];
+		});
+		const title = `Discussions: ${open.length} open of ${threads.length} (resolved threads and system notes left out)`;
+		return { title, value: fold(open, "top") };
+	});
+	add("Changed files", diffs, (json) => {
+		const files = list(json).map((diff) => {
+			const from = ciText(diff.old_path);
+			const to = ciText(diff.new_path);
+			if (diff.new_file === true) return `added ${to}`;
+			if (diff.deleted_file === true) return `deleted ${from}`;
+			if (diff.renamed_file === true) return `renamed ${from} → ${to}`;
+			return `modified ${to}`;
+		});
+		return { title: `Changed files: ${files.length}`, value: files };
+	});
+	return { head: mr.value.status, body: sections.join("\n\n") };
+}
 
 /** The parameters; host only with several instances, as one of their names. */
 function parameters(instances: Instance[]) {
@@ -1097,10 +1332,8 @@ function ciTarget(instances: Instance[], host: string | undefined, project: stri
 		const instance =
 			named ?? instances.find((candidate) => url.origin === candidate.origin && within(url.pathname, candidate.basePath));
 		if (!instance || url.origin !== instance.origin) throw new Error(`${given} is not on a configured instance (${names})`);
-		const rest = decodeURIComponent(url.pathname.slice(instance.basePath.length)).replace(/^\/+|\/+$/g, "");
-		const [path, page = ""] = rest.split("/-/", 2);
+		const { project: name, page } = webPage(instance, url);
 		const item = /^(pipelines|jobs|merge_requests)\/(\d+)/.exec(page);
-		const name = path.replace(/\.git$/, "");
 		if (!name) throw new Error(`${given} names no project`);
 		const id = item ? Number(item[2]) : undefined;
 		return {
@@ -1457,8 +1690,12 @@ export default function (pi: ExtensionAPI) {
 			"/approvals, /pipelines), /projects/{id}/pipelines, /projects/{id}/pipelines/{id}/jobs, /projects/{id}/jobs/" +
 			"{job_id}/trace (the job log), /projects/{id}/repository/tree, /projects/{id}/repository/files/{URL-encoded " +
 			"file path}/raw?ref=…, /projects/{id}/repository/branches, /projects/{id}/repository/compare, /groups/{id}/" +
-			"issues, /search, /user. Lists take per_page (up to 100) and page; a line above the body gives the page, " +
-			"the total, and the href of the next page. The endpoint of the GraphQL API is /api/graphql, not below /api/v4; " +
+			"issues, /search, /user. path also takes a web URL of the instance, read as its API path: a project, a merge " +
+			"request, issue, or work item, a pipeline, a job, a commit, a file (/-/blob/<ref>/<file>, a ref without " +
+			"slashes), or a tree. overview: true with a GET of one merge request adds its approvals, latest pipelines, " +
+			"open discussions, and changed files (paths only) in one result. Lists take per_page (up to 100) and page; a " +
+			"line above the body gives the page, the total, and the href of the next page. The endpoint of the GraphQL " +
+			"API is /api/graphql, not below /api/v4; " +
 			"it takes POST {\"query\": …, \"variables\": …}, for what " +
 			"REST lacks, such as setting an issue's iteration (issueSetIteration). REST JSON is folded: empty fields, " +
 			"avatar URLs, and the _links of list items are left out, a user inside another resource or a list reads " +
@@ -1492,7 +1729,12 @@ export default function (pi: ExtensionAPI) {
 		annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
 
 		async execute(_id, params, signal) {
-			const instance = pickInstance(instances, params.host as string | undefined, params.path, owns, CONFIG_FILE);
+			const host = params.host as string | undefined;
+			const web = webApiPath(instances, params.path);
+			const instance = web?.instance ?? pickInstance(instances, host, params.path, owns, CONFIG_FILE);
+			if (web && host?.trim() && pickInstance(instances, host, "", owns, CONFIG_FILE) !== web.instance) {
+				throw new Error(`${params.path.trim()} is a page of ${web.instance.name}, not of host ${host}`);
+			}
 			const method = (params.method ?? "GET") as "GET" | "POST" | "PUT" | "DELETE";
 			if (params.body !== undefined && (method === "GET" || method === "DELETE")) {
 				throw new Error(`a ${method} request takes no body; send its parameters as query`);
@@ -1503,8 +1745,14 @@ export default function (pi: ExtensionAPI) {
 			if (fieldFiles !== undefined && method !== "POST" && method !== "PUT") {
 				throw new Error(`fieldFiles go in the body of POST or PUT, not of a ${method} request`);
 			}
-			const target = requestUrl(instance, params.path, params.query as Record<string, unknown> | undefined);
+			const target = requestUrl(instance, web?.path ?? params.path, params.query as Record<string, unknown> | undefined);
 			if (files !== undefined && target.pathname === instance.graphql) throw new Error("files cannot go to /api/graphql");
+			const overview = params.overview === true;
+			if (overview && (method !== "GET" || !MR_PATH.test(target.pathname.slice(instance.api.length)))) {
+				throw new Error(
+					"overview takes a GET of one merge request: /projects/{id}/merge_requests/{iid}, or its web URL …/-/merge_requests/{iid}",
+				);
+			}
 			const fromFiles = fieldFiles !== undefined ? readFieldFiles(fieldFiles) : {};
 			const sent =
 				Object.keys(fromFiles).length > 0 ? { ...(params.body as Record<string, unknown> | undefined), ...fromFiles } : params.body;
@@ -1520,6 +1768,21 @@ export default function (pi: ExtensionAPI) {
 				`Create a personal access token in ${instance.base} under User settings → Personal access tokens (scope api, or read_api to read only)`,
 				signal,
 			);
+			if (overview) {
+				const mask = masker([token]);
+				const absolute = instance !== instances[0];
+				const shown = await mrOverview(instance, token, target, params.raw === true, absolute, signal).catch((error: unknown) => {
+					throw new Error(mask(error instanceof Error ? error.message : String(error)));
+				});
+				const details = {
+					host: instance.name,
+					method,
+					path: target.pathname + target.search,
+					status: 200,
+					file: undefined as string | undefined,
+				};
+				return { content: [{ type: "text", text: limited(mask(shown.head), mask(shown.body), false) }], details, isError: false };
+			}
 			const { response, url } = await send(instance, token, method, target, payload, signal);
 			const mask = masker([token, ...Object.values(fromFiles)]);
 			const rerun = response.status === 401 && forgetToken(instance);
