@@ -1233,7 +1233,7 @@ bar shows which sessions are busy. The spinners of all tabs turn in step.
 - Background waits of [wait](#wait) and [`gitlab_pipeline`](#gitlab_pipeline),
   a `chain` among them, check without the model while the session is idle:
   while one runs and nothing works, the spinner turns slowly instead, a frame
-  every 400 ms, in step with the other tabs that wait. A repeating wait (a
+  every 300 ms, in step with the other tabs that wait. A repeating wait (a
   keepalive) does not count, and an open question stops it as well.
 - A window with several panes shows the pane whose Pi works: the active
   pane's while it works, else the first other pane's that works, else the

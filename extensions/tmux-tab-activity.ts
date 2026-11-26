@@ -13,7 +13,7 @@
  * whose subagents all wait (for an instruction, an answer, or a usage limit).
  *
  * Background waits (wait.ts, gitlab.ts, "background-waits:state") run without the model, so they are not work: while
- * one runs and nothing works, the spinner turns slowly instead, a frame every 400 ms, in step with the other tabs that
+ * one runs and nothing works, the spinner turns slowly instead, a frame every 300 ms, in step with the other tabs that
  * wait. A repeating wait (repeat: true, a keepalive) does not count, as it runs for hours; an open question stops the
  * slow spinner as it stops the fast one.
  *
@@ -71,7 +71,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 const FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const FRAME_MS = 80;
 /** A frame of the slow spinner, which turns while only background waits run. */
-const WAIT_FRAME_MS = 400;
+const WAIT_FRAME_MS = 300;
 /** Pi's title starts with this; a Pi build with a name of its own (piConfig.name) is not covered. */
 const APP_TITLE = "π";
 /** Marks a working session's title; the spinner's frame follows, which the tab formats put in place of the π. */
