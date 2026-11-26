@@ -3,16 +3,18 @@
  * words the model gives with the call, and leaves everything else as Pi draws it.
  *
  * Descriptions (the default; {"describe": false} in ~/.pi/agent/compact-tools.json turns them off):
- * - Each tool the model is offered gets a parameter "activity": what the call does, a few words in the language of
- *   the conversation. It is added to the declarations of each request (context_with_system), first among the
- *   parameters and required, and taken out of the arguments the tool runs with (tool_call), so no tool ever sees it;
- *   the stored call keeps it, as the provider sent it.
+ * - Each tool the model is offered gets a parameter "activity": what the call does and what for, a sentence in the
+ *   language of the conversation. It is added to the declarations of each request (context_with_system), first among
+ *   the parameters and required, and taken out of the arguments the tool runs with (tool_call), so no tool ever sees
+ *   it; the stored call keeps it, as the provider sent it.
  * - A collapsed row then shows the tool's name in bold and that activity ("bash Zeigt die geänderten Dateien")
- *   instead of the raw call; a call without one (an older one, or a tool left out) shows the call as before.
- *   Expanded, the row shows the raw call.
+ *   instead of the raw call, wrapped over as many lines as it needs, indented below its first word, with the
+ *   summary on the right of the first line; a call without one (an older one, or a tool left out) shows the call as
+ *   before. Expanded, the row shows the raw call.
  * - Left out: a tool whose parameters are not an object, allow no other properties (additionalProperties false:
  *   Pi would refuse the call), or have an "activity" of their own, and the tools in UNCUT.
- * - The rows have one line then; "lines" applies only without descriptions.
+ * - The rows are as long as their description then (plus a failed tool's last line); "lines" applies only without
+ *   descriptions.
  *
  * One line (the default):
  * - A collapsed row is the call as the tool draws it (or its description), its first line cut to fit, and on the
@@ -44,7 +46,7 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { type ExtensionAPI, getAgentDir, type Theme } from "@earendil-works/pi-coding-agent";
-import { type Component, Container, Text, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { type Component, Container, Text, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 
 const CONFIG_FILE = path.join(getAgentDir(), "compact-tools.json");
 /** Lines of content a collapsed row shows, the line with the number of hidden lines included; 1 is the one-line row. */
@@ -56,8 +58,9 @@ const ACTIVITY = "activity";
 const ACTIVITY_SCHEMA = {
 	type: "string",
 	description:
-		"What this call does, shown to the user in place of the raw call: a short phrase of 2 to 6 words in the " +
-		'language of the conversation, without the tool\'s name, e.g. "Liest die Konfiguration".',
+		"What this call does and, where it is not obvious, what for, shown to the user in place of the raw call: one " +
+		"clear sentence of about 5 to 20 words in the language of the conversation, without the tool's name, naming " +
+		'the file, command, or thing it is about, e.g. "Liest die Nginx-Konfiguration, um den Port des Dienstes zu finden".',
 };
 /** A running tool's row is redrawn this often for its time; a row not drawn for STALE_MS stops it. */
 const TICK_MS = 1_000;
@@ -146,6 +149,8 @@ interface Row {
 	layout?: Layout;
 	/** The one-line form: the row draws its own frame (renderShell "self"), and the call's part draws all of it. */
 	oneLine?: OneLine;
+	/** The collapsed call is the description (a Described), wrapped instead of cut. */
+	described?: boolean;
 }
 
 /** What the one-line form of a row needs besides the drawn parts. */
@@ -330,6 +335,18 @@ function frame(row: Row, one: OneLine, width: number): readonly string[] {
 	if (row.expanded) {
 		const { call, result } = layout(row, inner);
 		lines = [paint(""), ...[...call, ...result].map(paint), paint("")];
+	} else if (row.described) {
+		// The description wraps beside the summary, which stays on the right of the first line.
+		let right = summary(one);
+		if (visibleWidth(right) > inner - 2) right = truncateToWidth(right, Math.max(0, inner - 2), "");
+		const room = Math.max(1, inner - (right ? visibleWidth(right) + 2 : 0));
+		const text = linesOf(row.call.collapsed, room, false).filter((line) => !isBlank(line));
+		lines = text.map((line, index) => {
+			const left = truncateToWidth(line.replace(/\s+((?:\x1b\[[0-9;]*m)*)$/, "$1"), room, "…");
+			const end = index === 0 ? right : "";
+			return paint(left + " ".repeat(Math.max(end ? 2 : 0, inner - visibleWidth(left) - visibleWidth(end))) + end);
+		});
+		if (one.error && one.errorLine) lines.push(paint(truncateToWidth(theme.fg("error", one.errorLine), inner, "…")));
 	} else {
 		// Drawn wide, so that a long command stays on its first line and is cut here instead of wrapped.
 		const call = linesOf(row.call.collapsed, Math.max(inner, WIDE), row.ownShell).filter((line) => !isBlank(line));
@@ -412,11 +429,27 @@ function withActivity(tool: string, parameters: any): any {
 	};
 }
 
-/** The description of a call: the tool's name in bold and the activity the model gave, or none without one. */
+/** A call's description: the tool's name in bold, then the activity, wrapped and indented below its first word. */
+class Described implements Component {
+	constructor(
+		readonly name: string,
+		readonly activity: string,
+	) {}
+	render(width: number): readonly string[] {
+		const indent = visibleWidth(this.name) + 1;
+		// Too narrow for the indent: the activity goes below the name.
+		if (width - indent < 12) return [this.name, ...wrapTextWithAnsi(this.activity, Math.max(1, width))];
+		const wrapped = wrapTextWithAnsi(this.activity, width - indent);
+		return wrapped.map((line, index) => (index === 0 ? `${this.name} ` : " ".repeat(indent)) + line);
+	}
+	invalidate(): void {}
+}
+
+/** The description of a call from the activity the model gave, or none without one. */
 function describedCall(tool: string, args: unknown, theme: Theme): Component | undefined {
 	const activity = args && typeof args === "object" ? (args as Record<string, unknown>)[ACTIVITY] : undefined;
 	if (typeof activity !== "string" || !activity.trim()) return undefined;
-	return new Text(`${theme.fg("toolTitle", theme.bold(tool))} ${activity.trim().replace(/\s+/g, " ")}`, 0, 0);
+	return new Described(theme.fg("toolTitle", theme.bold(tool)), activity.trim().replace(/\s+/g, " "));
 }
 
 /** The call as Pi draws it for a tool without a call renderer: the name and the arguments. */
@@ -508,6 +541,7 @@ function compact(tool: string, base: Renderers): Renderers {
 			}
 			draw(row.call, context, context.expanded, (inner, expanded) => {
 				const described = DESCRIBE && !expanded ? describedCall(tool, args, theme) : undefined;
+				if (!expanded) row.described = described !== undefined;
 				if (described) return described;
 				try {
 					if (base.renderCall) return base.renderCall(args, theme, inner);

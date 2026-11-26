@@ -18,7 +18,7 @@ names `extensions/`, which holds one file per extension.
 | Extension                   | What it does                                                                              | Needs                                                            |
 | :-------------------------- | :---------------------------------------------------------------------------------------- | :--------------------------------------------------------------- |
 | `statusline.ts`             | Replaces Pi's footer with a Claude Code style status line, for any provider               | —                                                                |
-| `compact-tools.ts`          | One line per tool row: the tool and what the call does, its count and time; Ctrl+O all    | —                                                                |
+| `compact-tools.ts`          | Tool rows in short: the tool and what the call does, its count and time; Ctrl+O all       | —                                                                |
 | `web-tools.ts`              | Adds `web_fetch`: reads a page locally and lets a small model answer from it              | —                                                                |
 | `openproject.ts`            | Adds `openproject`: reads and changes OpenProject through its API v3, as you              | An OpenProject API token for each instance                       |
 | `gitlab.ts`                 | Adds `gitlab`, `gitlab_pipeline`, `gitlab_work`: GitLab's API as you, CI and issues brief | A GitLab personal access token for each instance                 |
@@ -457,31 +457,35 @@ time of the next attempt.
 
 ## compact-tools
 
-Cuts each collapsed tool row to one line, describes the call in words the
-model gives with it, and leaves everything else as Pi draws it:
+Describes each collapsed tool row in words the model gives with the call,
+cuts it short, and leaves everything else as Pi draws it:
 
 ```
-read Liest die Konfiguration                              30 lines · 0.0s
-bash Prüft, ob das Verzeichnis existiert        exit 2 · 1 line · 0.0s
+read Liest die Nginx-Konfiguration, um den Port        30 lines · 0.0s
+     des Dienstes zu finden
+bash Prüft, ob das Log-Verzeichnis existiert   exit 2 · 1 line · 0.0s
 ls: cannot access '/nonexistent': No such file or directory
-edit Korrigiert den Import                                 +2 −1 · 0.0s
+edit Korrigiert den Import in src/index.ts                +2 −1 · 0.0s
 ```
 
 - Every tool the model is offered gets a parameter `activity`: what the call
-  does, in a few words in the language of the conversation. It is added to
+  does and, where that is not obvious, what for, in a sentence in the
+  language of the conversation. It is added to
   the tool declarations of each request, first and required, and taken out
   again before the tool runs, so no tool sees it; the stored call keeps it.
   The row shows the tool's name in bold and that text instead of the raw
-  call; Ctrl+O shows the call itself.
+  call, wrapped over as many lines as it needs; the count and time stay on
+  the right of the first line. Ctrl+O shows the call itself.
 - Left out are tools whose parameters allow no other properties
   (`additionalProperties: false`, Pi would refuse the call) or have an
   `activity` of their own, and `codemode`. Their rows, and calls without an
   activity, show the call as before.
-- It costs a few tokens per call and about 60 per tool in the declarations.
+- It costs a sentence per call and about 90 tokens per tool in the
+  declarations.
   `{"describe": false}` in `~/.pi/agent/compact-tools.json` turns it off;
   the model then sees the tools unchanged.
-- Otherwise the row is the call as the tool draws it, its first line cut to
-  fit. On the right it shows how many lines the result has and how long the
+- Without a description the row is the call as the tool draws it, its first
+  line cut to fit. On the right it shows how many lines the result has and how long the
   tool ran; while it runs, the time counts up. An edit shows the lines it
   added and removed.
   Pi's padding lines above and below the row go too; the background keeps
