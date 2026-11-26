@@ -6,16 +6,17 @@
  *   finished message.
  * - No tools: the model answers from the conversation (sent as text, tool results cut at 20,000 characters, the
  *   newest 600,000 characters in all) and the earlier side questions, the newest 20 of which are replayed.
- * - The answer streams into a box above the prompt, which takes the keyboard until it closes; the conversation stays
- *   visible and keeps running. Space, Enter, or Esc closes it; Up/Down/PgUp/PgDn scroll; Shift+Left/Right,
- *   [ and ], or Tab/Shift+Tab step through earlier answers; c copies the answer as Markdown; x clears the earlier
- *   exchanges. /btw without a question reopens the overlay. The thread lives in memory until Pi exits.
+ * - The answer streams into a box above the prompt (through claude-bridge, which runs the side question as a query of
+ *   its own, it arrives whole), which takes the keyboard until it closes; the conversation stays visible and keeps
+ *   running. Space, Enter, or Esc closes it; Up/Down/PgUp/PgDn scroll; Shift+Left/Right, [ and ], or Tab/Shift+Tab
+ *   step through earlier answers; c copies the answer as Markdown; x clears the earlier exchanges. /btw without a
+ *   question reopens the overlay. The thread lives in memory until Pi exits.
  * - Side questions from the Claude app (claude-remote-control.ts) come as "btw:ask" on the event bus, with the app's
  *   own earlier side questions; they are answered the same way, and neither they nor their answers join the thread
  *   of the terminal.
  */
 
-import { type Api, type Message, type Model, uuidv7 } from "@earendil-works/pi-ai";
+import { type Message, uuidv7 } from "@earendil-works/pi-ai";
 import {
 	buildSessionContext,
 	convertToLlm,
@@ -84,36 +85,6 @@ function scrollKey(data: string, offset: number, total: number, rows: number): n
 function viewport(lines: string[], offset: number, rows: number): string[] {
 	const visible = lines.slice(offset, offset + rows);
 	return lines.length > rows ? [...visible, ...Array(Math.max(0, rows - visible.length)).fill("")] : visible;
-}
-
-/**
- * Small-model calls for side tasks (session titles, page answers), whatever provider and model are in use.
- *
- * The model: among the models of the current model's provider that have working credentials and read text, the
- * one with the lowest list price (input + output per million tokens), if it is cheaper than the current model;
- * otherwise the current model. So a side task never moves to another provider or account. On providers that serve
- * several makers' models with the maker in the id ("anthropic/claude-…" on OpenRouter, "us.anthropic.claude-…" on
- * Bedrock), only models of the current maker qualify. A current model without a price (local, unknown) is kept.
- * PI_SMALL_MODEL=<provider>/<model-id> overrides the choice.
- *
- * session-title.ts, web-tools.ts carry a copy of this block, or of a part of it: change them alike.
- */
-/**
- * Side requests to the claude-sdk provider run one at a time, across every extension that loads this file: it runs one
- * process per request and may otherwise close the conversation's own process while it waits for tool results
- * (pi-claude-subscription keeps at most three Claude Code processes and closes the least recently used one outside a
- * call). Other providers take them at once.
- */
-const gate: { tail: Promise<unknown> } = ((globalThis as Record<symbol, unknown>)[Symbol.for("pi.small-model.gate")] ??= {
-	tail: Promise.resolve(),
-}) as { tail: Promise<unknown> };
-
-/** Runs `run` after every side request to claude-sdk queued before it has finished; to other providers at once. */
-function oneAtATime<T>(model: Model<Api>, run: () => Promise<T>): Promise<T> {
-	if (model.provider !== "claude-sdk") return run();
-	const result = gate.tail.then(run, run);
-	gate.tail = result.catch(() => {});
-	return result;
 }
 
 /**
@@ -207,25 +178,26 @@ export default function (pi: ExtensionAPI) {
 			]
 				.filter(Boolean)
 				.join("\n\n");
-			const reply = await oneAtATime(model, async () => {
-				const stream = ctx.modelRegistry.streamSimple(
-					model,
-					{ systemPrompt: SYSTEM_PROMPT, messages: [{ role: "user", content: [{ type: "text", text }], timestamp: Date.now() }] },
-					{
-						maxTokens: Math.min(8_192, model.maxTokens),
-						reasoning: model.reasoning ? "low" : undefined,
-						signal: AbortSignal.any([controller.signal, AbortSignal.timeout(REQUEST_TIMEOUT_MS), ...(cancel ? [cancel] : [])]),
-						sessionId: uuidv7(),
-					},
-				);
-				for await (const event of stream) {
-					if (event.type === "text_delta") {
-						exchange.answer += event.delta;
-						changed();
-					}
+			const stream = ctx.modelRegistry.streamSimple(
+				model,
+				{ systemPrompt: SYSTEM_PROMPT, messages: [{ role: "user", content: [{ type: "text", text }], timestamp: Date.now() }] },
+				{
+					maxTokens: Math.min(8_192, model.maxTokens),
+					reasoning: model.reasoning ? "low" : undefined,
+					signal: AbortSignal.any([controller.signal, AbortSignal.timeout(REQUEST_TIMEOUT_MS), ...(cancel ? [cancel] : [])]),
+					sessionId: uuidv7(),
+					// pi-claude-agent-sdk takes a request with its own system prompt only as an isolated one-off query, which it
+					// runs for cacheRetention "none"; the answer then arrives whole instead of streamed.
+					...(model.provider === "claude-bridge" && { cacheRetention: "none" as const }),
+				},
+			);
+			for await (const event of stream) {
+				if (event.type === "text_delta") {
+					exchange.answer += event.delta;
+					changed();
 				}
-				return stream.result();
-			});
+			}
+			const reply = await stream.result();
 			if (reply.stopReason === "error" || reply.stopReason === "aborted") {
 				exchange.error = reply.errorMessage ?? (reply.stopReason === "aborted" ? "Cancelled." : "The request failed.");
 			} else {

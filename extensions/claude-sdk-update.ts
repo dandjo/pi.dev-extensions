@@ -1,40 +1,50 @@
 /**
- * Claude Agent SDK updates for pi-claude-subscription.
+ * Claude Agent SDK updates for pi-claude-agent-sdk.
  *
- * pi-claude-subscription runs Claude through the Claude Agent SDK, and the SDK's platform package brings the Claude
- * Code executable along. Claude Code takes each model's context window from a registry built into it: a model newer
- * than the bundled Claude Code counts as 200k, and Claude Code refuses a longer session with "Prompt is too long"
- * before any request, although the model takes 1M. `pi update` leaves the SDK where it is, since npm keeps a
- * dependency at the version of package-lock.json.
+ * pi-claude-agent-sdk (the claude-bridge provider) runs Claude through the Claude Agent SDK, and the SDK's platform
+ * package brings the Claude Code executable along. Claude Code takes each model's context window from a registry built
+ * into it: a model newer than the bundled Claude Code counts as 200k, and Claude Code refuses a longer session with
+ * "Prompt is too long" before any request, although the model takes 1M. The package pins the SDK to one exact version,
+ * so `pi update` brings a newer SDK only with a release of the package.
  *
- * - At every Pi start in the terminal, the SDK in Pi's npm root (~/.pi/agent/npm) is compared in the background with
- *   the npm registry. Pi in print, JSON, or RPC mode, subagents, and Pi with PI_OFFLINE set do not check.
- * - A newer version within the ranges the installed packages declare for the SDK (pi-claude-subscription's ^0.3.289,
- *   for example) is installed right away, with `npm update @anthropic-ai/claude-agent-sdk --legacy-peer-deps` as Pi
- *   installs its packages: without that flag npm 7 and newer would install Pi itself as a peer dependency. A notice
- *   names the old and the new SDK and Claude Code version. Pi processes started afterwards load the new SDK; running
- *   ones keep the old SDK code, so start them anew.
- * - A newer version outside those ranges is reported once per version: it needs a new version of the package that
- *   declares the range first (`pi update npm:pi-claude-subscription`).
- * - /claude-sdk-update checks and installs at once and reports the state, also when nothing is due.
+ * The mechanism is an npm override in the package.json of Pi's npm root (~/.pi/agent/npm, below PI_CODING_AGENT_DIR
+ * when that is set): "overrides": {"@anthropic-ai/claude-agent-sdk": "<version>"} makes npm install that version in
+ * place of the pinned one. Pi creates that package.json only when it is missing, and npm keeps the field, so the
+ * override outlasts `pi install` and `pi update`. Only the SDK is overridden; its platform packages follow it, since
+ * the SDK names them at its own version.
+ *
+ * - At every Pi start in the terminal, the SDK pi-claude-agent-sdk uses (its own copy below it, else the hoisted one)
+ *   is compared in the background with the npm registry's latest version. Pi in print, JSON, or RPC mode, subagents,
+ *   Pi with PI_OFFLINE set, and a root without pi-claude-agent-sdk do not check.
+ * - A newer version is installed right away: the override is set to it, or raised (never lowered), and
+ *   `npm install --legacy-peer-deps` runs as Pi installs its packages: without that flag npm 7 and newer would install
+ *   Pi itself as a peer dependency. A notice names the old and the new SDK and Claude Code version. Pi processes
+ *   started afterwards load the new SDK; running ones keep the old SDK code, so start them anew. When the install
+ *   fails and the SDK stayed as it was, the package.json is put back as it was.
+ * - /claude-sdk-update (or /claude-sdk-update latest) checks and installs at once and reports the state: the installed
+ *   SDK, the version the package pins, and the override. /claude-sdk-update pinned removes the override and installs
+ *   the version the package pins again. It also turns the automatic update off, remembered as {"auto": false} in
+ *   claude-sdk-update.json in Pi's agent folder, so the next start does not set the override again;
+ *   /claude-sdk-update or /claude-sdk-update latest turns it on again.
  * - A check outlasts a session replaced while it runs (/new, /resume, /fork, /reload): its notices and the event below
- *   go to the session current when it ends.
+ *   go to the session current when it ends. The checks and installs of one Pi process run one after the other.
  * - One update at a time: Pi processes starting together share a lock file in the npm root, a lock older than 15
  *   minutes counts as left over.
  * - Claude Code stays startable during the update. npm writes a package into its place file by file, and an
  *   executable of a few hundred MB can be neither found nor started for the seconds that takes ("spawn ETXTBSY").
  *   So the new version is installed into a folder beside node_modules first, and its packages, complete, take the
- *   place of the old ones with a rename each; package-lock.json gets their entries, and the `npm update` that follows
- *   finds them in place and only settles the rest. Where the folders cannot be renamed (Windows, while Claude Code
- *   runs), `npm update` installs in place as before, and a request that starts Claude Code just then fails and can be
+ *   place of the old ones with a rename each; package-lock.json gets their entries, and the `npm install` that
+ *   follows finds them in place and only settles the rest. Where the folders cannot be renamed (Windows, while Claude
+ *   Code runs), `npm install` installs in place, and a request that starts Claude Code just then fails and can be
  *   repeated.
  * - npm skips an optional package it cannot fetch without an error, and the platform packages with Claude Code are
  *   optional. So when the folder beside node_modules lacks one that is installed now, nothing is moved and nothing
- *   updated: the installed SDK stays, and the next start tries again. After an update, every platform package
- *   installed before must still be there; a missing one is reported with the command that installs it again.
+ *   changed: the installed SDK and the override stay, and the next start tries again. After an update, every platform
+ *   package installed before must still be there; a missing one is reported with the command that installs it again.
  * - Works with npm, Pi's default. With an `npmCommand` setting for pnpm or Bun, the extension does nothing.
- * - After an update, "claude-sdk-update:installed" on the event bus carries the new SDK's folder and versions
- *   ({ dir, version, claudeCode }), so claude-remote-control.ts can check its repairs against the new bundle at once.
+ * - After an update, also one back to the pinned version, "claude-sdk-update:installed" on the event bus carries the
+ *   new SDK's folder and versions ({ dir, version, claudeCode }), so claude-remote-control.ts can check its repairs
+ *   against the new bundle at once.
  */
 
 import { type ExtensionAPI, type ExtensionContext, getAgentDir } from "@earendil-works/pi-coding-agent";
@@ -44,13 +54,16 @@ import * as path from "node:path";
 import { promisify } from "node:util";
 
 const SDK = "@anthropic-ai/claude-agent-sdk";
+/** The Pi package that runs on the SDK; without it in the npm root this extension does nothing. */
+const PACKAGE = "pi-claude-agent-sdk";
 const ROOT = path.join(getAgentDir(), "npm");
+const PACKAGE_JSON = path.join(ROOT, "package.json");
 const LOCK_FILE = path.join(ROOT, ".claude-sdk-update.lock");
-/** Where a new version is installed before it moves into node_modules: on the same file system, so the move is a rename. */
+/** Where a new version is installed before it moves into node_modules: on the same file system, so a move renames. */
 const STAGE = path.join(ROOT, ".claude-sdk-update");
 /** What a package folder is called for the moment its successor takes its place. */
 const RETIRED = /\.retired-\d+$/;
-/** The newest version outside the ranges already reported, so the start reports it once. */
+/** {"auto": false} after /claude-sdk-update pinned: the start leaves the SDK at the pinned version. */
 const STATE_FILE = path.join(getAgentDir(), "claude-sdk-update.json");
 const COMMAND = "claude-sdk-update";
 const VIEW_TIMEOUT_MS = 60_000;
@@ -58,6 +71,8 @@ const UPDATE_TIMEOUT_MS = 15 * 60_000;
 const STALE_LOCK_MS = 15 * 60_000;
 
 const run = promisify(execFile);
+
+type Npm = { command: string; args: string[] };
 
 interface Sdk {
 	version: string;
@@ -67,27 +82,26 @@ interface Sdk {
 	location: string;
 }
 
-/** A package that declares a range for the SDK, from package-lock.json. */
-interface Dependent {
-	name: string;
-	range: string;
+/** What is installed, and what decides it. */
+interface State {
+	installed: Sdk;
+	/** The version (or range) pi-claude-agent-sdk declares for the SDK. */
+	pinned?: string;
+	/** The override in the npm root's package.json. */
+	override?: string;
+	auto: boolean;
 }
 
 type Result =
-	| { kind: "absent" }
-	| { kind: "current"; installed: Sdk; blocked?: Blocked }
-	| { kind: "updated"; from: Sdk; to: Sdk; blocked?: Blocked }
-	| { kind: "busy"; installed: Sdk }
+	| { kind: "absent"; reason: string }
+	| { kind: "current"; state: State }
+	| { kind: "updated"; from: Sdk; state: State }
+	| { kind: "pinned"; from: Sdk; state: State }
+	| { kind: "busy"; state: State }
 	| { kind: "failed"; message: string };
 
-/** A newer version than the ranges allow. */
-interface Blocked {
-	latest: string;
-	dependents: Dependent[];
-}
-
 /** Pi's npm command from its settings when it is npm; null for pnpm or Bun. */
-function npmCommand(): { command: string; args: string[] } | null {
+function npmCommand(): Npm | null {
 	let configured: unknown;
 	try {
 		configured = JSON.parse(readFileSync(path.join(getAgentDir(), "settings.json"), "utf8"))?.npmCommand;
@@ -103,13 +117,23 @@ function npmCommand(): { command: string; args: string[] } | null {
 	return manager === "npm" ? { command, args } : null;
 }
 
-/** The packages of package-lock.json, by their path below the npm root. */
-function lockPackages(): Record<string, Record<string, unknown>> {
+function readJson(file: string): any {
 	try {
-		return JSON.parse(readFileSync(path.join(ROOT, "package-lock.json"), "utf8"))?.packages ?? {};
+		return JSON.parse(readFileSync(file, "utf8"));
 	} catch {
-		return {};
+		return undefined;
 	}
+}
+
+/** pi-claude-agent-sdk in the npm root with the SDK version it declares; null when it is not installed there. */
+function installedPackage(): { pinned?: string } | null {
+	const manifest = readJson(path.join(ROOT, "node_modules", PACKAGE, "package.json"));
+	if (!manifest || typeof manifest !== "object") return null;
+	for (const field of ["dependencies", "optionalDependencies", "peerDependencies"]) {
+		const spec = manifest[field]?.[SDK];
+		if (typeof spec === "string") return { pinned: spec };
+	}
+	return {};
 }
 
 /**
@@ -131,39 +155,69 @@ function platformPackages(location: string): string[] {
 /** The stage lacks a platform package installed now: npm could not fetch it. */
 class IncompleteStage extends Error {}
 
-/** The SDK in the npm root, hoisted or below the package that needs it; null when no package there brings it. */
+/**
+ * The SDK pi-claude-agent-sdk loads: its own copy below it (npm nests one there when another version is hoisted),
+ * else the hoisted one; null when there is none. claude-remote-control.ts looks it up in the same order.
+ */
 function installedSdk(): Sdk | null {
-	const hoisted = `node_modules/${SDK}`;
-	const nested = Object.keys(lockPackages()).filter((key) => key.endsWith(`/node_modules/${SDK}`));
-	for (const dir of [hoisted, ...nested]) {
-		try {
-			const manifest = JSON.parse(readFileSync(path.join(ROOT, dir, "package.json"), "utf8"));
-			if (typeof manifest?.version !== "string") continue;
-			return {
-				version: manifest.version,
-				claudeCode: typeof manifest.claudeCodeVersion === "string" ? manifest.claudeCodeVersion : undefined,
-				location: dir,
-			};
-		} catch {
-			// Not there: the next place.
-		}
+	for (const dir of [`node_modules/${PACKAGE}/node_modules/${SDK}`, `node_modules/${SDK}`]) {
+		const manifest = readJson(path.join(ROOT, dir, "package.json"));
+		if (typeof manifest?.version !== "string") continue;
+		return {
+			version: manifest.version,
+			claudeCode: typeof manifest.claudeCodeVersion === "string" ? manifest.claudeCodeVersion : undefined,
+			location: dir,
+		};
 	}
 	return null;
 }
 
-/** The ranges the installed packages declare for the SDK. */
-function dependents(): Dependent[] {
-	const packages = lockPackages();
-	const result: Dependent[] = [];
-	for (const [key, entry] of Object.entries(packages)) {
-		for (const field of ["dependencies", "optionalDependencies"]) {
-			const range = (entry?.[field] as Record<string, unknown> | undefined)?.[SDK];
-			if (typeof range !== "string") continue;
-			const name = key === "" ? "package.json" : key.slice(key.lastIndexOf("node_modules/") + "node_modules/".length);
-			result.push({ name, range });
-		}
+function readOverride(): string | undefined {
+	const value = readJson(PACKAGE_JSON)?.overrides?.[SDK];
+	return typeof value === "string" ? value : undefined;
+}
+
+/** Sets the override to `version`, or removes it without one; the other fields stay. Answers the file as it was. */
+function writeOverride(version: string | undefined): string | undefined {
+	let before: string | undefined;
+	try {
+		before = readFileSync(PACKAGE_JSON, "utf8");
+	} catch {
+		before = undefined;
 	}
-	return result;
+	const json = before === undefined ? { name: "pi-extensions", private: true } : JSON.parse(before);
+	const overrides = { ...(json.overrides ?? {}) };
+	if (version === undefined) delete overrides[SDK];
+	else overrides[SDK] = version;
+	if (Object.keys(overrides).length > 0) json.overrides = overrides;
+	else delete json.overrides;
+	writeFileSync(`${PACKAGE_JSON}.new`, JSON.stringify(json, null, 2));
+	renameSync(`${PACKAGE_JSON}.new`, PACKAGE_JSON);
+	return before;
+}
+
+function autoEnabled(): boolean {
+	return readJson(STATE_FILE)?.auto !== false;
+}
+
+function setAuto(on: boolean): void {
+	try {
+		if (on) rmSync(STATE_FILE, { force: true });
+		else writeFileSync(STATE_FILE, `${JSON.stringify({ auto: false })}\n`);
+	} catch {
+		// The setting stays as it was; the command's report still says what it did.
+	}
+}
+
+/** The state of the root, or why there is nothing to do. */
+function currentState(): { command: Npm; state: State } | { reason: string } {
+	const command = npmCommand();
+	if (!command) return { reason: "Pi's npmCommand is not npm" };
+	const pkg = installedPackage();
+	if (!pkg) return { reason: `${PACKAGE} is not installed in ${ROOT}` };
+	const installed = installedSdk();
+	if (!installed) return { reason: `${PACKAGE} in ${ROOT} has no Claude Agent SDK` };
+	return { command, state: { installed, pinned: pkg.pinned, override: readOverride(), auto: autoEnabled() } };
 }
 
 /** Compares two versions; a pre-release sorts before its release. */
@@ -183,8 +237,9 @@ function compare(a: string, b: string): number {
 }
 
 const newest = (versions: string[]) => versions.reduce<string | null>((max, v) => (max === null || compare(v, max) > 0 ? v : max), null);
+const EXACT = /^\d+\.\d+\.\d+(?:-[\w.]+)?$/;
 
-async function npm(command: { command: string; args: string[] }, args: string[], timeout: number, cwd = ROOT): Promise<string> {
+async function npm(command: Npm, args: string[], timeout: number, cwd = ROOT): Promise<string> {
 	const { stdout } = await run(command.command, [...command.args, ...args], {
 		cwd,
 		timeout,
@@ -195,7 +250,7 @@ async function npm(command: { command: string; args: string[] }, args: string[],
 }
 
 /** The versions of the registry a spec matches, oldest first; `npm view` answers one version as a plain string. */
-async function view(command: { command: string; args: string[] }, spec: string): Promise<string[]> {
+async function view(command: Npm, spec: string): Promise<string[]> {
 	const out = await npm(command, ["view", spec, "version", "--json"], VIEW_TIMEOUT_MS);
 	if (!out) return [];
 	const parsed: unknown = JSON.parse(out);
@@ -239,10 +294,10 @@ function clearStage(location: string): void {
 /**
  * Installs `version` of the SDK beside node_modules and moves its packages, complete, into the place of the installed
  * ones: the SDK and the platform packages with Claude Code, which are named after it. package-lock.json gets their
- * entries, so the `npm update` that follows takes them as installed. Throws when a folder cannot be moved; what was
- * moved until then stays, and that `npm update` completes it in place.
+ * entries, so the `npm install` that follows takes them as installed. Throws when a folder cannot be moved; what was
+ * moved until then stays, and that `npm install` completes it in place.
  */
-async function installBeside(command: { command: string; args: string[] }, version: string, location: string): Promise<void> {
+async function installBeside(command: Npm, version: string, location: string): Promise<void> {
 	clearStage(location);
 	mkdirSync(STAGE, { recursive: true });
 	writeFileSync(path.join(STAGE, "package.json"), "{}\n");
@@ -295,44 +350,39 @@ async function installBeside(command: { command: string; args: string[] }, versi
 	}
 }
 
-/** Checks the registry and installs the newest version the ranges allow. */
-async function check(onUpdate: (from: Sdk, to: string) => void): Promise<Result> {
-	const command = npmCommand();
-	const installed = installedSdk();
-	if (!command || !installed) return { kind: "absent" };
-
-	const ranges = dependents();
-	const latest = newest(await view(command, SDK));
-	if (latest === null) throw new Error(`npm view ${SDK} answered no version`);
-	let allowed: string[] | null = null;
-	for (const { range } of ranges) {
-		const matching = new Set(await view(command, `${SDK}@${range}`));
-		allowed = allowed === null ? [...matching] : allowed.filter((v) => matching.has(v));
-	}
-	const wanted = allowed === null ? latest : newest(allowed);
-	const blocked = compare(latest, wanted ?? installed.version) > 0 && compare(latest, installed.version) > 0
-		? { latest, dependents: ranges }
-		: undefined;
-	if (wanted === null || compare(wanted, installed.version) <= 0) return { kind: "current", installed, blocked };
-
-	if (!takeLock()) return { kind: "busy", installed };
+/**
+ * Brings the SDK to `version` with the override set to `override` (removed without one), under the lock. The
+ * package.json is put back when the SDK did not change. Answers the SDK afterwards, or null when another process holds
+ * the lock.
+ */
+async function install(command: Npm, installed: Sdk, version: string, override: string | undefined, onStart?: () => void): Promise<Sdk | null> {
+	if (!takeLock()) return null;
+	onStart?.();
 	const platform = platformPackages(installed.location);
+	let before: string | undefined;
 	try {
-		onUpdate(installed, wanted);
+		before = writeOverride(override);
 		try {
-			await installBeside(command, wanted, installed.location);
+			await installBeside(command, version, installed.location);
 		} catch (error) {
 			if (error instanceof IncompleteStage) throw error;
-			// The update below installs in place what could not be moved there, or reports why nothing can be installed.
+			// The install below puts in place what could not be moved there, or reports why nothing can be installed.
 		}
-		await npm(command, ["update", SDK, "--prefix", realpathSync(ROOT), "--legacy-peer-deps", "--no-audit", "--no-fund"], UPDATE_TIMEOUT_MS);
+		await npm(command, ["install", "--prefix", realpathSync(ROOT), "--legacy-peer-deps", "--no-audit", "--no-fund"], UPDATE_TIMEOUT_MS);
+	} catch (error) {
+		if (before !== undefined && installedSdk()?.version !== version) {
+			try {
+				writeFileSync(PACKAGE_JSON, before);
+			} catch {
+				// The override stays; the next install of Pi's packages applies it.
+			}
+		}
+		throw error;
 	} finally {
 		rmSync(LOCK_FILE, { force: true });
 	}
 	const after = installedSdk();
-	if (!after || compare(after.version, installed.version) <= 0) {
-		throw new Error(`npm update finished, but the SDK is still ${after?.version ?? "missing"}`);
-	}
+	if (!after || after.version !== version) throw new Error(`npm install finished, but the SDK is ${after?.version ?? "missing"}, not ${version}`);
 	const lost = platform.filter((name) => !platformPackages(after.location).includes(name));
 	if (lost.length > 0) {
 		throw new Error(
@@ -340,7 +390,36 @@ async function check(onUpdate: (from: Sdk, to: string) => void): Promise<Result>
 				`run npm install --legacy-peer-deps --no-audit --no-fund in ${ROOT}`,
 		);
 	}
-	return { kind: "updated", from: installed, to: after, blocked };
+	return after;
+}
+
+/** Checks the registry and installs its latest version through the override when it is newer than the installed one. */
+async function check(automatic: boolean, onUpdate: (from: Sdk, to: string) => void): Promise<Result> {
+	const found = currentState();
+	if (!("command" in found)) return { kind: "absent", reason: found.reason };
+	const { command, state } = found;
+	const latest = newest(await view(command, SDK));
+	if (latest === null) throw new Error(`npm view ${SDK} answered no version`);
+	if (compare(latest, state.installed.version) <= 0) return { kind: "current", state };
+	// /claude-sdk-update pinned in another Pi process while this one started.
+	if (automatic && !autoEnabled()) return { kind: "current", state: { ...state, auto: false } };
+	const after = await install(command, state.installed, latest, latest, () => onUpdate(state.installed, latest));
+	if (!after) return { kind: "busy", state };
+	return { kind: "updated", from: state.installed, state: { ...state, installed: after, override: latest } };
+}
+
+/** Removes the override and installs the version pi-claude-agent-sdk pins. */
+async function pin(): Promise<Result> {
+	const found = currentState();
+	if (!("command" in found)) return { kind: "absent", reason: found.reason };
+	const { command, state } = found;
+	if (!state.pinned) throw new Error(`${PACKAGE} declares no version of ${SDK}`);
+	const target = EXACT.test(state.pinned) ? state.pinned : newest(await view(command, `${SDK}@${state.pinned}`));
+	if (target === null) throw new Error(`npm view ${SDK}@${state.pinned} answered no version`);
+	if (state.override === undefined && state.installed.version === target) return { kind: "current", state };
+	const after = await install(command, state.installed, target, undefined);
+	if (!after) return { kind: "busy", state };
+	return { kind: "pinned", from: state.installed, state: { ...state, installed: after, override: undefined } };
 }
 
 /** The first error line npm printed, else the first line of the message. */
@@ -353,25 +432,16 @@ function describe(error: unknown): string {
 
 const label = (sdk: Sdk) => (sdk.claudeCode ? `${sdk.version} (Claude Code ${sdk.claudeCode})` : sdk.version);
 
-function blockedNotice(blocked: Blocked): string {
-	const ranges = blocked.dependents.map((d) => `${d.name} allows ${d.range}`).join(", ");
-	const packages = blocked.dependents.filter((d) => d.name !== "package.json").map((d) => `npm:${d.name}`);
-	const hint = packages.length > 0 ? ` (pi update ${packages.join(" ")})` : "";
-	return `Claude Agent SDK ${blocked.latest} is out, but ${ranges}: it needs a newer package first${hint}.`;
-}
-
-function reportedVersion(): string | null {
-	try {
-		const reported = JSON.parse(readFileSync(STATE_FILE, "utf8"))?.reported;
-		return typeof reported === "string" ? reported : null;
-	} catch {
-		return null;
-	}
+function stateLine(state: State): string {
+	const override = state.override ? `override ${state.override}` : "no override";
+	return `SDK ${label(state.installed)}; ${PACKAGE} pins ${state.pinned ?? "nothing"}; ${override}; automatic updates ${state.auto ? "on" : "off (/claude-sdk-update turns them on)"}.`;
 }
 
 interface Shared {
-	/** The check in flight. */
+	/** The start's or the command's check in flight, which a second one joins. */
 	check?: Promise<Result>;
+	/** The end of the last check or install queued: they run one after the other. */
+	queue?: Promise<unknown>;
 	/** The session runtime current now, with the context of its session_start; none between two runtimes. */
 	live?: { pi: ExtensionAPI; ctx: ExtensionContext };
 }
@@ -385,48 +455,51 @@ interface Shared {
 const store = globalThis as typeof globalThis & Record<symbol, Shared | undefined>;
 const shared: Shared = (store[Symbol.for("pi.claude-sdk-update")] ??= {});
 
-function runCheck(): Promise<Result> {
-	shared.check ??= check((from, to) => {
-		shared.live?.ctx.ui.notify(`Updating the Claude Agent SDK ${from.version} -> ${to} …`, "info");
-	})
+/** Runs `job` after the ones queued before, and announces a changed SDK on the event bus. */
+function enqueue(job: () => Promise<Result>): Promise<Result> {
+	const next = (shared.queue ?? Promise.resolve())
+		.catch(() => {})
+		.then(job)
 		.catch((error): Result => ({ kind: "failed", message: describe(error) }))
 		.then((result) => {
-			if (result.kind === "updated") {
+			if (result.kind === "updated" || result.kind === "pinned") {
 				shared.live?.pi.events.emit("claude-sdk-update:installed", {
-					dir: path.join(ROOT, result.to.location),
-					version: result.to.version,
-					claudeCode: result.to.claudeCode,
+					dir: path.join(ROOT, result.state.installed.location),
+					version: result.state.installed.version,
+					claudeCode: result.state.installed.claudeCode,
 				});
 			}
 			return result;
-		})
-		.finally(() => {
-			shared.check = undefined;
 		});
+	shared.queue = next;
+	return next;
+}
+
+function runCheck(automatic: boolean): Promise<Result> {
+	shared.check ??= enqueue(() =>
+		check(automatic, (from, to) => {
+			shared.live?.ctx.ui.notify(`Updating the Claude Agent SDK ${from.version} -> ${to} …`, "info");
+		}),
+	).finally(() => {
+		shared.check = undefined;
+	});
 	return shared.check;
 }
+
+const RESTART = "Start running Pi processes anew to load it.";
 
 export default function (pi: ExtensionAPI) {
 	pi.on("session_start", (event, context) => {
 		shared.live = { pi, ctx: context };
 		if (event.reason !== "startup" || context.mode !== "tui") return;
 		if (process.env.PI_SUBAGENT_DEPTH || process.env.PI_OFFLINE) return;
-		if (!installedSdk()) return;
-		void runCheck().then((result) => {
+		if (!autoEnabled() || !installedPackage() || !installedSdk()) return;
+		void runCheck(true).then((result) => {
 			const ctx = shared.live?.ctx;
 			if (!ctx) return;
 			if (result.kind === "failed") ctx.ui.notify(`Claude Agent SDK update failed: ${result.message}`, "warning");
 			if (result.kind === "updated") {
-				ctx.ui.notify(`Claude Agent SDK updated ${label(result.from)} -> ${label(result.to)}. Start Pi anew to load it.`, "info");
-			}
-			if ((result.kind === "current" || result.kind === "updated") && result.blocked) {
-				if (reportedVersion() === result.blocked.latest) return;
-				ctx.ui.notify(blockedNotice(result.blocked), "info");
-				try {
-					writeFileSync(STATE_FILE, `${JSON.stringify({ reported: result.blocked.latest })}\n`);
-				} catch {
-					// Reported again at the next start.
-				}
+				ctx.ui.notify(`Claude Agent SDK updated ${label(result.from)} -> ${label(result.state.installed)}. ${RESTART}`, "info");
 			}
 		});
 	});
@@ -436,38 +509,48 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand(COMMAND, {
-		description: "Check for a newer Claude Agent SDK for pi-claude-subscription and install it",
-		handler: async (_args, command) => {
-			command.ui.notify("Checking the Claude Agent SDK …", "info");
-			const result = await runCheck();
+		description: "Update the Claude Agent SDK of pi-claude-agent-sdk to the newest version; `pinned` goes back to the package's",
+		getArgumentCompletions: (prefix: string) =>
+			["latest", "pinned"].filter((value) => value.startsWith(prefix.trim())).map((value) => ({ value, label: value })),
+		handler: async (args, command) => {
+			const mode = args.trim().toLowerCase() || "latest";
+			if (mode !== "latest" && mode !== "pinned") {
+				command.ui.notify(`Usage: /${COMMAND} [latest|pinned]`, "warning");
+				return;
+			}
+			setAuto(mode === "latest");
+			command.ui.notify(mode === "latest" ? "Checking the Claude Agent SDK …" : "Installing the Claude Agent SDK the package pins …", "info");
+			const result = mode === "latest" ? await runCheck(false) : await enqueue(pin);
 			const lines: string[] = [];
 			let level: "info" | "warning" | "error" = "info";
 			switch (result.kind) {
 				case "absent":
-					lines.push(`No Claude Agent SDK in ${ROOT}, or Pi's npmCommand is not npm.`);
+					lines.push(`Nothing to update: ${result.reason}.`);
 					level = "warning";
 					break;
 				case "current":
-					lines.push(
-						result.blocked
-							? `Claude Agent SDK ${label(result.installed)} is the newest the installed packages allow.`
-							: `Claude Agent SDK ${label(result.installed)} is current.`,
-					);
+					lines.push(mode === "latest" ? "The Claude Agent SDK is current." : "The Claude Agent SDK is the one the package pins.");
+					lines.push(stateLine(result.state));
 					break;
 				case "updated":
-					lines.push(`Claude Agent SDK updated ${label(result.from)} -> ${label(result.to)}. Start Pi anew to load it.`);
+					lines.push(`Claude Agent SDK updated ${label(result.from)} -> ${label(result.state.installed)}. ${RESTART}`);
+					lines.push(stateLine(result.state));
+					break;
+				case "pinned":
+					lines.push(`Claude Agent SDK back at the pinned version: ${label(result.from)} -> ${label(result.state.installed)}. ${RESTART}`);
+					lines.push(stateLine(result.state));
 					break;
 				case "busy":
-					lines.push(`Another Pi process is updating the Claude Agent SDK ${label(result.installed)}.`);
+					lines.push("Another Pi process is updating the Claude Agent SDK; try again in a few minutes.");
+					lines.push(stateLine(result.state));
 					break;
 				case "failed":
-					lines.push(`Claude Agent SDK update failed: ${result.message}`);
+					lines.push(`Claude Agent SDK ${mode === "latest" ? "update" : "install"} failed: ${result.message}`);
 					level = "error";
 					break;
 			}
-			if ((result.kind === "current" || result.kind === "updated") && result.blocked) lines.push(blockedNotice(result.blocked));
 			// Not command.ui: the session may have been replaced while the check ran, and this context with it.
-			shared.live?.ctx.ui.notify(lines.join("\n"), level);
+			(shared.live?.ctx ?? command).ui.notify(lines.join("\n"), level);
 		},
 	});
 }

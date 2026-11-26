@@ -51,33 +51,33 @@ agent definitions and run them in Pi, whichever model answers.
 | :-------------------------- | :---------------------------------------------------------------------------------------- | :--------------------------------------------------------------- |
 | `claude-code-agents.ts`     | Adds Claude Code's agent definitions, tool names, and model families to `agent`           | `subagents.ts`                                                   |
 
-**The Claude subscription** (`claude-*`). They need a Claude Code login and
-show nothing without one; Remote Control connects only while a Claude model is
-active.
+**The Claude subscription** (`claude-*`). They need Pi's Anthropic login on a
+Claude subscription (`/login`) and show nothing without one; Remote Control
+connects only while a Claude model is active.
 
 | Extension                   | What it does                                                                              | Needs                                                            |
 | :-------------------------- | :---------------------------------------------------------------------------------------- | :--------------------------------------------------------------- |
-| `claude-usage.ts`           | Adds the Claude subscription limits and usage credits to the status line                  | `statusline.ts`, a Claude Code login                             |
-| `claude-login.ts`           | Hands out and renews Claude Code's claude.ai login; `/claude-login` switches the account  | A Claude Code login                                              |
-| `claude-remote-control.ts`  | `/remote-control`: drive the session from the Claude app and claude.ai/code               | A Claude model on the Claude Code login                          |
+| `claude-usage.ts`           | Adds the Claude subscription limits and usage credits to the status line                  | `statusline.ts`, Pi's Anthropic login                            |
+| `claude-remote-control.ts`  | `/remote-control`: drive the session from the Claude app and claude.ai/code               | A Claude model on Pi's Anthropic login, `pi-claude-agent-sdk`    |
 
-**The claude-sdk provider** (`claude-sdk-*`). They work on
-`pi-claude-subscription` and do nothing without it.
+**The claude-bridge provider** (`claude-sdk-*`). They work on
+`pi-claude-agent-sdk` and do nothing without it.
 
 | Extension                   | What it does                                                                              | Needs                                                            |
 | :-------------------------- | :---------------------------------------------------------------------------------------- | :--------------------------------------------------------------- |
-| `claude-sdk-stream-only.ts` | Keeps Claude Code on streamed responses, so a stalled one cannot leave Pi waiting         | `pi-claude-subscription`                                         |
-| `claude-sdk-update.ts`      | Installs a newer Claude Agent SDK, and with it Claude Code, as soon as there is one       | `pi-claude-subscription`, npm                                    |
+| `claude-sdk-rules.ts`       | Passes Pi's rules, the guidelines of the tools among them, on to Claude Code              | `pi-claude-agent-sdk`                                            |
+| `claude-sdk-stream-only.ts` | Keeps Claude Code on streamed responses, so a stalled one cannot leave Pi waiting         | `pi-claude-agent-sdk`                                            |
+| `claude-sdk-update.ts`      | Installs a newer Claude Agent SDK, and with it Claude Code, as soon as there is one       | `pi-claude-agent-sdk`, npm                                       |
 
 Every extension is a single file that works on its own. Code that several of
 them need — the [small model](#small-model) choice, the overlay frame,
 Claude Code's tool names, the instances and tokens of `gitlab.json` and
-`openproject.json` — is copied into each of them, with a note that names the
-other copies. What one extension does for others while Pi runs goes through
-Pi's event bus instead: [claude-login](#claude-login) hands out and renews the
-login for `claude-usage.ts` and `claude-remote-control.ts`, and each of the two
-reads the login itself, without renewal and account check, when that file is
-missing. `web_search` comes from the npm package `pi-web-access`; see
+`openproject.json`, the lookup of Pi's Anthropic login — is copied into each of
+them, with a note that names the other copies. What one extension does for
+others while Pi runs goes through Pi's event bus instead:
+[claude-usage](#claude-usage) hands the plan limits to
+`claude-remote-control.ts`, which goes without them when that file is missing.
+`web_search` comes from the npm package `pi-web-access`; see
 [Web search](#web-search).
 
 ## Set up Pi
@@ -89,8 +89,8 @@ so an agent can carry them out as well.
 
 What you need first:
 
-- Claude Code, installed and logged in with your Claude subscription
-  (`claude`, then `/login`)
+- A Claude subscription (Pro or Max); step 2 signs Pi in to it. Claude Code
+  itself need not be installed: the provider brings its own
 - Google Chrome 144 or newer, for the browser connection
 
 ### 1. Install Pi
@@ -105,43 +105,47 @@ pi --version
 ```
 
 The installer pins Pi's dependencies and can install Node.js 22.19 or newer,
-which Pi needs. `pi update` updates Pi later. Skip the Quickstart's "Choose a
-model" step (`/login`) — step 2 below connects Pi to your Claude subscription
-instead.
+which Pi needs. `pi update` updates Pi later. The Quickstart's "Choose a
+model" step (`/login`) is part of step 2 below, which connects Pi to your
+Claude subscription.
 
 ### 2. Run Claude on your subscription
 
 ```bash
-pi install npm:pi-claude-subscription
+pi install npm:pi-claude-agent-sdk
 ```
 
-The package runs Claude models through Claude Code's login, so requests count
-against your subscription and never move to API billing. Make it the default
-in `~/.pi/agent/settings.json`, next to the `packages` entry the install wrote:
+The package runs Claude models through Claude Code on Pi's own Anthropic
+login, so requests count against your subscription, not API billing. Sign Pi
+in once: start `pi`, run `/login`, and pick Anthropic (Claude Pro/Max). Pi
+keeps the login in `~/.pi/agent/auth.json`, renews it by itself, and hands it
+to every Claude Code process the package starts; a Claude Code login of its
+own is not needed. Make the provider the default in
+`~/.pi/agent/settings.json`, next to the `packages` entry the install wrote:
 
 ```json
 {
-  "defaultProvider": "claude-sdk",
+  "defaultProvider": "claude-bridge",
   "defaultModel": "claude-opus-5-5",
-  "packages": ["npm:pi-claude-subscription"],
+  "packages": ["npm:pi-claude-agent-sdk"],
   "compaction": {
     "reserveTokens": 32768,
     "modelOverrides": {
-      "claude-sdk/claude-opus-5-5": { "reserveTokens": 700000 },
-      "claude-sdk/claude-opus-5": { "reserveTokens": 700000 },
-      "claude-sdk/claude-sonnet-5-5": { "reserveTokens": 700000 },
-      "claude-sdk/claude-sonnet-5": { "reserveTokens": 700000 },
-      "claude-sdk/claude-haiku-5-5": { "reserveTokens": 700000 },
-      "claude-sdk/claude-fable-5-2": { "reserveTokens": 700000 },
-      "claude-sdk/claude-fable-5-1": { "reserveTokens": 700000 },
-      "claude-sdk/claude-fable-5": { "reserveTokens": 700000 }
+      "claude-bridge/claude-opus-5-5": { "reserveTokens": 700000 },
+      "claude-bridge/claude-opus-5": { "reserveTokens": 700000 },
+      "claude-bridge/claude-sonnet-5-5": { "reserveTokens": 700000 },
+      "claude-bridge/claude-sonnet-5": { "reserveTokens": 700000 },
+      "claude-bridge/claude-haiku-5-5": { "reserveTokens": 700000 },
+      "claude-bridge/claude-fable-5-2": { "reserveTokens": 700000 },
+      "claude-bridge/claude-fable-5-1": { "reserveTokens": 700000 },
+      "claude-bridge/claude-fable-5": { "reserveTokens": 700000 }
     }
   },
   "retry": { "maxRetries": 10, "maxAgentDelayMs": 32000 }
 }
 ```
 
-`/model` in Pi switches to another `claude-sdk/…` model.
+`/model` in Pi switches to another `claude-bridge/…` model.
 
 The `compaction` reserve makes Pi compact before Claude Code refuses the
 request. With its own auto-compaction off, Claude Code blocks locally at the
@@ -166,10 +170,10 @@ times; Pi's default gives up after three tries within 14 seconds.
 while a response hangs, the restart of a silent request, and the wait while
 the network is down.
 
-The package brings the Claude Agent SDK, and with it Claude Code, at the
-version of its first install, and `pi update` does not move it.
-`claude-sdk-update.ts` from step 3 keeps it current, so that Claude Code knows
-the newest models; see [claude-sdk-update](#claude-sdk-update).
+The package pins the Claude Agent SDK, and with it Claude Code, to one
+version, and only a release of the package moves it. `claude-sdk-update.ts`
+from step 3 keeps it current, so that Claude Code knows the newest models; see
+[claude-sdk-update](#claude-sdk-update).
 
 ### 3. Install the extensions
 
@@ -301,10 +305,11 @@ Every extension loads with any provider, and a model switch within a session
 needs nothing. What changes with a provider other than Claude:
 
 - The groups of the extension table tell what keeps working: all but the
-  Claude subscription and the `claude-sdk` provider groups. `claude-usage.ts`
-  and `claude-login.ts` show nothing without a Claude Code login,
-  `claude-remote-control.ts` connects only while a Claude model is active, and
-  the `claude-sdk-*` files do nothing without `pi-claude-subscription`.
+  Claude subscription and the `claude-bridge` provider groups.
+  `claude-usage.ts` shows nothing without Pi's Anthropic login on a Claude
+  subscription, `claude-remote-control.ts` connects only while a Claude model
+  is active, and the `claude-sdk-*` files do nothing without
+  `pi-claude-agent-sdk`.
 - Subagents name a tier: `small` and `large` resolve on the current provider,
   `Explore` runs on `small`, and a Claude family the provider lacks (`haiku`
   elsewhere) falls back to its tier. `~/.pi/agent/subagents.json` names the
@@ -313,8 +318,6 @@ needs nothing. What changes with a provider other than Claude:
 - Values that follow Claude's prompt cache can be set per provider:
   `cacheWarmMinutes` in [network-resilience](#network-resilience), and
   `prepareMinutes` and `coldMinutes` in [idle-compaction](#idle-compaction).
-- Side requests ([Small model](#small-model)) run at once; only on
-  `claude-sdk` they wait for each other.
 - An extension for another subscription's limits adds status line rows of its
   own and offers the limits to other extensions as `claude-usage.ts` does,
   through `plan-usage:source` (see [claude-usage](#claude-usage)).
@@ -329,7 +332,7 @@ Keeps this package of extensions current. It needs nothing from any provider.
 - The package is the one `pi install` put this file in. Every other installed
   package stays as it is until `pi update` by hand; `pi-web-access` is pinned
   on purpose, and [claude-sdk-update](#claude-sdk-update) keeps the Claude
-  Agent SDK of `pi-claude-subscription` current.
+  Agent SDK of `pi-claude-agent-sdk` current.
 - At every Pi start (not with `PI_OFFLINE` set), the package is brought up to
   date in the background with
   `pi update <package>`, as by hand, but in a separate process, so its output
@@ -402,18 +405,27 @@ status line shows them or [Remote Control](#claude-remote-control) needs
 them. The endpoint is rate-limited per account, so all Pi
 sessions share one answer through `~/.cache/pi-statusline/usage.json`: one
 session at a time asks, at most every five minutes, and the others read the
-file, so a new session shows the limits right away. The access token comes
-from [claude-login](#claude-login): Claude Code's login in
-`~/.claude/.credentials.json` (on macOS the login keychain item
-`Claude Code-credentials`, where Claude Code keeps it), the one the
-`claude-sdk` provider runs on, and while `CLAUDE_CODE_OAUTH_TOKEN` is set only
-a login of that token's account. Pi's own `/login` is not used. The token is
-never refreshed here and never written to the cache.
+file, so a new session shows the limits right away. The access token is
+Pi's own Anthropic login (`/login`, Anthropic (Claude Pro/Max)), the one the
+`claude-bridge` provider runs on, as Pi hands it to extensions: Pi renews a
+token that ran out before it hands it over, also after hours without a prompt.
+The token is never refreshed here and never written to the cache.
 
-Without a Claude Code login there are no rows and no requests: someone on another provider sees nothing of
-this. While the session's model is not a Claude model — any model of the
-providers `claude-sdk` and `anthropic`, elsewhere one with `claude` in its id
-— or the session has none, the rows are hidden as well. The limits are still
+Between the fetches, every response of the providers `claude-bridge` and
+`anthropic` updates the `5h` and `7d` rows from its
+`anthropic-ratelimit-unified-*` headers, which `pi-claude-agent-sdk` rebuilds
+from Claude Code's rate-limit events, and the shared answer with them, so the
+rows follow each response. The fetches stay for the start, for idle times, and
+for what the headers lack: the model-scoped windows and the usage credits.
+After `/login` with another account the rows follow it with the next response
+and the next fetch.
+
+Without Pi's Anthropic login there are no rows and no requests, and neither
+with an Anthropic API key, which has no plan limits: someone on another
+provider sees nothing of this. While the session's model is not a Claude
+model — any model of the providers `claude-bridge` and `anthropic`, elsewhere
+one with `claude` in its id — or the session has none, the rows are hidden as
+well. The limits are still
 fetched then, so they stand there as soon as a Claude model is chosen again.
 With `PI_OFFLINE` set (Pi's `--offline`), the rows show what another
 session fetched last, and this one fetches nothing. Reset times, dates, and
@@ -421,15 +433,6 @@ credit amounts follow `LC_TIME` and `LC_MONETARY` (or `LC_ALL`, else `LANG`),
 as other programs on the machine do: `Di., 10.11., 13:28` and `$ 12,34` under
 `de_AT`, `Tue, 11/10, 01:28 PM` and `$12.34` under `en_US`. Node's own default
 reads `LANG` alone.
-
-Claude Code renews its login only when it makes a request, so after hours
-without a prompt the token has run out. The extension then asks
-[claude-login](#claude-login) to have Claude Code renew it, and the limits come
-back with the next fetch. Without `claude-login.ts` the token is read here,
-without the account check, and the limits stay away until a prompt renews it.
-After [`/claude-login`](#claude-login) signed Claude Code in anew, the limits of
-the new account are fetched at once, past the five-minute rule; until they
-arrive, the `Limits` line says `loading…` instead of showing the old account's.
 
 Other extensions get the answer through Pi's event bus, in a protocol that
 names no provider: `plan-usage:source` carries a source with the plan's id
@@ -446,106 +449,10 @@ time of the next attempt.
 | :-------------------------- | :----------------------------------------- |
 | `loading…`                  | The first answer is on its way             |
 | `⚠ rate limited (HTTP 429)` | The endpoint turned the request away       |
-| `⚠ no valid login: /claude-login` | No Claude Code login, or its token ran out and Claude Code could not renew it |
-| `⚠ login ended: /claude-login` | Claude Code's login reached its time limit; no renewal helps |
-| `⚠ login: other account than CLAUDE_CODE_OAUTH_TOKEN` | Claude Code's login belongs to another account than `CLAUDE_CODE_OAUTH_TOKEN`, the one the `claude-sdk` prompts run on: run `/claude-login` with that account |
-| `⚠ no valid login: !!claude auth login` | `claude-login.ts` is not loaded, and there is no valid login, or it ran out while Pi idled |
+| `⚠ no valid login: /login`  | Pi could not hand out its Anthropic login: its renewal failed |
+| `⚠ no Claude subscription login: /login` | The login went away since the last check (`/logout`) |
 | `⚠ HTTP 401`                | The endpoint rejected the token            |
 | `⚠ endpoint unreachable`    | Offline, or no answer within 10 seconds    |
-
-## claude-login
-
-Hands out the claude.ai token, and renews a login once it has run out, for the
-extensions that need a valid token while no prompt runs:
-[claude-usage](#claude-usage) for the plan limits and
-[Remote Control](#claude-remote-control) for its connection. On its own it
-does nothing — no request and no process until one of them asks.
-
-The token is Claude Code's login (`~/.claude/.credentials.json`, on macOS the
-login keychain), the one the `claude-sdk` provider runs on. Pi's own Anthropic
-login (`/login` in Pi, `~/.pi/agent/auth.json`) is not used, so there is one
-login to keep for the prompts and for these extensions.
-
-`/claude-login` signs Claude Code in, with another account if need be — after
-one used up its limit, say. Pi's own `/login` cannot do that: it signs in only
-Pi's `anthropic` provider and never reaches `claude-sdk`. The command runs
-`claude auth login` in Pi's login dialog, with the Claude Code program the
-Claude Agent SDK brings, else `claude` on the `PATH`; `--sso` and
-`--email <address>` pass on. Claude Code opens its sign-in page in the browser
-and takes the answer on the machine's localhost, so nothing needs typing in Pi.
-Where the browser cannot reach that (over SSH), the dialog shows Claude Code's
-other link (`Ctrl+X` copies it), whose page shows a code to paste into the
-dialog. `Esc` cancels; a cancelled or failed sign-in leaves the login as it
-was. Afterwards the command names the account and plan, and the status line
-fetches the new account's limits at once. Running Claude Code processes notice
-the changed login and use it with their next request, so every `claude-sdk`
-session runs on the new account from its next prompt, without a restart. While
-`CLAUDE_CODE_OAUTH_TOKEN` is set, the prompts keep running on that token's
-account, which outranks any login, and the command says so.
-`!!claude auth login` (`claude auth login` in a shell) signs in as well,
-without the dialog.
-
-Claude Code renews its token only when it makes a request, and the
-`claude-sdk` provider ends idle Claude Code processes, so after about eight
-hours without a prompt the token has run out. Pi never refreshes it itself:
-that would rotate Claude Code's refresh token behind its back. The extension
-starts a short Claude Code process instead that asks for its usage (no model
-request, no settings, nothing persisted); Claude Code renews the token under
-its own lock before it sends that request. This needs the Claude Agent SDK that
-`pi-claude-subscription` brings.
-
-A login that reached its time limit cannot be renewed: Claude Code keeps it
-without a refresh token and marks it `loginEnded`. The extension then answers
-at once that the login ended, without starting a process; the status line
-names `/claude-login`, and Remote Control `!!claude auth login`.
-
-The account: while `CLAUDE_CODE_OAUTH_TOKEN` is set (a token of
-`claude setup-token`), Claude Code runs the `claude-sdk` prompts on it, as it
-outranks the stored login. A login of another account would then show the
-limits of an account the prompts do not run on, and connect Remote Control to
-it, so a login whose organization differs from that token's is passed over.
-The organization comes from the `anthropic-organization-id` header that
-`GET /v1/models` answers with — a request every token may make (the setup token
-cannot ask for its profile), without a model call. It is asked once per token
-and kept by the token's hash. An organization that cannot be told now (no
-network, a refused token) counts as matching and is asked again at a later
-call. Without the variable nothing is checked. An organization is one account
-on a Pro or Max plan; on Team and Enterprise its members share it, so the check
-cannot tell them apart. The Claude Code process of a renewal runs without
-`CLAUDE_CODE_OAUTH_TOKEN`, as Claude Code would otherwise use that token and
-leave its stored login unrenewed.
-
-One renewal runs at a time in a Pi process, whichever extension
-asks, and the next one waits five minutes. After one that leaves no valid
-token the wait doubles, up to an hour, so a login that needs `/login` does not
-start a Claude Code process, or ask the token endpoint, every few minutes.
-
-A prompt or a compaction (`/compact` or automatic) that fails because Claude
-Code cannot use its login gets a notice below the error:
-`Claude Code's login cannot be used: run /claude-login`. One that fails because
-the account used up its plan limit (`You've hit your weekly limit · resets …`,
-`out of usage credits`) gets a notice that `/claude-login` signs in another
-account and that Pi's `/login` does not reach `claude-sdk`; while
-`CLAUDE_CODE_OAUTH_TOKEN` is set, it says that the prompts run on that token
-instead. With [auto-continue](#auto-continue), which keeps the run waiting
-for the reset and tries a compaction again after it, it says that the waiting
-run or compaction goes on at once on the account `/claude-login` signs in,
-and asks for no new prompt or `/compact`. The error is Claude
-Code's own text, passed on by `claude-sdk` ("Failed to authenticate", "reached
-its time limit"), and stays as it is, also in the saved session. The summary
-of a branch in `/tree` fails another way and gets no notice.
-
-Other extensions reach it through Pi's event bus, whatever the load order:
-`claude-login:source` carries a source with `token()` and `renew()`, at load
-and again on every `claude-login:source-request`. `token({ renew })` answers
-with the token to use (`value`, `source` `claude-code`, and whether it was
-`renewed` for this call), a run-out one renewed first unless `renew` is
-`false`, and only one of `CLAUDE_CODE_OAUTH_TOKEN`'s account; without one it
-answers a `reason`: `none`, `ended` (the login needs `/login`), or
-`other-account`. `renew()` only renews and answers whether the token is valid
-afterwards; it joins a renewal that is running, answers `false` at once while
-the wait lasts, and never rejects. Neither rejects. `claude-login:changed`
-follows every sign-in through `/claude-login`.
 
 ## compact-tools
 
@@ -1338,9 +1245,9 @@ summary — not the conversation or its files.
   receives a Pi message through its own inbox, with its own auth key, and can
   answer it. Claude Code sends Pi sessions no delivery or idle notices, so
   `notify_when_idle` is refused for it. Claude Code processes that a Pi process
-  started — the `claude-sdk` provider's — are not listed. Tested against Claude
-  Code 2.1.308; its protocol is not a public interface and can change with any
-  Claude Code release.
+  started — the `claude-bridge` provider's — are not listed. Tested against
+  Claude Code 2.1.308; its protocol is not a public interface and can change
+  with any Claude Code release.
 - `/list-agents`, also `/peers`, shows the same list and this session's
   address.
 - Every session binds an inbox, the Unix socket
@@ -1466,7 +1373,7 @@ interrupt it, and answer its questions, and it stays alive after its report.
     ```json
     {
       "ladder": {
-        "claude-sdk": [
+        "claude-bridge": [
           { "model": "haiku", "use": "searches, lists, summaries" },
           "claude-sonnet-5-5",
           { "model": "opus", "use": "design, reviews, unclear bugs" }
@@ -1475,7 +1382,7 @@ interrupt it, and answer its questions, and it stays alive after its report.
     }
     ```
 
-    - The key is the provider as Pi names it (`claude-sdk`, `anthropic`,
+    - The key is the provider as Pi names it (`claude-bridge`, `anthropic`,
       `openai`, …; `pi --list-models` shows it). The ladder applies while
       the current model is one of that provider.
     - The list goes from the weakest model to the strongest, in the order
@@ -1712,7 +1619,8 @@ without adding anything to it, like Claude Code's
   visible above it and keeps running. Space, Enter, or Esc closes it, Up/Down
   scroll, `[` and `]` step through earlier answers, `c` copies the answer, `x`
   clears the earlier ones. `/btw` alone reopens it. The thread lives until Pi
-  exits.
+  exits. On `claude-bridge` the answer arrives whole: the provider runs a
+  request with its own system prompt as a one-off Claude Code query.
 - Every question sends the conversation to the session's provider again,
   without reusing its prompt cache, so it costs input tokens in proportion to
   the session's length.
@@ -1911,8 +1819,9 @@ and you can work on from there while Pi keeps running on your machine.
   does it ([background-agents](#background-agents)).
 - Transport: the Claude Agent SDK's bridge module
   (`@anthropic-ai/claude-agent-sdk/bridge`, marked alpha), which
-  `pi-claude-subscription` installs: under `~/.pi/agent/npm` or in a project's
-  `.pi/npm`, wherever Pi put that package. It creates the
+  `pi-claude-agent-sdk` installs: under `~/.pi/agent/npm` or in a project's
+  `.pi/npm`, wherever Pi put that package, the SDK in the package's own
+  `node_modules` first, else the one npm hoisted beside it. It creates the
   session, mints a four-hour worker credential, and runs the event stream,
   heartbeats, and reconnects; the extension renews the credential five minutes
   before it expires and reconnects on its own after an outage. A new
@@ -1939,8 +1848,8 @@ and you can work on from there while Pi keeps running on your machine.
   loads from `~/.cache/pi-remote-control/`, written fresh at the first `/rc`
   of every Pi process. A repair that no longer fits a new SDK release is left
   out, and `/rc` warns about it. The bundle is also checked without loading
-  it, so the warning comes before you need Remote Control: at Pi's start while
-  a Claude model is active, and right after
+  it, so the warning comes before you need Remote Control: at Pi's start and
+  at `/reload` while a Claude model is active, at `/rc`, and right after
   [claude-sdk-update](#claude-sdk-update) installed a new SDK. Each bundle is
   warned about once per Pi process. The check only finds the places the
   repairs change, not whether the bundle still behaves as before, so `/rc`
@@ -1955,45 +1864,56 @@ and you can work on from there while Pi keeps running on your machine.
     part that answers the app, so every effort change, context usage and usage
     request failed with "not supported in this context". The copy passes all
     four on.
-- Login: a claude.ai OAuth token with the `user:sessions:claude_code` scope
-  from [claude-login](#claude-login): Claude Code's login
-  (`~/.claude/.credentials.json`, on macOS the login keychain), the one the
-  `claude-sdk` provider runs on, not Pi's own `/login`, and while
-  `CLAUDE_CODE_OAUTH_TOKEN` is set only a login of that token's account (the
-  setup token itself cannot open Remote Control sessions). It is read fresh for
-  every request and never refreshed here. Remote Control needs a Claude model:
+- Login: a claude.ai OAuth token with the `user:sessions:claude_code` scope:
+  Pi's own Anthropic login (`/login`, Anthropic (Claude Pro/Max)), the one the
+  `claude-bridge` provider runs on. An Anthropic API key cannot open Remote
+  Control sessions; `/rc` then says so. The token is read fresh for every
+  request and never refreshed here. Remote Control needs a Claude model:
   without one, `/rc` declines, and switching to another model disconnects.
   Remote Control needs a Pro, Max, Team, or Enterprise plan; on Team and
   Enterprise an owner must allow it in the Claude Code admin settings.
-- Overnight: Claude Code renews its login only when it makes a request, and the
-  provider ends idle Claude Code processes, so after about eight hours without
-  a prompt the token has run out and the four-hourly renewal of the connection
-  fails. The extension then asks [claude-login](#claude-login) to have the
-  login renewed, and the connection is renewed with it — at most every
-  five minutes, and after a renewal that fails the wait doubles, up to an
-  hour. The status line ([claude-usage](#claude-usage)) shares the renewal.
-  A login that reached its time limit cannot be renewed; `/rc` then names
-  `!!claude auth login`. Without `claude-login.ts` the token is read
-  without the account check, stays run out until a prompt renews it, and the connection is
-  lost overnight. The session log notes such a
-  renewal (`Remote Control had the claude.ai login renewed …`), a
-  renewal that keeps failing for five minutes with its reason, and the
-  reconnect after it.
+- Overnight: Pi renews a login that ran out before it hands it over, so the
+  four-hourly renewal of the connection works after hours without a prompt
+  too. A renewal that keeps failing for five minutes goes into the session log
+  with its reason, and so does the reconnect after it.
 - While connected, the conversation is stored on Anthropic's servers under the
   claude.ai data policy; execution and files stay on your machine, and the
   session only makes outbound HTTPS requests. Disconnecting and quitting
   archive the remote session.
-- `pi-claude-subscription` 0.2.4 ships SDK 0.3.308, which reports itself as
-  Claude Code 2.1.308. The bridge API is not a public interface and can change
-  with any SDK release.
+- `pi-claude-agent-sdk` 0.12.1 pins SDK 0.3.321;
+  [claude-sdk-update](#claude-sdk-update) installs a newer one, which loads at
+  the next start or `/reload`. The bridge API is not a public interface and
+  can change with any SDK release.
+
+## claude-sdk-rules
+
+Gives Claude the rules of Pi's system prompt. `pi-claude-agent-sdk` runs Claude
+Code with its own system prompt and appends only the portable parts of Pi's:
+context files, skills, a custom prompt, appended text, and the sections
+extensions add. Pi's `<rules>` are not among them, and with them every
+guideline the tools bring: Claude sees each tool's description, but not when
+to use it, or not.
+
+- While a `claude-bridge` model runs, it builds the rules as Pi does and adds
+  them as the section `rules`. That section takes the place of Pi's own rules
+  with the same text, so Pi's prompt stays as it was, and the provider passes
+  it on.
+- The rules change only with the tools and their guidelines, so the prompt
+  stays the same from turn to turn and the provider keeps its Claude Code
+  session.
+- A guideline that an extension loaded after this one adds at run time is
+  missing; `bash-timeout.ts` loads before it.
+- With a custom prompt (a `SYSTEM.md` of your own), which has no rules in Pi
+  either, and with any other provider it adds nothing.
 
 ## claude-sdk-stream-only
 
 Keeps a stalled response from hanging the run. When a streamed response
 stalls, Claude Code repeats the request without streaming and gets the answer
-as one finished message. `pi-claude-subscription` builds Pi's response from
-the stream alone, so that answer never reaches Pi: a tool call in it waits for
-Pi while Pi waits for the answer, until the run is aborted.
+as one finished message per content block, without stream events.
+`pi-claude-agent-sdk` passes such an answer on, but ends Pi's response at its
+first tool call, so of parallel tool calls only the first reaches Pi: the
+others wait for Pi while Pi waits for the answer, until the run is aborted.
 
 - Sets `CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK=1` in Pi's own environment,
   which the provider hands to every Claude Code process it starts. A stalled
@@ -2005,33 +1925,47 @@ Pi while Pi waits for the answer, until the run is aborted.
 
 ## claude-sdk-update
 
-Keeps the Claude Agent SDK of `pi-claude-subscription` current. The SDK brings
+Keeps the Claude Agent SDK of `pi-claude-agent-sdk` current. The SDK brings
 Claude Code along, and Claude Code takes each model's context window from a
 list built into it: a model newer than the bundled Claude Code counts as 200k,
 so Claude Code refuses a longer session with "Prompt is too long" before any
-request, although the model takes 1M. `pi update` does not move the SDK,
-since npm keeps a dependency at the version of `package-lock.json`.
+request, although the model takes 1M. The package pins the SDK to one exact
+version, so `pi update` brings a newer one only with a release of the package.
 
-- At every start in the terminal, Pi compares the SDK in `~/.pi/agent/npm`
-  with the npm registry in the background. Print, JSON, and RPC mode,
-  subagents, and `PI_OFFLINE` skip the check.
-- A newer version within the range the installed packages allow
-  (`pi-claude-subscription` asks for `^0.3.289`) is installed right away, with
-  `npm update @anthropic-ai/claude-agent-sdk --legacy-peer-deps` as Pi
+The extension installs a newer SDK through an npm override in the
+`package.json` of Pi's npm root (`~/.pi/agent/npm`):
+`"overrides": {"@anthropic-ai/claude-agent-sdk": "0.3.332"}` makes npm install
+that version in place of the pinned one. Pi creates that file only when it is
+missing, and npm keeps the field, so the override outlasts `pi install` and
+`pi update`. Only the SDK is overridden; its packages with Claude Code follow
+it.
+
+- At every start in the terminal, Pi compares the SDK that
+  `pi-claude-agent-sdk` uses with the npm registry's latest version, in the
+  background. Print, JSON, and RPC mode, subagents, `PI_OFFLINE`, and an npm
+  root without `pi-claude-agent-sdk` skip the check.
+- A newer version is installed right away: the override is set to it, or
+  raised, never lowered, and `npm install --legacy-peer-deps` runs as Pi
   installs its packages: without the flag, npm would install Pi itself as a
   peer dependency. A notice names the old and the new SDK and Claude Code
   version, and Pi processes started from then on use them. Running sessions
-  keep the SDK they loaded; start them anew.
-- A newer version outside the range is reported once per version: it needs a
-  new `pi-claude-subscription` first (`pi update npm:pi-claude-subscription`).
-- `/claude-sdk-update` checks and installs at once and reports the state,
-  also when nothing is due.
+  keep the SDK they loaded; start them anew. When the install fails and the
+  SDK stayed as it was, `package.json` is put back as well.
+- `/claude-sdk-update` (also `/claude-sdk-update latest`) checks and installs
+  at once and reports the state: the installed SDK, the version the package
+  pins, and the override.
+- `/claude-sdk-update pinned` removes the override and installs the version
+  the package pins again, and turns the update at the start off: it is
+  remembered as `{"auto": false}` in `~/.pi/agent/claude-sdk-update.json`, so
+  the next start does not set the override again. `/claude-sdk-update` or
+  `/claude-sdk-update latest` turns it on again and updates.
 - A check outlasts a session replaced while it runs (`/new`, `/resume`,
   `/fork`, `/reload`): its notices and the event below go to the session
   current when it ends.
-- After an update, `claude-sdk-update:installed` on Pi's event bus carries the
-  new SDK's folder and versions, and [Remote Control](#claude-remote-control)
-  checks its repairs against the new bundle at once.
+- After an update, also one back to the pinned version,
+  `claude-sdk-update:installed` on Pi's event bus carries the new SDK's folder
+  and versions, and [Remote Control](#claude-remote-control) checks its
+  repairs against the new bundle at once.
 - Pi processes starting together update one at a time, through a lock file
   in `~/.pi/agent/npm`.
 - Claude Code stays startable during the update. npm writes a package into
@@ -2039,20 +1973,19 @@ since npm keeps a dependency at the version of `package-lock.json`.
   neither found nor started for the seconds that takes (`spawn ETXTBSY`). So
   the new version is installed into a folder beside `node_modules` first, and
   its packages, complete, take the place of the old ones with a rename each;
-  `package-lock.json` gets their entries, and the `npm update` that follows
+  `package-lock.json` gets their entries, and the `npm install` that follows
   finds them in place and only settles the rest. Where the folders cannot be
-  renamed (Windows, while Claude Code runs), `npm update` installs in place
-  as before, and a request that starts Claude Code just then fails and can be
-  repeated.
+  renamed (Windows, while Claude Code runs), `npm install` installs in place,
+  and a request that starts Claude Code just then fails and can be repeated.
 - npm skips an optional package it cannot fetch without an error, and the
   packages with Claude Code are optional. When the folder beside
   `node_modules` lacks one that is installed now, nothing is moved and
-  nothing updated: the installed SDK stays, the notice names the package, and
-  the next start tries again. After an update, every one of these packages
-  installed before must still be there; a missing one is reported with the
-  command that installs it again (`npm install --legacy-peer-deps --no-audit
-  --no-fund` in `~/.pi/agent/npm`), since without it Claude Code may not
-  start.
+  nothing changed: the installed SDK and the override stay, the notice names
+  the package, and the next start tries again. After an update, every one of
+  these packages installed before must still be there; a missing one is
+  reported with the command that installs it again (`npm install
+  --legacy-peer-deps --no-audit --no-fund` in `~/.pi/agent/npm`), since
+  without it Claude Code may not start.
 - Works with npm, Pi's default. With an `npmCommand` setting for pnpm or Bun,
   the extension does nothing.
 
@@ -2060,7 +1993,7 @@ since npm keeps a dependency at the version of `package-lock.json`.
 
 Keeps a request alive through network trouble the way Claude Code does. Pi on
 its own retries three times within 14 seconds and shows nothing while a
-request hangs. Through `pi-claude-subscription`, Claude Code's own retries stay
+request hangs. Through `pi-claude-agent-sdk`, Claude Code's own retries stay
 invisible too, because the provider drops their messages: Pi says "Working…"
 for as long as Claude Code retries, twenty minutes and more when its connects
 time out.
@@ -2068,9 +2001,9 @@ time out.
 - After 20 seconds without stream data, the working message counts the wait
   and says whether the API host answers, as Claude Code's "Waiting for API
   response · check your network" does. The check is a TCP connect to the
-  model's API host (`api.anthropic.com` for `claude-sdk`), through
+  model's API host (`api.anthropic.com` for `claude-bridge`), through
   `HTTPS_PROXY` when one is set. A provider without an http(s) base URL other
-  than `claude-sdk` is not checked unless `probeHost` names a host for it.
+  than `claude-bridge` is not checked unless `probeHost` names a host for it.
 - While the host does not answer, the message names the cause in Claude
   Code's words ("no route to api.anthropic.com (ENETUNREACH) · check your
   connection or VPN"), and the footer shows `⚠ offline`.
@@ -2111,7 +2044,7 @@ time out.
   `noticeSeconds` (20), `graceSeconds` (10), `stallSeconds` (300; 0 turns
   the silence restart off), `maxRestarts` (3),
   `offlineWaitMinutes` (30; 0 turns the waiting off), `cacheWarmMinutes`
-  (5, Anthropic's default; 60 on `claude-sdk`, whose cache lives an hour),
+  (5, Anthropic's default; 60 on `claude-bridge`, whose cache lives an hour),
   and `probeHost` (`host:port` to check instead of the API host). Under
   `providers`, each of them can be set for one provider and wins there over
   the top level: `{"providers": {"openai": {"cacheWarmMinutes": 10}}}`.
@@ -2173,9 +2106,7 @@ you send a prompt.
   OpenAI's `You exceeded your current quota`) do not reset by themselves and
   stand as they are.
 - While the run waits, the plan's limits are asked every five minutes, and
-  once a used-up window is free again, the run continues early. After a
-  sign-in with [`/claude-login`](#claude-login) it continues at once, on the
-  account just signed in.
+  once a used-up window is free again, the run continues early.
 - Whatever starts a run while the limit holds waits the same way after its
   first failed request: a subagent's report, the result of a background
   wait, a message from another session, and a scheduled prompt.
@@ -2201,16 +2132,14 @@ you send a prompt.
   that a context overflow started, the run that overflowed continues with a
   note. Meanwhile the status line shows
   `⧗ compaction at 11:41 (in 7m) · esc cancels`. Esc in an empty editor, a
-  prompt, or another compaction that succeeds ends the wait; `/claude-login`
-  starts the retry at once. The wait outlasts `/reload`, not a restart of Pi;
-  a context over the threshold compacts with the next run anyway.
+  prompt, or another compaction that succeeds ends the wait. The wait
+  outlasts `/reload`, not a restart of Pi; a context over the threshold
+  compacts with the next run anyway.
 - If Pi ends during the wait (a reboot, `/quit`), the wait resumes when the
   session starts again before the reset; after the reset, a notice says to
   send a prompt. Esc during the wait is remembered as Esc: the session does
   not wait again on its next start.
-- The [tmux tab](#tmux-tab-activity) rests while a run waits, and the notice
-  of [claude-login](#claude-login) says that a waiting run or compaction goes
-  on with the account `/claude-login` signs in.
+- The [tmux tab](#tmux-tab-activity) rests while a run waits.
 
 ## compaction-cut
 
@@ -2368,12 +2297,15 @@ open ran for 42 minutes.
 
 - A bash call without `timeout` stops after 120 seconds, as in Claude Code;
   Pi ends the command with everything it started. A call with its own
-  `timeout` keeps it.
+  `timeout` keeps it. `pi-claude-agent-sdk` sets 120 seconds of its own on a
+  call without one; the setting below takes its place.
 - The model learns of the default from a guideline for the bash tool, so it
   gives `timeout` itself for a build, a test run, or an install that takes
-  longer. With `pi-claude-subscription`, which renders the prompt itself, the
-  guideline goes into its list of guidelines; a `SYSTEM.md` of your own
-  without such a list goes without, and the hint below tells the model.
+  longer. Pi puts it into its prompt's rules, and a `SYSTEM.md` of your own
+  into its list of guidelines when it has one. `pi-claude-agent-sdk` hands
+  Claude Code only parts of Pi's prompt (context files, skills, appended
+  text), not its rules, so its models, like a `SYSTEM.md` without such a list,
+  go without, and the hint below tells the model.
 - A call the default stopped comes back with a hint: run it again with the
   timeout it needs, use [wait](#wait) for something that has not happened
   yet, or close the process that did not end, such as a browser or a server.
@@ -2390,8 +2322,10 @@ provider and model are in use:
 - Among the models of the current model's provider that have working
   credentials and read text, it takes the one with the lowest list price (input
   plus output per million tokens), if that is cheaper than the current model.
-  Otherwise it keeps the current model. With `claude-sdk` or `anthropic` that is
-  Claude Haiku 5.5, with `openai` currently `gpt-5-nano`.
+  Otherwise it keeps the current model. With `claude-bridge` or `anthropic`
+  that is Claude Haiku 5.5, with `openai` currently `gpt-5-nano`.
+  `claude-bridge` lists its models without a price; they count at the price of
+  the same model at another provider.
 - A side task never moves to another provider or account, so prompts and page
   text only go where the conversation already goes.
 - On providers that serve several makers' models and name the maker in the id
@@ -2404,19 +2338,16 @@ provider and model are in use:
   (100 tokens) sometimes failed with "Claude's response exceeded the 100 output
   token maximum".
 - `PI_SMALL_MODEL=<provider>/<model-id>` overrides the choice.
-- Side requests give up after two minutes. On `claude-sdk` they run one at a
-  time, across all extensions, and `/btw` waits its turn the same way, on the
-  session's own model: `claude-sdk` keeps at most three Claude Code processes
-  and closes the least recently used one outside a call, which can be the
-  conversation's own process while it waits for tool results; four parallel
-  `web_fetch` calls then reached the model as "Tool call interrupted". Other
-  providers take side requests at once.
+- Side requests give up after two minutes and run at once, on every
+  provider.
 - The `small` tier of [subagents](#subagents) takes the same model where the
   provider has no small model family of its own.
-- Through `claude-sdk`, a side request carries its own short system prompt
-  instead of Claude Code's. Tested with extra usage switched off, Anthropic
-  counted it against the subscription; a request counted as third-party
-  traffic would have been rejected instead.
+- Through `claude-bridge`, a side request carries its own short system prompt
+  instead of Claude Code's: the provider runs it as a one-off Claude Code query
+  without tools and without a stored session. With the earlier provider and
+  extra usage switched off, Anthropic counted such a request against the
+  subscription; with `claude-bridge` that is not tested yet, and the provider
+  warns when Claude Code reports a request billed to extra usage.
 
 ## Web search
 
@@ -2437,8 +2368,8 @@ together with `source_check` (evidence for a claim) and `get_search_content`
     model does not choose between two.
   - `"toolActivation": "eager"` offers `web_search` from the first request. By
     default the package may add it only after the model calls `web_enable`;
-    tools added mid-session can cost a prompt-cache miss, and with `claude-sdk`
-    a new Claude Code process.
+    tools added mid-session can cost a prompt-cache miss, and with
+    `claude-bridge` a new Claude Code process.
 - The package's defaults stay: no summary model call (`workflow: "none"`), no
   browser cookie access, a guard against fetching private addresses, and a
   one-hour cache of results in Pi's config directory.

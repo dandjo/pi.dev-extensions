@@ -19,8 +19,8 @@
  *   together after a reboot. A second rejection in a row ends it; /rc typed by hand tries once. A failure names the
  *   step and the reason, read from Node's HTTP diagnostics channels (watchApiRequests), since the bridge returns none.
  *   A remote session that was created but not usable is archived, and once more later when the server refuses that.
- * - Transport: the Claude Agent SDK's bridge module (@anthropic-ai/claude-agent-sdk/bridge, alpha), installed with
- *   pi-claude-subscription under ~/.pi/agent/npm. It creates the session (POST /v1/code/sessions), mints the worker
+ * - Transport: the Claude Agent SDK's bridge module (@anthropic-ai/claude-agent-sdk/bridge, alpha), the copy
+ *   pi-claude-agent-sdk brings under ~/.pi/agent/npm. It creates the session (POST /v1/code/sessions), mints the worker
  *   credential (POST /v1/code/sessions/{id}/bridge) and runs the event stream, heartbeats and reconnects. This file
  *   translates Pi's conversation into Claude Code's SDK messages and the app's control requests into Pi calls.
  * - Model and effort: the app's model names (aliases, dated ids, a [1m] suffix) resolve among the current provider's
@@ -56,22 +56,18 @@
  *   takes for an old Claude Code and refuses newer models for, and attachBridgeSession does not pass the effort
  *   handler, the context usage handler, the shared control answers (get_usage) or the initialize state on.
  *   loadBridge() imports a repaired copy
- *   (~/.cache/pi-remote-control, written whole through a rename, since several Pi may connect at once); a repair the bundle has no shape for is left out, and /rc warns about it. The bundle
- *   is also checked without loading it (bridgeCheck): at Pi's start while a Claude model is active, and when
- *   claude-sdk-update.ts reports a new SDK ("claude-sdk-update:installed"); a bundle a repair no longer fits gets a
- *   warning once per process.
- * - Login: a claude.ai OAuth token with the user:sessions:claude_code scope, from claude-login.ts
- *   ("claude-login:source" on the event bus): Claude Code's login (~/.claude/.credentials.json, on macOS the keychain),
- *   the one the claude-sdk provider runs on (Pi's own /login is not used), and while CLAUDE_CODE_OAUTH_TOKEN is set
- *   only a login of that token's account, the one the claude-sdk provider's prompts run on (the setup token itself
- *   cannot open Remote Control sessions). It is read fresh for every request and never refreshed here. Remote Control
- *   is offered only while a Claude model is active: switching to another model ends the connection. The login is
- *   renewed only by a request of Claude Code, so after hours without a prompt the token has run out and the four-hourly
- *   renewal of the worker credential fails; claude-login.ts then has Claude Code renew it under its own lock. A login
- *   that reached its time limit cannot be renewed and needs `!!claude auth login` in Pi (or `claude auth login` in a
- *   shell). Without that extension the token is read here, without renewal and account check, and a login that ran out
- *   stays run out until a prompt renews it. A renewal that keeps failing for five minutes goes into the session log
- *   with its reason, and so does the reconnect after it.
+ *   (~/.cache/pi-remote-control, written whole through a rename, since several Pi may connect at once); a repair the
+ *   bundle has no shape for is left out, and /rc warns about it. The bundle is also checked without loading it
+ *   (bridgeCheck) when Pi starts or reloads while a Claude model is active, and when claude-sdk-update.ts reports a new
+ *   SDK ("claude-sdk-update:installed"); a bundle a repair no longer fits gets a warning once per process.
+ * - Login: a claude.ai OAuth token with the user:sessions:claude_code scope: Pi's own Anthropic login (/login,
+ *   Anthropic, Claude subscription), the one the claude-bridge provider runs on, as
+ *   ctx.modelRegistry.getProviderAuth("anthropic") hands it out. An Anthropic API key cannot open Remote Control
+ *   sessions. The token is read fresh for every request and never refreshed here: Pi renews one that ran out before it
+ *   hands it over, also after hours without a prompt, when the four-hourly renewal of the worker credential asks for
+ *   it. Remote Control is offered only while a Claude model is active: switching to another model ends the connection.
+ *   A renewal of the worker credential that keeps failing for five minutes goes into the session log with its reason,
+ *   and so does the reconnect after it.
  * - What the app sees: the conversation so far, then every user prompt, assistant message (text, thinking, tool calls
  *   under Claude Code's tool names) and tool result, and a result after each run. Permission prompts do not exist in
  *   Pi, so the app never has to approve anything.
@@ -118,14 +114,11 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Key, matchesKey, Text, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { createHash, randomUUID } from "node:crypto";
-import { execFile } from "node:child_process";
 import { subscribe, unsubscribe } from "node:diagnostics_channel";
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { readFile } from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { promisify } from "node:util";
 
 const API_BASE_URL = "https://api.anthropic.com";
 const APP_URL = "https://claude.ai";
@@ -268,87 +261,68 @@ interface Token {
 	value: string;
 }
 
+/** Claude Code's configuration directory; its settings.json may ask for Remote Control at startup. */
 function claudeDir(): string {
 	return process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), ".claude");
 }
 
-const execFileAsync = promisify(execFile);
+/** What the login lookup needs of ctx.modelRegistry. */
+type AuthRegistry = Pick<ExtensionContext["modelRegistry"], "getProviderAuth">;
 
 /**
- * Claude Code's stored login, the JSON with claudeAiOauth, or undefined. On macOS Claude Code keeps it in the login
- * keychain as the generic password "Claude Code-credentials" (with CLAUDE_CONFIG_DIR set, followed by "-" and the first
- * eight hex digits of that directory's SHA-256), and .credentials.json is only its fallback; elsewhere the file is the
- * store. macOS 26 prints a password with non-ASCII content as hex, which is decoded here.
- * claude-login.ts, claude-usage.ts carry a copy of this function: change them alike.
+ * Pi's Anthropic login: the OAuth access token, or why there is none: "none" without a login, "api-key" for an
+ * Anthropic API key (no claude.ai login, no plan limits), "failed" when Pi could not hand the token out (its renewal
+ * failed, for one).
  */
-async function claudeCodeCredentials(): Promise<any> {
-	if (process.platform === "darwin") {
-		const dir = process.env.CLAUDE_CONFIG_DIR;
-		const suffix = dir ? `-${createHash("sha256").update(dir).digest("hex").slice(0, 8)}` : "";
-		try {
-			const { stdout } = await execFileAsync(
-				"/usr/bin/security",
-				["find-generic-password", "-s", `Claude Code-credentials${suffix}`, "-w"],
-				{ timeout: 5_000 },
-			);
-			const raw = stdout.trim();
-			const parsed = JSON.parse(/^(?:[0-9a-f]{2})+$/i.test(raw) ? Buffer.from(raw, "hex").toString("utf8") : raw);
-			if (parsed?.claudeAiOauth) return parsed;
-		} catch {
-			// no keychain item: the file
-		}
-	}
+type AnthropicLogin = { token: string } | { reason: "none" | "api-key" | "failed" };
+
+/**
+ * Pi's own Anthropic login (/login, Anthropic, Claude subscription), the one the claude-bridge provider runs on, as
+ * getProviderAuth("anthropic") resolves it: Pi renews a stored OAuth token that runs out before it hands it over, so
+ * the token is valid, and it is never refreshed here. The token is never printed and never written anywhere.
+ * claude-usage.ts carries a copy of this function: change them alike.
+ */
+async function anthropicLogin(registry: AuthRegistry | null | undefined): Promise<AnthropicLogin> {
+	if (!registry) return { reason: "none" };
+	let resolved: Awaited<ReturnType<AuthRegistry["getProviderAuth"]>>;
 	try {
-		return JSON.parse(await readFile(path.join(claudeDir(), ".credentials.json"), "utf8"));
+		resolved = await registry.getProviderAuth("anthropic");
 	} catch {
-		return undefined;
+		return { reason: "failed" };
 	}
+	if (!resolved) return { reason: "none" };
+	if (!resolved.source?.toLowerCase().includes("oauth")) return { reason: "api-key" };
+	const authorization = Object.entries(resolved.auth.headers ?? {}).find(([name]) => name.toLowerCase() === "authorization")?.[1];
+	const token = resolved.auth.apiKey || (typeof authorization === "string" ? authorization.match(/^Bearer\s+(.+)$/i)?.[1] : undefined);
+	return token ? { token } : { reason: "failed" };
 }
 
+/** The Pi package that brings the Claude Agent SDK, and with it the bridge module. */
+const SDK_PACKAGE = "pi-claude-agent-sdk";
+
 /**
- * The Claude Agent SDK that pi-claude-subscription brings, wherever Pi installed that package: in the user scope
- * (~/.pi/agent/npm) or the project scope (.pi/npm); hoisted, or below the package itself. Undefined when it is in
- * neither.
- * claude-login.ts carries a copy of this function: change them alike.
+ * The Claude Agent SDK that pi-claude-agent-sdk brings, wherever Pi installed that package: in the user scope
+ * (~/.pi/agent/npm) or the project scope (.pi/npm). The package's own copy below it comes first (it pins the SDK
+ * exactly, so npm nests it when another version is hoisted), then the hoisted one beside it. Undefined when the
+ * package or its SDK is in neither.
  */
 function claudeSdkDir(): string | undefined {
-	const find = (roots: string[]) => {
-		for (const root of roots) {
-			const nested = path.join(root, "pi-claude-subscription", "node_modules");
-			for (const base of [root, nested]) {
-				const dir = path.join(base, "@anthropic-ai", "claude-agent-sdk");
-				if (existsSync(path.join(dir, "sdk.mjs"))) return dir;
-			}
+	for (const root of [path.join(getAgentDir(), "npm", "node_modules"), path.join(process.cwd(), ".pi", "npm", "node_modules")]) {
+		const pkg = path.join(root, SDK_PACKAGE);
+		if (!existsSync(path.join(pkg, "package.json"))) continue;
+		for (const base of [path.join(pkg, "node_modules"), root]) {
+			const dir = path.join(base, "@anthropic-ai", "claude-agent-sdk");
+			if (existsSync(path.join(dir, "sdk.mjs"))) return dir;
 		}
-		return undefined;
-	};
-	return find([path.join(getAgentDir(), "npm", "node_modules"), path.join(process.cwd(), ".pi", "npm", "node_modules")]);
-}
-
-/**
- * The claude.ai access token of Claude Code's login while claude-login.ts is not loaded, as claude-login.ts hands it
- * out, but without its account check. Never printed, never written anywhere.
- */
-async function readAccessToken(): Promise<Token | null> {
-	const now = Date.now() + 60_000;
-	try {
-		const o = (await claudeCodeCredentials())?.claudeAiOauth;
-		if (typeof o?.accessToken === "string" && o.accessToken && (!o.expiresAt || o.expiresAt > now)) {
-			return { value: o.accessToken };
-		}
-	} catch {
-		// no Claude Code login
 	}
-	return null;
+	return undefined;
 }
 
-const LOGIN_HINT = "Remote Control needs Claude Code's claude.ai login: run !!claude auth login, then /remote-control again.";
-const ENDED_HINT =
-	"Claude Code's claude.ai login reached its time limit and cannot be renewed: run !!claude auth login, then /remote-control again.";
-const OTHER_ACCOUNT_HINT =
-	"Remote Control needs a claude.ai login of the account CLAUDE_CODE_OAUTH_TOKEN belongs to: run !!claude auth login with that account, then /remote-control again.";
-/** Added to LOGIN_HINT while claude-login.ts is not loaded: the login may only have run out. */
-const NO_RENEWAL_HINT = " A login that ran out while Pi idled is renewed by claude-login.ts, which is not loaded.";
+const LOGIN_HINT = "Remote Control needs Pi's claude.ai login: run /login (Anthropic, Claude subscription), then /remote-control again.";
+const API_KEY_HINT =
+	"Remote Control needs a claude.ai login, and Pi's Anthropic login is an API key: run /login (Anthropic, Claude subscription), then /remote-control again.";
+const FAILED_HINT =
+	"Pi could not renew its claude.ai login: run /login (Anthropic, Claude subscription) if it keeps failing, then /remote-control again.";
 
 function clock(ms: number, seconds = false): string {
 	return new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", ...(seconds && { second: "2-digit" }) });
@@ -473,7 +447,7 @@ function loadBridge(): Promise<LoadedBridge> {
 	bridgePromise ??= (async () => {
 		const sdkDir = claudeSdkDir();
 		const file = sdkDir ? path.join(sdkDir, "bridge.mjs") : "";
-		if (!sdkDir || !existsSync(file)) throw new Error("The Claude Agent SDK is not installed: `pi install npm:pi-claude-subscription` brings it (see the README).");
+		if (!sdkDir || !existsSync(file)) throw new Error(`The Claude Agent SDK is not installed: \`pi install npm:${SDK_PACKAGE}\` brings it (see the README).`);
 		let version = "unknown";
 		try {
 			version = String(JSON.parse(readFileSync(path.join(sdkDir, "manifest.json"), "utf8")).version ?? version);
@@ -521,7 +495,7 @@ function requestHeaders(token: string, version: string): Record<string, string> 
  */
 function isClaudeModel(model: Model<any> | undefined): boolean {
 	if (!model) return false;
-	return model.provider === "claude-sdk" || model.provider === "anthropic" || /claude/i.test(model.id);
+	return model.provider === "claude-bridge" || model.provider === "anthropic" || /claude/i.test(model.id);
 }
 
 function sessionUrl(sessionId: string): string {
@@ -904,14 +878,40 @@ function planRateLimits(snapshot: UsageSnapshot): Json {
 	return limits;
 }
 
-/** The plan as Claude Code's login names it (pro, max, team, enterprise), or null. */
-async function subscriptionType(): Promise<string | null> {
-	try {
-		const type = (await claudeCodeCredentials())?.claudeAiOauth?.subscriptionType;
-		return typeof type === "string" && type ? type : null;
-	} catch {
-		return null;
-	}
+/** Claude Code's names of the plans, by the organization type of the profile. */
+const PLAN_TYPES: Record<string, string> = { claude_max: "max", claude_pro: "pro", claude_enterprise: "enterprise", claude_team: "team" };
+
+/** The latest answer of subscriptionType, by the SHA-256 of its token. */
+let planType: { key: string; type: Promise<string | null> } | undefined;
+
+/**
+ * The plan as Claude Code names it (pro, max, team, enterprise), or null: the organization type of the login's profile
+ * (GET /api/oauth/profile, scope user:profile), mapped as Claude Code maps it. Asked once per token; a failed answer
+ * is asked again next time.
+ */
+function subscriptionType(token: string | undefined, version: string): Promise<string | null> {
+	if (!token) return Promise.resolve(null);
+	const key = createHash("sha256").update(token).digest("hex");
+	if (planType?.key === key) return planType.type;
+	const type = (async () => {
+		try {
+			const response = await fetch(`${API_BASE_URL}/api/oauth/profile`, {
+				headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", "User-Agent": `claude-code/${version}` },
+				signal: AbortSignal.timeout(HTTP_TIMEOUT_MS),
+			});
+			if (!response.ok) return null;
+			const organization = ((await response.json()) as Json | null)?.organization as Json | null | undefined;
+			const kind = organization?.organization_type;
+			return typeof kind === "string" ? (PLAN_TYPES[kind] ?? null) : null;
+		} catch {
+			return null;
+		}
+	})();
+	planType = { key, type };
+	void type.then((answer) => {
+		if (answer === null && planType?.key === key) planType = undefined;
+	});
+	return type;
 }
 
 /** Lines an edit added and removed, from the hunks of its unified patch. */
@@ -1175,37 +1175,9 @@ interface SubagentView {
 	error?: string;
 }
 
-// A copy of ClaudeLoginSource from claude-login.ts, the event-bus contract between the two: change both alike.
-/** What "claude-login:source" carries. */
-interface ClaudeLoginSource {
-	/**
-	 * Has Claude Code renew its run-out claude.ai login. True when its token is valid afterwards. Joins a renewal that is
-	 * running, and answers false at once while the wait after the last one lasts or the login has ended. Never rejects.
-	 * To be called once the caller found no valid token, not before. token() does this itself.
-	 */
-	renew(): Promise<boolean>;
-	/**
-	 * The claude.ai access token of Claude Code's login, valid for at least another minute. With renew (the default) a
-	 * run-out login is renewed by Claude Code first, as renew() does. While CLAUDE_CODE_OAUTH_TOKEN is set, a login of
-	 * another organization is passed over. Without a token, reason says whether there was none, the login ended (it
-	 * needs /login in Claude Code), or it is one of another account. Never rejects.
-	 */
-	token(options?: { renew?: boolean }): Promise<ClaudeLoginToken | ClaudeLoginRefusal>;
-}
-
-/** What token() answers with a token, and whether it was renewed for this call. */
-interface ClaudeLoginToken {
-	value: string;
-	renewed: boolean;
-}
-
-/**
- * What token() answers without one: no valid login, a login that reached its time limit and needs /login in Claude
- * Code, or a login of another account than CLAUDE_CODE_OAUTH_TOKEN.
- */
-interface ClaudeLoginRefusal {
-	value?: undefined;
-	reason: "none" | "ended" | "other-account";
+/** Why there is no token: see AnthropicLogin. */
+interface LoginRefusal {
+	reason: "none" | "api-key" | "failed";
 }
 
 /**
@@ -1819,7 +1791,7 @@ export default function (pi: ExtensionAPI) {
 	// --- HTTP calls the SDK module does not export -------------------------------------------------------------------
 
 	async function sessionRequest(method: "PUT" | "POST", sessionId: string, suffix: string, body: Json, timeoutMs: number): Promise<number | null> {
-		const token = await accessToken(false);
+		const token = await accessToken();
 		if ("reason" in token) return null;
 		try {
 			const response = await fetch(`${API_BASE_URL}/v1/code/sessions/${sessionId}${suffix}`, {
@@ -1967,7 +1939,7 @@ export default function (pi: ExtensionAPI) {
 		const uuid = typeof attachment.file_uuid === "string" ? attachment.file_uuid : "";
 		if (!/^[A-Za-z0-9_-]+$/.test(uuid)) return null;
 		const name = typeof attachment.file_name === "string" ? attachment.file_name : "attachment";
-		const token = await accessToken(false);
+		const token = await accessToken();
 		if ("reason" in token) return null;
 		try {
 			const response = await fetch(`${API_BASE_URL}/api/oauth/files/${encodeURIComponent(uuid)}/content`, {
@@ -2355,8 +2327,6 @@ export default function (pi: ExtensionAPI) {
 	/** The plan limits of the model in use; null without a source for it. */
 	const usageSource = (): PlanUsageSource | null =>
 		[...usageSources.values()].find((source) => source.appliesTo(ctx?.model ?? undefined)) ?? null;
-	/** claude-login.ts, once it answered; without it a run-out login is not renewed. */
-	let loginSource: ClaudeLoginSource | null = null;
 
 	/** The plan limits as Claude Code forwards its rate limits: a rate_limit_event and rate_limit_info in the worker metadata. */
 	function reportRateLimits(c: Connection, force = false): void {
@@ -2449,9 +2419,10 @@ export default function (pi: ExtensionAPI) {
 			await Promise.race([source.refresh().catch(() => {}), new Promise((resolve) => setTimeout(resolve, HTTP_TIMEOUT_MS).unref?.())]);
 		}
 		const snapshot = source?.snapshot() ?? null;
+		const token = await accessToken();
 		return {
 			session: sessionUsage(),
-			subscription_type: await subscriptionType(),
+			subscription_type: await subscriptionType("reason" in token ? undefined : token.value, version),
 			rate_limits_available: snapshot !== null,
 			rate_limits: snapshot ? planRateLimits(snapshot) : null,
 			behaviors: null,
@@ -2661,32 +2632,20 @@ export default function (pi: ExtensionAPI) {
 	// --- Credentials and recovery --------------------------------------------------------------------------------------
 
 	/** Why there is no token, for the user. */
-	const loginHint = (refusal: ClaudeLoginRefusal) =>
-		refusal.reason === "other-account"
-			? OTHER_ACCOUNT_HINT
-			: refusal.reason === "ended"
-				? ENDED_HINT
-				: loginSource
-					? LOGIN_HINT
-					: LOGIN_HINT + NO_RENEWAL_HINT;
+	const loginHint = (refusal: LoginRefusal) =>
+		refusal.reason === "api-key" ? API_KEY_HINT : refusal.reason === "failed" ? FAILED_HINT : LOGIN_HINT;
 
 	/** What to do about a login the server rejected. */
 	const rejectedHint = () =>
-		`Claude.ai login was rejected — run !!claude auth login, then /remote-control again.`;
+		`The claude.ai login was rejected — run /login (Anthropic, Claude subscription), then /remote-control again.`;
 
-	/**
-	 * The access token from claude-login.ts: Claude Code's login, with renew a run-out one renewed by Claude Code first,
-	 * and while CLAUDE_CODE_OAUTH_TOKEN is set only one of that token's account. Without the extension the token is
-	 * read here, and a run-out login is not renewed. A renewal goes into the session log.
-	 */
-	async function accessToken(renew = true): Promise<Token | ClaudeLoginRefusal> {
-		if (loginSource) {
-			const token = await loginSource.token({ renew });
-			if ("reason" in token) return token;
-			if (token.renewed) note("Remote Control had the claude.ai login renewed, which had run out.");
-			return { value: token.value };
-		}
-		return (await readAccessToken()) ?? { reason: "none" };
+	/** Pi's model registry from the latest session_start; kept past session_shutdown for a parked connection. */
+	let authRegistry: AuthRegistry | null = null;
+
+	/** The access token of Pi's Anthropic login, read fresh for every request (anthropicLogin). */
+	async function accessToken(): Promise<Token | LoginRefusal> {
+		const login = await anthropicLogin(authRegistry);
+		return "token" in login ? { value: login.token } : login;
 	}
 
 	/**
@@ -2713,7 +2672,7 @@ export default function (pi: ExtensionAPI) {
 			const reason = r.reason === "untrusted_device"
 				? "this device is not enrolled for your organization's Trusted Devices policy"
 				: r.reason === "session_stale_relogin"
-					? "your claude.ai login is too old for this organization — log in again"
+					? "your claude.ai login is too old for this organization — run /login again"
 					: `the server refused the request (${r.reason}${r.status ? `, HTTP ${r.status}` : ""})`;
 			return { error: `Remote Control is not available: ${reason}.`, terminal: true };
 		}
@@ -3234,9 +3193,10 @@ export default function (pi: ExtensionAPI) {
 			const id = (data as { id?: unknown } | undefined)?.id;
 			if (alive && connection && (id === undefined || id === usageSource()?.id)) reportRateLimits(connection);
 		}),
-		pi.events.on("claude-login:source", (data) => {
-			const source = data as ClaudeLoginSource | undefined;
-			if (typeof source?.token === "function") loginSource = source;
+		pi.events.on("subagents:state", (data) => {
+			if (!Array.isArray(data)) return;
+			subagents = data as SubagentView[];
+			if (alive && connection) reportTasks(connection);
 		}),
 		// A new SDK from claude-sdk-update.ts: its bridge is checked against the repairs at once, not only at the next /rc.
 		pi.events.on("claude-sdk-update:installed", (data) => {
@@ -3245,20 +3205,19 @@ export default function (pi: ExtensionAPI) {
 			const warning = bridgeCheck(dir);
 			if (warning) ctx.ui.notify(warning, "warning");
 		}),
-		pi.events.on("subagents:state", (data) => {
-			if (!Array.isArray(data)) return;
-			subagents = data as SubagentView[];
-			if (alive && connection) reportTasks(connection);
-		}),
 	];
 	pi.events.emit("plan-usage:source-request", undefined);
-	pi.events.emit("claude-login:source-request", undefined);
 
 	pi.registerFlag("remote-control", { description: "Connect the session to claude.ai and the Claude app at start", type: "boolean", default: false });
 
 	pi.on("session_start", (event, context) => {
 		ctx = context;
+		authRegistry = context.modelRegistry;
 		if (!context.hasUI) return;
+		if ((event.reason === "startup" || event.reason === "reload") && isClaudeModel(context.model)) {
+			const warning = bridgeCheck(claudeSdkDir());
+			if (warning) context.ui.notify(warning, "warning");
+		}
 		const s = shared();
 		s.adopt = adoptLate;
 		const parked = s.parked;
@@ -3272,10 +3231,6 @@ export default function (pi: ExtensionAPI) {
 		// reload: a connect still to be retried, or a handover that did not happen, comes back with the session's record.
 		const reopened = (event.reason === "startup" || event.reason === "resume" || event.reason === "reload") && readState().enabled === true && sessionConnected(context);
 		if (event.reason !== "startup" && !reopened) return;
-		if (event.reason === "startup") {
-			const warning = bridgeCheck(claudeSdkDir());
-			if (warning) context.ui.notify(warning, "warning");
-		}
 		const wanted = reopened || pi.getFlag("remote-control") === true || (startupSetting() && readState().enabled === true);
 		if (wanted) setTimeout(() => void connect(undefined, { attempt: 0 }), 500).unref?.();
 	});

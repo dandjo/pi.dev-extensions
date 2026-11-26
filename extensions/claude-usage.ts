@@ -4,10 +4,11 @@
  *
  * Rows: the 5h session, the 7d week, and model-scoped weekly windows such as Fable, each with its local reset time,
  * and the usage credits while they are enabled or anything was spent. Without a usable answer, a single "Limits" row
- * says why (loading, rate limited, no token, …). Without a Claude Code login there are no rows and no requests at all, so a user of another provider sees nothing of this. While the session's model is not a
- * Claude model (or it has none), the rows are hidden as well; the limits are still fetched, so they stand there as soon
- * as a Claude model is chosen again. With PI_OFFLINE set, the rows show what another session fetched last, and this
- * one fetches nothing.
+ * says why (loading, rate limited, no token, …). Without Pi's Anthropic login on a Claude subscription there are no
+ * rows and no requests at all, so a user of another provider, or of an Anthropic API key (which has no plan limits),
+ * sees nothing of this. While the session's model is not a Claude model (or it has none), the rows are hidden as well;
+ * the limits are still fetched, so they stand there as soon as a Claude model is chosen again. With PI_OFFLINE set,
+ * the rows show what another session fetched last, and this one fetches nothing.
  *
  * Times, dates, and amounts follow the locale of LC_TIME and LC_MONETARY (or LC_ALL, else LANG), as other programs
  * on the machine do; Node's own Intl default reads LANG alone.
@@ -15,17 +16,16 @@
  * Limits come from https://api.anthropic.com/api/oauth/usage (the endpoint Claude Code's /usage dialog uses),
  * fetched in the background so a render never waits on the network, and only while the status line shows the rows.
  * The endpoint is rate-limited per account, so all pi sessions share one answer through CACHE_FILE: whichever
- * session takes the lock asks, at most every USAGE_TTL_MS, and the others read the file. The OAuth access token comes
- * from claude-login.ts ("claude-login:source" on the event bus): Claude Code's login, the one the claude-sdk provider
- * runs on (Pi's own /login is not used), renewed by Claude Code once it ran out after hours without a request, and
- * while CLAUDE_CODE_OAUTH_TOKEN is set only a login of that token's account, the one the claude-sdk provider's prompts
- * run on. Without a valid login the Limits row names /claude-login, its command that signs Claude Code in again (a
- * login that reached its time limit always needs it); after a sign-in there ("claude-login:changed" on the event bus)
- * the limits of the new account are fetched at once, past the five-minute rule. Without that extension the token is
- * read here, without renewal and account check, the row names `!!claude auth login`, and the rows wait until a prompt
- * renews it.
- * It is never written to the cache and never refreshed here: rotating it would invalidate the refresh token behind
- * Claude Code's back.
+ * session takes the lock asks, at most every USAGE_TTL_MS, and the others read the file. The OAuth access token is
+ * Pi's own Anthropic login (/login, Anthropic, Claude subscription), the one the claude-bridge provider
+ * (pi-claude-agent-sdk) runs on, as ctx.modelRegistry.getProviderAuth("anthropic") hands it out: Pi renews a token
+ * that ran out before it does. Without a usable login the Limits row names /login. The token is never written to the
+ * cache and never refreshed here.
+ *
+ * Between the fetches, every response of the claude-bridge and anthropic providers updates the 5h and 7d windows from
+ * its anthropic-ratelimit-unified-* headers (after_provider_response; pi-claude-agent-sdk rebuilds them from Claude
+ * Code's rate-limit events), and the shared answer with them, so the rows follow each response. The fetches stay for
+ * the start, for idle times, and for what the headers lack: the model-scoped windows and the usage credits.
  *
  * The rows reach statusline.ts through the event bus ("statusline:section"); without it this file does nothing.
  * Other extensions read the answer through the event bus as well, in a protocol that does not depend on the provider:
@@ -34,13 +34,10 @@
  * claude-remote-control.ts hands the limits to the Claude app that way.
  */
 
-import { type ExtensionAPI, type Theme } from "@earendil-works/pi-coding-agent";
-import { execFile } from "node:child_process";
-import { createHash } from "node:crypto";
+import { type ExtensionAPI, type ExtensionContext, type Theme } from "@earendil-works/pi-coding-agent";
 import { mkdir, open, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { promisify } from "node:util";
 
 const SECTION_ID = "claude-usage";
 const POLL_MS = 10_000;
@@ -167,51 +164,35 @@ function fmtMoney(minor: number, places: number, currency: string): string {
 	}
 }
 
-const execFileAsync = promisify(execFile);
-
-function claudeDir(): string {
-	return process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), ".claude");
-}
+/** What the login lookup needs of ctx.modelRegistry. */
+type AuthRegistry = Pick<ExtensionContext["modelRegistry"], "getProviderAuth">;
 
 /**
- * Claude Code's stored login, the JSON with claudeAiOauth, or undefined. On macOS Claude Code keeps it in the login
- * keychain as the generic password "Claude Code-credentials" (with CLAUDE_CONFIG_DIR set, followed by "-" and the first
- * eight hex digits of that directory's SHA-256), and .credentials.json is only its fallback; elsewhere the file is the
- * store. macOS 26 prints a password with non-ASCII content as hex, which is decoded here.
- * claude-login.ts, claude-remote-control.ts carry a copy of this function: change them alike.
+ * Pi's Anthropic login: the OAuth access token, or why there is none: "none" without a login, "api-key" for an
+ * Anthropic API key (no claude.ai login, no plan limits), "failed" when Pi could not hand the token out (its renewal
+ * failed, for one).
  */
-async function claudeCodeCredentials(): Promise<any> {
-	if (process.platform === "darwin") {
-		const dir = process.env.CLAUDE_CONFIG_DIR;
-		const suffix = dir ? `-${createHash("sha256").update(dir).digest("hex").slice(0, 8)}` : "";
-		try {
-			const { stdout } = await execFileAsync(
-				"/usr/bin/security",
-				["find-generic-password", "-s", `Claude Code-credentials${suffix}`, "-w"],
-				{ timeout: 5_000 },
-			);
-			const raw = stdout.trim();
-			const parsed = JSON.parse(/^(?:[0-9a-f]{2})+$/i.test(raw) ? Buffer.from(raw, "hex").toString("utf8") : raw);
-			if (parsed?.claudeAiOauth) return parsed;
-		} catch {
-			// no keychain item: the file
-		}
-	}
-	try {
-		return JSON.parse(await readFile(path.join(claudeDir(), ".credentials.json"), "utf8"));
-	} catch {
-		return undefined;
-	}
-}
+type AnthropicLogin = { token: string } | { reason: "none" | "api-key" | "failed" };
 
-/** Claude Code's OAuth access token while it is valid (not expired). */
-async function readAccessToken(): Promise<string | null> {
-	const now = Date.now();
+/**
+ * Pi's own Anthropic login (/login, Anthropic, Claude subscription), the one the claude-bridge provider runs on, as
+ * getProviderAuth("anthropic") resolves it: Pi renews a stored OAuth token that runs out before it hands it over, so
+ * the token is valid, and it is never refreshed here. The token is never printed and never written anywhere.
+ * claude-remote-control.ts carries a copy of this function: change them alike.
+ */
+async function anthropicLogin(registry: AuthRegistry | null | undefined): Promise<AnthropicLogin> {
+	if (!registry) return { reason: "none" };
+	let resolved: Awaited<ReturnType<AuthRegistry["getProviderAuth"]>>;
 	try {
-		const o = (await claudeCodeCredentials())?.claudeAiOauth;
-		if (o?.accessToken && (!o.expiresAt || o.expiresAt > now)) return o.accessToken;
-	} catch {}
-	return null;
+		resolved = await registry.getProviderAuth("anthropic");
+	} catch {
+		return { reason: "failed" };
+	}
+	if (!resolved) return { reason: "none" };
+	if (!resolved.source?.toLowerCase().includes("oauth")) return { reason: "api-key" };
+	const authorization = Object.entries(resolved.auth.headers ?? {}).find(([name]) => name.toLowerCase() === "authorization")?.[1];
+	const token = resolved.auth.apiKey || (typeof authorization === "string" ? authorization.match(/^Bearer\s+(.+)$/i)?.[1] : undefined);
+	return token ? { token } : { reason: "failed" };
 }
 
 /**
@@ -220,20 +201,11 @@ async function readAccessToken(): Promise<string | null> {
  */
 function isClaudeModel(model: { provider: string; id: string } | undefined): boolean {
 	if (!model) return false;
-	return model.provider === "claude-sdk" || model.provider === "anthropic" || /claude/i.test(model.id);
+	return model.provider === "claude-bridge" || model.provider === "anthropic" || /claude/i.test(model.id);
 }
 
-/** The last answer of hasClaudeLogin, kept LOGIN_CHECK_MS so a macOS keychain is not asked at every poll. */
-let loginCheck: { at: number; present: boolean } | undefined;
+/** How long the answer whether there is a login at all is kept, so the credentials are not read at every poll. */
 const LOGIN_CHECK_MS = 60_000;
-
-/** Whether there is a Claude Code login at all, valid or not. */
-async function hasClaudeLogin(): Promise<boolean> {
-	if (loginCheck && Date.now() - loginCheck.at < LOGIN_CHECK_MS) return loginCheck.present;
-	const present = Boolean((await claudeCodeCredentials())?.claudeAiOauth);
-	loginCheck = { at: Date.now(), present };
-	return present;
-}
 
 function parseUsage(json: any): UsageSnapshot {
 	const limits: LimitRow[] = [];
@@ -263,25 +235,89 @@ function parseUsage(json: any): UsageSnapshot {
 	return { fetchedAt: Date.now(), limits, credits, answer };
 }
 
-/**
- * The token for the usage endpoint from claude-login.ts, or an error for the Limits row; without the extension the
- * token is read here, and a run-out login is not renewed.
- */
-async function usageToken(login: ClaudeLoginSource | null): Promise<{ value: string } | { error: string }> {
-	if (login) {
-		const token = await login.token();
-		if (!("reason" in token)) return { value: token.value };
-		if (token.reason === "ended") return { error: "login ended: /claude-login" };
-		return { error: token.reason === "other-account" ? "login: other account than CLAUDE_CODE_OAUTH_TOKEN" : "no valid login: /claude-login" };
-	}
-	const token = await readAccessToken();
-	return token ? { value: token } : { error: "no valid login: !!claude auth login" };
+/** A plan window from the anthropic-ratelimit-unified-* headers: its row and its key in the endpoint's answer. */
+interface HeaderWindow {
+	label: "5h" | "7d";
+	key: "five_hour" | "seven_day";
+	kind: "session" | "weekly_all";
+	percent: number;
+	/** ISO 8601, or null when the headers name no reset. */
+	resetsAt: string | null;
 }
 
-async function fetchUsage(login: ClaudeLoginSource | null): Promise<{ snapshot: UsageSnapshot } | { error: string }> {
-	const got = await usageToken(login);
-	if ("error" in got) return got;
-	const token = got.value;
+const HEADER_WINDOWS = [
+	{ abbreviation: "5h", label: "5h", key: "five_hour", kind: "session" },
+	{ abbreviation: "7d", label: "7d", key: "seven_day", kind: "weekly_all" },
+] as const;
+
+/**
+ * The 5h and 7d windows the anthropic-ratelimit-unified-* headers of a response name, as the Anthropic API sends them
+ * and pi-claude-agent-sdk rebuilds them: utilization as a fraction, the reset in epoch seconds.
+ */
+function headerWindows(raw: Record<string, string> | undefined): HeaderWindow[] {
+	if (!raw) return [];
+	const h = new Map(Object.entries(raw).map(([k, v]) => [k.toLowerCase(), String(v)]));
+	const windows: HeaderWindow[] = [];
+	for (const w of HEADER_WINDOWS) {
+		const utilization = h.get(`anthropic-ratelimit-unified-${w.abbreviation}-utilization`);
+		const fraction = utilization === undefined || utilization.trim() === "" ? Number.NaN : Number(utilization);
+		if (!Number.isFinite(fraction)) continue;
+		const reset = Number(h.get(`anthropic-ratelimit-unified-${w.abbreviation}-reset`));
+		windows.push({
+			label: w.label,
+			key: w.key,
+			kind: w.kind,
+			percent: Math.round(fraction * 10_000) / 100,
+			resetsAt: Number.isFinite(reset) && reset > 0 ? new Date(reset * 1000).toISOString() : null,
+		});
+	}
+	return windows;
+}
+
+/** Whether two resets name the same instant, to the second; null is no reset. */
+function sameReset(a: string | null | undefined, b: string | null | undefined): boolean {
+	if (!a || !b) return !a && !b;
+	return Math.abs(Date.parse(a) - Date.parse(b)) < 1_000;
+}
+
+/**
+ * The snapshot with the windows of a response's headers in it: the status line's rows and the endpoint's answer (its
+ * window and its limit row, the use 0-100 and the reset as ISO 8601, as the endpoint sends them); the rest stays as
+ * the last fetch left it. Null when the headers change nothing.
+ */
+function withHeaderWindows(base: UsageSnapshot | null | undefined, windows: HeaderWindow[]): UsageSnapshot | null {
+	const limits = (base?.limits ?? []).map((row) => ({ ...row }));
+	const answer: Record<string, unknown> = structuredClone(base?.answer ?? {});
+	let differs = false;
+	for (const w of windows) {
+		const row = limits.find((r) => r.label === w.label);
+		const resetsAt = w.resetsAt ?? row?.resetsAt ?? null;
+		if (!row) {
+			// 5h first, 7d after it, the model-scoped rows last, as the endpoint orders them
+			limits.splice(w.label === "5h" ? 0 : limits.findIndex((r) => r.label === "5h") + 1, 0, { label: w.label, percent: w.percent, resetsAt });
+			differs = true;
+		} else if (row.percent !== w.percent || !sameReset(row.resetsAt, resetsAt)) {
+			row.percent = w.percent;
+			row.resetsAt = resetsAt;
+			differs = true;
+		}
+		const window = answer[w.key];
+		answer[w.key] = { ...(window && typeof window === "object" ? window : {}), utilization: w.percent, resets_at: resetsAt };
+		if (Array.isArray(answer.limits)) {
+			const rows = answer.limits as Record<string, unknown>[];
+			const i = rows.findIndex((r) => r?.kind === w.kind);
+			if (i >= 0) rows[i] = { ...rows[i], percent: w.percent, resets_at: resetsAt };
+			else rows.push({ kind: w.kind, percent: w.percent, resets_at: resetsAt });
+		}
+	}
+	if (!differs) return null;
+	return { fetchedAt: Date.now(), limits, credits: base?.credits ?? null, answer };
+}
+
+async function fetchUsage(registry: AuthRegistry | null): Promise<{ snapshot: UsageSnapshot } | { error: string }> {
+	const login = await anthropicLogin(registry);
+	if (!("token" in login)) return { error: login.reason === "failed" ? "no valid login: /login" : "no Claude subscription login: /login" };
+	const token = login.token;
 	let res: Response;
 	try {
 		res = await fetch(USAGE_URL, {
@@ -348,39 +384,6 @@ async function acquireLock(): Promise<LockResult> {
 	return "busy";
 }
 
-// A copy of ClaudeLoginSource from claude-login.ts, the event-bus contract between the two: change both alike.
-/** What "claude-login:source" carries. */
-interface ClaudeLoginSource {
-	/**
-	 * Has Claude Code renew its run-out claude.ai login. True when its token is valid afterwards. Joins a renewal that is
-	 * running, and answers false at once while the wait after the last one lasts or the login has ended. Never rejects.
-	 * To be called once the caller found no valid token, not before. token() does this itself.
-	 */
-	renew(): Promise<boolean>;
-	/**
-	 * The claude.ai access token of Claude Code's login, valid for at least another minute. With renew (the default) a
-	 * run-out login is renewed by Claude Code first, as renew() does. While CLAUDE_CODE_OAUTH_TOKEN is set, a login of
-	 * another organization is passed over. Without a token, reason says whether there was none, the login ended (it
-	 * needs /login in Claude Code), or it is one of another account. Never rejects.
-	 */
-	token(options?: { renew?: boolean }): Promise<ClaudeLoginToken | ClaudeLoginRefusal>;
-}
-
-/** What token() answers with a token, and whether it was renewed for this call. */
-interface ClaudeLoginToken {
-	value: string;
-	renewed: boolean;
-}
-
-/**
- * What token() answers without one: no valid login, a login that reached its time limit and needs /login in Claude
- * Code, or a login of another account than CLAUDE_CODE_OAUTH_TOKEN.
- */
-interface ClaudeLoginRefusal {
-	value?: undefined;
-	reason: "none" | "ended" | "other-account";
-}
-
 /**
  * The bars of the status line: a label, a bar coloured by how full it is, and the percentage. statusline.ts draws its
  * context row with it, claude-usage.ts its limit rows.
@@ -421,10 +424,26 @@ export default function (pi: ExtensionAPI) {
 	let loggedIn: boolean | undefined;
 	/** Whether the session's model is a Claude model; false hides the rows, the requests go on. */
 	let claudeModel = false;
-	/** claude-login.ts, once it answered; without it a run-out login is not renewed here. */
-	let loginSource: ClaudeLoginSource | null = null;
-	/** Set once Claude Code was signed in anew: the next refresh asks past the five-minute rule. */
-	let accountChanged = false;
+	/** Pi's model registry, from the latest event; it resolves Pi's Anthropic login. */
+	let registry: AuthRegistry | null = null;
+	/** Whether there is a login with plan limits (a usable one or not), kept LOGIN_CHECK_MS. */
+	let loginCheck: { at: number; present: boolean } | undefined;
+
+	const useRegistry = (ctx: ExtensionContext) => {
+		const current = ctx.modelRegistry;
+		if (current === registry) return;
+		registry = current;
+		loginCheck = undefined;
+	};
+
+	/** Whether there is a Claude subscription login in Pi at all, usable or not: an API key and no login are not. */
+	async function hasPlanLogin(): Promise<boolean> {
+		if (loginCheck && Date.now() - loginCheck.at < LOGIN_CHECK_MS) return loginCheck.present;
+		const login = await anthropicLogin(registry);
+		const present = "token" in login || login.reason === "failed";
+		loginCheck = { at: Date.now(), present };
+		return present;
+	}
 
 	const changed = () => {
 		pi.events.emit("statusline:changed", undefined);
@@ -443,7 +462,7 @@ export default function (pi: ExtensionAPI) {
 		inFlight = true;
 		let lock: LockResult = "unshared";
 		try {
-			const login = await hasClaudeLogin();
+			const login = await hasPlanLogin();
 			if (login !== loggedIn) {
 				loggedIn = login;
 				changed();
@@ -451,16 +470,15 @@ export default function (pi: ExtensionAPI) {
 			if (!login) return;
 			if (adopt(await readState())) changed();
 			if (process.env.PI_OFFLINE) return;
-			if (!accountChanged && Date.now() - (state?.attemptAt ?? 0) < USAGE_TTL_MS) return;
+			if (Date.now() - (state?.attemptAt ?? 0) < USAGE_TTL_MS) return;
 
 			lock = await acquireLock();
 			if (lock === "busy") return; // the other session's answer arrives through the cache
 			if (lock === "acquired") {
 				// Another session may have finished between the read above and the lock
 				if (adopt(await readState())) changed();
-				if (!accountChanged && Date.now() - (state?.attemptAt ?? 0) < USAGE_TTL_MS) return;
+				if (Date.now() - (state?.attemptAt ?? 0) < USAGE_TTL_MS) return;
 			}
-			accountChanged = false;
 
 			const save = async (next: Omit<UsageState, "updatedAt">) => {
 				state = { ...next, updatedAt: Date.now() };
@@ -471,11 +489,12 @@ export default function (pi: ExtensionAPI) {
 			const attemptAt = Date.now();
 			const previous = state?.snapshot ?? null;
 			await save({ attemptAt, snapshot: previous, error: null });
-			const result = await fetchUsage(loginSource);
+			const result = await fetchUsage(registry);
 			await save(
 				"snapshot" in result
 					? { attemptAt, snapshot: result.snapshot, error: null }
-					: { attemptAt, snapshot: previous, error: result.error },
+					: // a response's headers may have updated the snapshot meanwhile
+						{ attemptAt, snapshot: state?.snapshot ?? previous, error: result.error },
 			);
 		} finally {
 			if (lock === "acquired") await unlink(LOCK_FILE).catch(() => {});
@@ -550,8 +569,39 @@ export default function (pi: ExtensionAPI) {
 		pi.events.emit("statusline:changed", undefined);
 	};
 	// A restored session fires no model_select, so session_start reads the model as well
-	pi.on("session_start", (_event, ctx) => modelChanged(ctx.model));
-	pi.on("model_select", (event) => modelChanged(event.model));
+	pi.on("session_start", (_event, ctx) => {
+		useRegistry(ctx);
+		modelChanged(ctx.model);
+	});
+	pi.on("model_select", (event, ctx) => {
+		useRegistry(ctx);
+		modelChanged(event.model);
+	});
+
+	/** The windows of a response's headers into the state and the shared answer. */
+	async function applyHeaders(windows: HeaderWindow[]): Promise<void> {
+		if (adopt(await readState())) changed();
+		const snapshot = withHeaderWindows(state?.snapshot, windows);
+		if (!snapshot) return;
+		state = { attemptAt: state?.attemptAt ?? 0, updatedAt: Date.now(), snapshot, error: state?.error ?? null };
+		try {
+			await mkdir(CACHE_DIR, { recursive: true, mode: 0o700 });
+			await writeState(state);
+		} catch {
+			// this session shows it all the same
+		}
+		changed();
+	}
+
+	// pi-claude-agent-sdk passes Claude Code's rate-limit events on as these headers; the anthropic provider has them
+	// from the API itself.
+	pi.on("after_provider_response", (event, ctx) => {
+		useRegistry(ctx);
+		const provider = ctx.model?.provider;
+		if (provider !== "claude-bridge" && provider !== "anthropic") return;
+		const windows = headerWindows(event.headers);
+		if (windows.length > 0) void applyHeaders(windows).catch(() => {});
+	});
 
 	const section: StatuslineSection = { id: SECTION_ID, render };
 	pi.events.on("statusline:section-request", () => pi.events.emit("statusline:section", section));
@@ -568,18 +618,4 @@ export default function (pi: ExtensionAPI) {
 	};
 	pi.events.on("plan-usage:source-request", () => pi.events.emit("plan-usage:source", source));
 	pi.events.emit("plan-usage:source", source);
-
-	// The limits shown so far are another account's: none until the new account's arrive.
-	pi.events.on("claude-login:changed", () => {
-		accountChanged = true;
-		if (state) state = { ...state, snapshot: null, error: null };
-		changed();
-		void refreshUsage();
-	});
-
-	pi.events.on("claude-login:source", (data) => {
-		const offered = data as ClaudeLoginSource | undefined;
-		if (typeof offered?.token === "function") loginSource = offered;
-	});
-	pi.events.emit("claude-login:source-request", undefined);
 }

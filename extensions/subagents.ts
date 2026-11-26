@@ -800,7 +800,7 @@ interface Rung {
 /**
  * The ladder ~/.pi/agent/subagents.json defines for the current model's provider, or undefined when it defines none:
  *
- *   {"ladder": {"claude-sdk": ["haiku", {"model": "claude-sonnet-5-5", "use": "implementation"}, "opus"]}}
+ *   {"ladder": {"claude-bridge": ["haiku", {"model": "claude-sonnet-5-5", "use": "implementation"}, "opus"]}}
  *
  * An entry is a model id of that provider ("<provider>/" before it may stay), or a part of ids, which names the
  * newest available model whose id holds it (the current model when its id does); an object adds `use`, the work the

@@ -4,11 +4,16 @@
  * the session until the user presses Esc, 42 minutes in one case.
  *
  * - A bash tool call without timeout gets the default, 120 seconds as in Claude Code. A call that gives its own keeps
- *   it. Pi stops the command with everything it started when the time is up.
+ *   it. Pi stops the command with everything it started when the time is up. Whether the call came with one is read
+ *   from its arguments as the model sent them (tool_execution_start): a default another extension set before this
+ *   handler runs (pi-claude-agent-sdk sets 120 seconds for its claude-bridge models) gives way to this one, so the
+ *   setting and the hint below apply there as well.
  * - The model learns of the default from a guideline of the bash tool, so it sets timeout itself for a build, a test
- *   run, or an install that takes longer. A provider that renders the prompt itself before this handler runs, as
- *   pi-claude-subscription does, gets the guideline added to its "Guidelines:" list; a prompt without that list (a
- *   SYSTEM.md of the user's) goes without, and the hint after a timeout tells the model.
+ *   run, or an install that takes longer: Pi renders it into its prompt's <rules>. A custom prompt (a SYSTEM.md of the
+ *   user's) gets it in its "Guidelines:" list when it has one, and goes without otherwise. pi-claude-agent-sdk (the
+ *   claude-bridge provider) passes Claude Code only the portable parts of Pi's prompt (context files, skills, a custom
+ *   prompt, appended text, sections), not its rules, so the guideline does not reach its models either. Either way,
+ *   the hint after a timeout tells the model.
  * - A command the default stopped comes back with a hint: run it again with the timeout it needs, use the wait tool
  *   for something that has not happened yet, or find the process that did not end.
  * - {"seconds": n} in ~/.pi/agent/bash-timeout.json changes the default; 0 turns it off. The user's own ! commands
@@ -34,6 +39,8 @@ function loadSeconds(): number {
 export default function (pi: ExtensionAPI) {
 	/** The bash calls that run with the default, by tool call id. */
 	const defaulted = new Map<string, number>();
+	/** The bash calls the model sent without timeout, by tool call id, until their tool_call. */
+	const untimed = new Set<string>();
 
 	pi.on("before_agent_start", (event) => {
 		const seconds = loadSeconds();
@@ -56,10 +63,18 @@ export default function (pi: ExtensionAPI) {
 		return undefined;
 	});
 
+	// The arguments as the model sent them: tool_call hands out a copy that other extensions may have changed already.
+	pi.on("tool_execution_start", (event) => {
+		if (event.toolName === "bash" && (event.args as { timeout?: unknown } | undefined)?.timeout === undefined) untimed.add(event.toolCallId);
+	});
+	pi.on("tool_execution_end", (event) => {
+		untimed.delete(event.toolCallId);
+	});
+
 	pi.on("tool_call", (event) => {
 		if (event.toolName !== "bash") return undefined;
 		const input = event.input as { timeout?: unknown };
-		if (input.timeout !== undefined) return undefined;
+		if (!untimed.delete(event.toolCallId) && input.timeout !== undefined) return undefined;
 		const seconds = loadSeconds();
 		if (seconds <= 0) return undefined;
 		input.timeout = seconds;

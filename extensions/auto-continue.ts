@@ -27,8 +27,7 @@
  *   more, so the sessions of one account do not all start at the same second; an exact one plus two seconds and up to
  *   a tenth of the wait, half a minute at most.
  * - While the run waits, the plan's limits are asked again every five minutes: a window shown used up that is free again
- *   lets the run continue early. It continues at once after "claude-login:changed" (/claude-login signed Claude Code
- *   in, with another account if need be).
+ *   lets the run continue early.
  * - Without a reset time, a usage limit or quota ("usage limit", "quota", "per day", "exhausted your capacity", …) is
  *   tried again after 2, 5, 10, 15, and 30 minutes, then every hour. A plain rate limit ("rate limit", "too many
  *   requests", 429) is Pi's own retry's first (retry.maxRetries); once Pi gives up on it, it is tried again the same
@@ -51,15 +50,14 @@
  *   a run. The retry waits until Pi is idle, as a compaction ends a running run, and goes as /compact with the
  *   instructions the failed one had; after one that a context overflow started, the run that overflowed continues
  *   with a note. Meanwhile the status line reads "⧗ compaction at 11:41 (in 7m) · esc cancels"; Esc in an empty
- *   editor, a prompt, or another compaction that succeeds ends the wait, and "claude-login:changed" starts the retry
- *   at once. The wait outlasts /reload, not a restart of Pi: a context over the threshold compacts with the next run.
+ *   editor, a prompt, or another compaction that succeeds ends the wait. The wait outlasts /reload, not a restart of
+ *   Pi: a context over the threshold compacts with the next run.
  * - Pi ended during the wait (a signal at reboot, /quit, or a crash): when the session starts or is resumed before the
  *   reset, the wait resumes with a note of its own; once the reset has passed, a notice says to send a prompt. Pi ends
  *   a run before it quits, as Esc does, so a wait ended that way is marked in the session (a custom entry, outside the
  *   model's context) for the next start to tell it from Esc.
  * - While a run waits, "auto-continue:state" carries { waiting: true } on the event bus, and { waiting: false } once it
- *   no longer does; "auto-continue:state-request" asks for it. tmux-tab-activity.ts rests the tab meanwhile, and
- *   claude-login.ts words its notice for a used-up limit for it.
+ *   no longer does; "auto-continue:state-request" asks for it. tmux-tab-activity.ts rests the tab meanwhile.
  *
  * The wait happens in the context event of the request that follows the failed one. Handlers of that event run in
  * load order, which is the order of the file names: this file's name sorts before network-resilience.ts, whose
@@ -453,8 +451,6 @@ export default function (pi: ExtensionAPI) {
 	let waiting = false;
 	/** When a wait last ended because its run was aborted. */
 	let abortedAt = 0;
-	/** When Claude Code was last signed in anew. */
-	let loginChangedAt = 0;
 	let ctxRef: ExtensionContext | undefined;
 	/** The compaction that waits for its limit to reset, and the limit hits of compactions. */
 	let compaction: CompactionWait | undefined;
@@ -558,7 +554,6 @@ export default function (pi: ExtensionAPI) {
 		try {
 			while (!signal?.aborted) {
 				const now = Date.now();
-				if (loginChangedAt > wait.hitAt) return true;
 				const plan = source(ctx.model);
 				if (plan && now - asked >= USAGE_ASK_MS) {
 					asked = now;
@@ -649,7 +644,7 @@ export default function (pi: ExtensionAPI) {
 		const ctx = ctxRef;
 		if (!wait || !ctx) return;
 		const now = Date.now();
-		let free = loginChangedAt > wait.hitAt;
+		let free = false;
 		const plan = source(ctx.model);
 		if (plan && now - compactionAsked >= USAGE_ASK_MS) {
 			compactionAsked = now;
@@ -717,9 +712,6 @@ export default function (pi: ExtensionAPI) {
 		if (typeof offered?.id === "string" && typeof offered.snapshot === "function" && typeof offered.appliesTo === "function") {
 			sources.set(offered.id, offered);
 		}
-	});
-	pi.events.on("claude-login:changed", () => {
-		loginChangedAt = Date.now();
 	});
 	pi.events.on(STATE_REQUEST, emitState);
 

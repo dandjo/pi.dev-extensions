@@ -16,7 +16,7 @@
  * - Outcomes other than plain delivery (held, denied, expired, refused, dropped) go back to the sender as
  *   peer_message_status frames and reach its model as a [Cross-session delivery notice].
  * - list_agents also lists the Claude Code sessions on this machine, read from Claude Code's registry without changing
- *   it; Claude Code processes a Pi process started directly (the claude-sdk provider's) are left out. They receive
+ *   it; Claude Code processes a Pi process started directly (the claude-bridge provider's) are left out. They receive
  *   messages the same way and can reply, but they cannot list Pi sessions and send them no delivery or idle notices.
  * - /list-agents (also /peers) shows this session's own name and the sessions it can reach.
  * - Bash commands get PI_MESSAGING_SOCKET and PI_MESSAGING_TOKEN, so a script can post into its own session.
@@ -376,7 +376,7 @@ function isSocketFile(socketPath: string): boolean {
 
 /**
  * Live Claude Code sessions, read from Claude Code's own registry without changing it. Claude Code processes a Pi
- * process started directly, such as the claude-sdk provider's, are left out: they are Pi's backends, not sessions.
+ * process started directly, such as the claude-bridge provider's, are left out: they are Pi's backends, not sessions.
  */
 function claudeRecords(piPids: Set<number>): SessionRecord[] {
 	const dir = claudeSessionsDir();

@@ -5,10 +5,10 @@
  * response · check your network"; it aborts a stream that went silent or outlived a system suspend and retries on a
  * fresh connection; it names the cause of a connection error ("No internet route — check your connection or VPN");
  * and it retries ten times with a backoff that doubles from 0.5 s to 32 s. Pi retries three times within 14 s unless
- * its retry settings say otherwise, and shows nothing while a request hangs. Through pi-claude-subscription, Claude Code's own retries stay invisible as
- * well: the provider drops their messages, so Pi shows "Working…" for as long as Claude Code retries, which with
- * connects that time out takes twenty minutes and more. This extension adds Claude Code's behaviour on top of Pi's,
- * with documented extension events only:
+ * its retry settings say otherwise, and shows nothing while a request hangs. Through pi-claude-agent-sdk (the
+ * claude-bridge provider), Claude Code's own retries stay invisible as well: the provider drops their messages, so Pi
+ * shows "Working…" for as long as Claude Code retries, which with connects that time out takes twenty minutes and
+ * more. This extension adds Claude Code's behaviour on top of Pi's, with documented extension events only:
  *
  * - Stall notice: after 20 s without a stream event, the working message counts the wait and says whether the API
  *   host answers a TCP probe (DNS and connect, through HTTPS_PROXY when one is set).
@@ -31,14 +31,16 @@
  * - When the API delivers data while the probe fails, the probe does not reflect this network (a proxy Pi does not
  *   see, for example). Probing then stops until Pi restarts; restarts after a disruption follow the grace alone.
  * - The probe goes to the model's API host. A provider without an http(s) base URL is probed only when it is
- *   claude-sdk (pi-claude-subscription), whose Claude Code talks to Anthropic; any other is not probed (set
- *   probeHost for it), and its restarts follow the grace alone.
+ *   claude-bridge (pi-claude-agent-sdk), whose Claude Code talks to api.anthropic.com (an Anthropic base URL set in Pi
+ *   needs probeHost); any other is not probed (set probeHost for it), and its restarts follow the grace alone.
  *
  * Optional settings in ~/.pi/agent/network-resilience.json: noticeSeconds (20), graceSeconds (10), stallSeconds
  * (300, 0 turns the silence restart off), maxRestarts (3), offlineWaitMinutes (30, 0 turns the waiting off),
- * cacheWarmMinutes (how long the provider's prompt cache lives: 5, Anthropic's default; 60 for the claude-sdk
- * provider, whose cache lives an hour), and probeHost ("host:port" to probe instead of the model's API host). Under "providers", every key can be set for one provider ({"providers": {"openai": {"cacheWarmMinutes": 10}}});
- * a key set there wins over the same key at the top, which wins over the built-in values.
+ * cacheWarmMinutes (how long the provider's prompt cache lives: 5, Anthropic's default; 60 for the claude-bridge
+ * provider, whose Claude Code writes the cache for an hour on a Claude subscription), and probeHost ("host:port" to
+ * probe instead of the model's API host). Under "providers", every key can be set for one provider
+ * ({"providers": {"openai": {"cacheWarmMinutes": 10}}}); a key set there wins over the same key at the top, which wins
+ * over the built-in values.
  */
 
 import { existsSync, readFileSync } from "node:fs";
@@ -104,9 +106,13 @@ const DEFAULTS: Config = {
 	cacheWarmMinutes: 5,
 };
 
-/** Built-in values that differ by provider; the claude-sdk provider writes its prompt cache for an hour. */
+/**
+ * Built-in values that differ by provider. Claude Code writes its prompt cache for an hour on a Claude subscription
+ * (five minutes while a request draws on usage credits, and with an API key), so the claude-bridge provider's lives
+ * that long.
+ */
 const PROVIDER_DEFAULTS: Record<string, Partial<Config>> = {
-	"claude-sdk": { cacheWarmMinutes: 60 },
+	"claude-bridge": { cacheWarmMinutes: 60 },
 };
 
 /** The settings for a provider: built-in values, the file's top level, then the file's entry for the provider. */
@@ -166,11 +172,12 @@ function probeTarget(ctx: ExtensionContext | undefined, config: Config): Target 
 		const own = hostPort(config.probeHost, 443);
 		if (own) return { ...own, label: own.host };
 	}
-	// pi-claude-subscription's models have the pseudo URL claude-agent-sdk://local: Claude Code talks to Anthropic.
+	// pi-claude-agent-sdk's models have the pseudo URL "claude-bridge": Claude Code talks to Anthropic. The provider
+	// drops ANTHROPIC_BASE_URL from Claude Code's environment and passes on only a base URL of Pi's Anthropic login.
 	const baseUrl = ctx?.model?.baseUrl;
 	const http = baseUrl && /^https?:\/\//.test(baseUrl);
-	if (!http && ctx?.model?.provider !== "claude-sdk") return undefined;
-	const api = http ? baseUrl : process.env.ANTHROPIC_BASE_URL || "https://api.anthropic.com";
+	if (!http && ctx?.model?.provider !== "claude-bridge") return undefined;
+	const api = http ? baseUrl : "https://api.anthropic.com";
 	const target = hostPort(api, 443) ?? { host: "api.anthropic.com", port: 443 };
 	const proxy = process.env.HTTPS_PROXY ?? process.env.https_proxy ?? process.env.ALL_PROXY ?? process.env.all_proxy;
 	const via = proxy && !bypassesProxy(target.host.toLowerCase()) ? hostPort(proxy, 8080) : undefined;

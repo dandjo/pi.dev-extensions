@@ -296,10 +296,11 @@ const FetchParams = Type.Object({
  * one with the lowest list price (input + output per million tokens), if it is cheaper than the current model;
  * otherwise the current model. So a side task never moves to another provider or account. On providers that serve
  * several makers' models with the maker in the id ("anthropic/claude-…" on OpenRouter, "us.anthropic.claude-…" on
- * Bedrock), only models of the current maker qualify. A current model without a price (local, unknown) is kept.
+ * Bedrock), only models of the current maker qualify. A current model without a price (local, unknown) is kept; one
+ * that only its provider lists without a price is priced as the same model elsewhere in the registry (claude-bridge).
  * PI_SMALL_MODEL=<provider>/<model-id> overrides the choice.
  *
- * btw.ts, session-title.ts carry a copy of this block, or of a part of it: change them alike.
+ * session-title.ts carries a copy of this block: change them alike.
  */
 const REQUEST_TIMEOUT_MS = 120_000;
 
@@ -310,25 +311,15 @@ const REQUEST_TIMEOUT_MS = 120_000;
 const THINKING_ROOM = 4_096;
 
 /**
- * Side requests to the claude-sdk provider run one at a time, across every extension that loads this file: it runs one
- * process per request and may otherwise close the conversation's own process while it waits for tool results
- * (pi-claude-subscription keeps at most three Claude Code processes and closes the least recently used one outside a
- * call). Other providers take them at once.
+ * A model's list price, input + output per million tokens. A provider that passes another's models on without their
+ * prices (claude-bridge lists its Claude models at no cost) gets the price of a model of the same id elsewhere in the
+ * registry, so its cheaper models still count as cheaper.
  */
-const gate: { tail: Promise<unknown> } = ((globalThis as Record<symbol, unknown>)[Symbol.for("pi.small-model.gate")] ??= {
-	tail: Promise.resolve(),
-}) as { tail: Promise<unknown> };
-
-/** Runs `run` after every side request to claude-sdk queued before it has finished; to other providers at once. */
-function oneAtATime<T>(model: Model<Api>, run: () => Promise<T>): Promise<T> {
-	if (model.provider !== "claude-sdk") return run();
-	const result = gate.tail.then(run, run);
-	gate.tail = result.catch(() => {});
-	return result;
-}
-
-function price(model: Model<Api>): number {
-	return model.cost.input + model.cost.output;
+function price(ctx: ExtensionContext, model: Model<Api>): number {
+	const own = model.cost.input + model.cost.output;
+	if (own > 0) return own;
+	const other = ctx.modelRegistry.getAll().find((m) => m.id === model.id && m.cost.input + m.cost.output > 0);
+	return other ? other.cost.input + other.cost.output : own;
 }
 
 /** The model maker named at the start of an id, or "" when the id names none. */
@@ -346,12 +337,12 @@ async function pickSmallModel(ctx: ExtensionContext): Promise<Model<Api> | undef
 	}
 
 	const current = ctx.model;
-	if (!current || !(price(current) > 0)) return current;
+	if (!current || !(price(ctx, current) > 0)) return current;
 	const currentMaker = maker(current.id);
 	let best = current;
 	for (const model of await ctx.modelRegistry.getAvailableOfType("chat", current.provider)) {
 		if (!model.input.includes("text") || maker(model.id) !== currentMaker) continue;
-		if (price(model) > 0 && price(model) < price(best)) best = model;
+		if (price(ctx, model) > 0 && price(ctx, model) < price(ctx, best)) best = model;
 	}
 	return best;
 }
@@ -359,7 +350,7 @@ async function pickSmallModel(ctx: ExtensionContext): Promise<Model<Api> | undef
 /**
  * The thinking level for a side task: "off" (undefined) where the model can turn thinking off, else its lowest level.
  * A model cannot when its levels exclude "off" or when it thinks adaptively whatever it is asked (compat
- * forceAdaptiveThinking: Claude Haiku 5.5, for one). A provider that passes another's models on (claude-sdk) may drop
+ * forceAdaptiveThinking: Claude Haiku 5.5, for one). A provider that passes another's models on (claude-bridge) may drop
  * their compat, so a model of the same id elsewhere in the registry counts too.
  */
 function lowestThinking(ctx: ExtensionContext, model: Model<Api>): "minimal" | "low" | undefined {
@@ -374,9 +365,10 @@ function lowestThinking(ctx: ExtensionContext, model: Model<Api>): "minimal" | "
 }
 
 /**
- * One request without tools or history, queued behind other side requests and cancelled after two minutes. maxTokens
- * is the size of the answer; a model that must think gets THINKING_ROOM on top. The reply's stopReason is "error" or
- * "aborted" when it failed.
+ * One request without tools or history, cancelled after two minutes. maxTokens is the size of the answer; a model
+ * that must think gets THINKING_ROOM on top. The reply's stopReason is "error" or "aborted" when it failed. With
+ * cacheRetention "none", pi-claude-agent-sdk runs it as an isolated one-off Claude Code query with this system prompt,
+ * apart from the conversation's own.
  */
 function askModel(
 	ctx: ExtensionContext,
@@ -387,22 +379,20 @@ function askModel(
 ): Promise<AssistantMessage> {
 	const reasoning = lowestThinking(ctx, model);
 	const maxTokens = options.maxTokens + (reasoning ? THINKING_ROOM : 0);
-	return oneAtATime(model, () => {
-		const timeout = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
-		return ctx.modelRegistry
-			.streamSimple(
-				model,
-				{ systemPrompt, messages: [{ role: "user", content: [{ type: "text", text }], timestamp: Date.now() }] },
-				{
-					maxTokens: Math.min(maxTokens, model.maxTokens),
-					reasoning,
-					signal: options.signal ? AbortSignal.any([options.signal, timeout]) : timeout,
-					cacheRetention: "none",
-					sessionId: uuidv7(),
-				},
-			)
-			.result();
-	});
+	const timeout = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
+	return ctx.modelRegistry
+		.streamSimple(
+			model,
+			{ systemPrompt, messages: [{ role: "user", content: [{ type: "text", text }], timestamp: Date.now() }] },
+			{
+				maxTokens: Math.min(maxTokens, model.maxTokens),
+				reasoning,
+				signal: options.signal ? AbortSignal.any([options.signal, timeout]) : timeout,
+				cacheRetention: "none",
+				sessionId: uuidv7(),
+			},
+		)
+		.result();
 }
 
 function replyText(reply: AssistantMessage): string {
