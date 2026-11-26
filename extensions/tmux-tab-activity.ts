@@ -10,8 +10,12 @@
  * own spinner (pi-tui's Loader), ⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏, one every 80 ms, each taken from the clock, so all tabs show the same frame. It stops when Pi settles,
  * and no subagent works, pauses while an ask_user_question dialog waits (its mark shows then, see below), and puts Pi's own title back. A run that waits for a usage limit to reset (auto-continue.ts,
  * "auto-continue:state") does not count as work meanwhile, nor does a run that only waits in agent calls of its own
- * whose subagents all wait (for an instruction, an answer, or a usage limit). Background waits (wait.ts, gitlab.ts)
- * never count: they run without the model, as the session waits idle.
+ * whose subagents all wait (for an instruction, an answer, or a usage limit).
+ *
+ * Background waits (wait.ts, gitlab.ts, "background-waits:state") run without the model, so they are not work: while
+ * one runs and nothing works, the spinner turns slowly instead, a frame every 400 ms, in step with the other tabs that
+ * wait. A repeating wait (repeat: true, a keepalive) does not count, as it runs for hours; an open question stops the
+ * slow spinner as it stops the fast one.
  *
  * A window with several panes shows the pane whose Pi works: the active pane's while it works, else the first other
  * pane's that works, else the active pane's. While another pane works, the tab shows that pane's name, so its width
@@ -66,6 +70,8 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 /** Pi's spinner (pi-tui's Loader): its frames, and how long each shows. */
 const FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const FRAME_MS = 80;
+/** A frame of the slow spinner, which turns while only background waits run. */
+const WAIT_FRAME_MS = 400;
 /** Pi's title starts with this; a Pi build with a name of its own (piConfig.name) is not covered. */
 const APP_TITLE = "π";
 /** Marks a working session's title; the spinner's frame follows, which the tab formats put in place of the π. */
@@ -83,6 +89,9 @@ const ASK_OPTION = "@pi_ask";
 /** auto-continue.ts: whether the run waits for a usage limit to reset ({ waiting }), and the request for it. */
 const LIMIT_STATE = "auto-continue:state";
 const LIMIT_REQUEST = "auto-continue:state-request";
+/** wait.ts and gitlab.ts: the background waits of a tool ({ tool, waits }) whenever they change, and the request. */
+const WAITS_STATE = "background-waits:state";
+const WAITS_REQUEST = "background-waits:request";
 /** The tool of subagents.ts: a call of it in the foreground waits for its subagent. */
 const AGENT_TOOL = "agent";
 
@@ -116,8 +125,8 @@ function plainTitle(name: string | undefined, dir: string): string {
 }
 
 /** The title with the spinner's frame at `now`, the same in every Pi; an unnamed session shows its directory. */
-function spinnerTitle(name: string | undefined, dir: string, now: number): string {
-	const frame = FRAMES[Math.floor(now / FRAME_MS) % FRAMES.length];
+function spinnerTitle(name: string | undefined, dir: string, now: number, frameMs: number): string {
+	const frame = FRAMES[Math.floor(now / frameMs) % FRAMES.length];
 	return `${APP_TITLE} - ${MARK}${frame} ${name ?? dir} - ${dir}`;
 }
 
@@ -136,6 +145,8 @@ export default function (pi: ExtensionAPI) {
 	let foregroundWaiting = 0;
 	/** The tool calls of the run that execute now: tool call id -> tool name. */
 	const tools = new Map<string, string>();
+	/** The background waits running now that end on their own (not repeating), by the tool that waits. */
+	const waits = new Map<string, number>();
 	/** The ask_user_question dialogs open now, by tool call id. */
 	const asking = new Set<string>();
 	let timer: ReturnType<typeof setTimeout> | null = null;
@@ -152,14 +163,17 @@ export default function (pi: ExtensionAPI) {
 		foregroundWaiting === foreground;
 	const working = () =>
 		((running && !limitWait && !held()) || compacting || agents > 0) && asking.size === 0;
+	const waiting = () => !working() && asking.size === 0 && [...waits.values()].some((count) => count > 0);
+	const turning = () => working() || waiting();
 	const dir = (context: ExtensionContext) => path.basename(context.cwd);
 
 	function frame(): void {
 		if (!ctx) return;
 		const now = Date.now();
-		ctx.ui.setTitle(spinnerTitle(pi.getSessionName()?.trim() || undefined, dir(ctx), now));
-		// The next frame starts on the clock's next multiple of FRAME_MS, as in every other Pi.
-		timer = setTimeout(frame, FRAME_MS - (now % FRAME_MS) + 1);
+		const frameMs = working() ? FRAME_MS : WAIT_FRAME_MS;
+		ctx.ui.setTitle(spinnerTitle(pi.getSessionName()?.trim() || undefined, dir(ctx), now, frameMs));
+		// The next frame starts on the clock's next multiple of its length, as in every other Pi.
+		timer = setTimeout(frame, frameMs - (now % frameMs) + 1);
 		timer.unref?.();
 	}
 
@@ -172,14 +186,21 @@ export default function (pi: ExtensionAPI) {
 
 	async function update(): Promise<void> {
 		const call = ++generation;
-		if (!ctx || ctx.mode !== "tui" || !working()) {
+		if (!ctx || ctx.mode !== "tui" || !turning()) {
 			stop();
 			return;
 		}
-		if (timer) return;
+		if (timer) {
+			// From slow to fast at once; from fast to slow the next frame slows down by itself.
+			if (!working()) return;
+			clearTimeout(timer);
+			timer = null;
+			frame();
+			return;
+		}
 		setup ??= tmuxReady();
 		const ready = await setup;
-		if (call !== generation || !ready || !ctx || !working() || timer) return;
+		if (call !== generation || !ready || !ctx || !turning() || timer) return;
 		frame();
 	}
 
@@ -218,6 +239,14 @@ export default function (pi: ExtensionAPI) {
 			agents = now;
 			void update();
 		}),
+		pi.events.on(WAITS_STATE, (data) => {
+			const { tool, waits: list } = (data ?? {}) as { tool?: unknown; waits?: unknown };
+			if (typeof tool !== "string" || !Array.isArray(list)) return;
+			const count = (list as { repeat?: unknown }[]).filter((wait) => wait?.repeat !== true).length;
+			if (count > 0 && !turning() && !timer) setup = null;
+			waits.set(tool, count);
+			void update();
+		}),
 		pi.events.on(LIMIT_STATE, (data) => {
 			const now = (data as { waiting?: unknown } | undefined)?.waiting === true;
 			if (now === limitWait) return;
@@ -238,10 +267,12 @@ export default function (pi: ExtensionAPI) {
 		foregroundWaiting = 0;
 		tools.clear();
 		asking.clear();
+		waits.clear();
 		setup = null;
 		limitWait = false;
 		pi.events.emit(SUBAGENTS_REQUEST, undefined);
 		pi.events.emit(LIMIT_REQUEST, undefined);
+		pi.events.emit(WAITS_REQUEST, undefined);
 	});
 
 	pi.on("agent_start", () => {

@@ -904,7 +904,7 @@ out.
   reloads arrives once it has. Another session (`/new`, `/resume`, `/fork`)
   ends them, as they belong to the conversation that started them, and names
   them in a notice. The [agent panel](#background-agents) lists them, and
-  [tmux-tab-activity](#tmux-tab-activity) counts them as work.
+  [tmux-tab-activity](#tmux-tab-activity) turns its slow spinner for them.
 - A check that fails on the network, with a server error, or with 429 is
   repeated, up to three in a row; a refusal (401, 403, 404) ends the wait at
   once.
@@ -1230,9 +1230,11 @@ bar shows which sessions are busy. The spinners of all tabs turn in step.
   `agent` calls whose subagents all wait (for your instruction, an answer, or
   a usage limit). It puts Pi's own title back when Pi settles and no subagent
   works.
-- Background waits of [wait](#wait) and [`gitlab_pipeline`](#gitlab_pipeline)
-  never turn it: they check without the model while the session is idle, and
-  the agent panel lists them.
+- Background waits of [wait](#wait) and [`gitlab_pipeline`](#gitlab_pipeline),
+  a `chain` among them, check without the model while the session is idle:
+  while one runs and nothing works, the spinner turns slowly instead, a frame
+  every 400 ms, in step with the other tabs that wait. A repeating wait (a
+  keepalive) does not count, and an open question stops it as well.
 - A window with several panes shows the pane whose Pi works: the active
   pane's while it works, else the first other pane's that works, else the
   active pane's. While another pane works, the tab shows that pane's name, so
@@ -2342,8 +2344,8 @@ is a request that reads the whole context.
   reloads arrives once it has. Another session (`/new`, `/resume`, `/fork`)
   ends them, as they belong to the conversation that started them, and names
   them in a notice. The [agent panel](#background-agents) lists them, and
-  [tmux-tab-activity](#tmux-tab-activity) counts them as work, except
-  repeating ones; both learn of them on the event bus
+  [tmux-tab-activity](#tmux-tab-activity) turns its slow spinner for them,
+  except for repeating ones; both learn of them on the event bus
   (`background-waits:state`).
 - The model is told to wait only for what has not happened yet. A check whose
   condition should already hold, such as a container that just answered,
