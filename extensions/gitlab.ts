@@ -33,8 +33,9 @@
  * - path also takes a web URL of an instance (a project, merge request, issue, pipeline, job, commit, file, or tree
  *   page), read as its API path (webApiPath). overview: true with a GET of one merge request returns, in one result, the
  *   merge request, its approvals, latest pipelines, open discussions, and changed files without diffs (mrOverview).
- * - A second tool, gitlab_pipeline, shows, waits for, and drives CI pipelines and jobs in a few lines, with the same
- *   instances, tokens, and rules; "pipelines": false in gitlab.json leaves it out. Its section below says more.
+ * - A second tool, gitlab_pipeline, shows, waits for, and drives CI pipelines and jobs in a few lines, a rollout's jobs
+ *   and the checks of its site in one call (chain), with the same instances, tokens, and rules; "pipelines": false in
+ *   gitlab.json leaves it out. Its section below says more.
  */
 
 import { randomBytes } from "node:crypto";
@@ -1215,14 +1216,21 @@ function forgetToken(instance: ConfiguredInstance): boolean {
  *   downstream pipeline, and the manual jobs waiting to be played.
  * - wait polls a job, or the pipeline, until it settles, without model requests: success, failed, canceled, skipped,
  *   or held at a manual job; a failed pipeline or job comes with the end of the logs of its failed jobs.
- * - needResult is required with wait, and with wait: true on play, retry, and run: the model's decision whether its
- *   next step needs the result, as with the wait tool. true waits in the foreground; when the user sends a message
- *   meanwhile, or after CI_DETACH_MS, the wait goes on in the background with the checks it made, and the call
+ * - needResult is required with wait and chain, and with wait: true on play, retry, and run: the model's decision
+ *   whether its next step needs the result, as with the wait tool. true waits in the foreground; when the user sends a
+ *   message meanwhile, or after CI_DETACH_MS, the wait goes on in the background with the checks it made, and the call
  *   returns at once with its id. Without a terminal (subagents, print, JSON, and RPC mode) every wait is in the
  *   foreground.
  * - log: the end of a job log, or the lines matching grep with their numbers, without colour codes, timestamps,
  *   section markers, and the lines a carriage return overwrote.
  * - play, retry, cancel, and run change state; with wait: true they wait for the job or pipeline afterwards.
+ * - chain runs the jobs given, in their order, in one call: every name is looked up in the pipeline before anything is
+ *   played. A manual job is played, one not ready yet (an earlier stage still running) awaited until it is manual, one
+ *   that succeeded already left alone; a job that ends failed, canceled, or skipped stops the chain with the end of its
+ *   log, and a created job the pipeline no longer moves (a manual job before it not among them) stops it too. Then
+ *   check GETs each URL without a token, tried again for about a minute while it answers 5xx or not at all. A chain is
+ *   one wait: needResult, the foreground and the background, timeout, and stop_wait work as for wait, and a stopped
+ *   chain plays no further job.
  * - needResult: false returns at once with an id. The wait goes on without stopping for
  *   the user's messages, and a message brings its result into the conversation: while Pi works, with its next step,
  *   so it is not stale by the time it comes; when Pi is idle, it starts a turn.
@@ -1233,7 +1241,7 @@ function forgetToken(instance: ConfiguredInstance): boolean {
  *   tool's are ("background-waits:state", see wait.ts), for the panel of background-agents.ts and for
  *   tmux-tab-activity.ts.
  */
-const CI_ACTIONS = ["status", "wait", "log", "play", "retry", "cancel", "run", "stop_wait", "list"] as const;
+const CI_ACTIONS = ["status", "wait", "log", "play", "retry", "cancel", "run", "chain", "stop_wait", "list"] as const;
 type CiAction = (typeof CI_ACTIONS)[number];
 /** States of a job or pipeline that still change by themselves; manual waits for a person and counts as settled. */
 const CI_ACTIVE = new Set(["created", "waiting_for_resource", "preparing", "pending", "running", "scheduled", "waiting_for_callback"]);
@@ -1252,6 +1260,9 @@ const CI_MESSAGE_TYPE = "gitlab_pipeline";
 const CI_MAX_TIMEOUT_MIN = 180;
 /** How long a wait whose result the model needs stays in the foreground before it goes on in the background. */
 const CI_DETACH_MS = 5 * 60_000;
+/** A chain's check of a URL that answers 5xx or not at all is tried again every CI_CHECK_EVERY_MS for this long. */
+const CI_CHECK_WINDOW_MS = 75_000;
+const CI_CHECK_EVERY_MS = 15_000;
 /** The event-bus contract with wait.ts, background-agents.ts, and tmux-tab-activity.ts. */
 const WAITS_STATE = "background-waits:state";
 const WAITS_REQUEST = "background-waits:request";
@@ -1411,11 +1422,13 @@ function ciRows(jobs: JsonObject[], bridges: JsonObject[]): string[][] {
 	return all.sort((a, b) => (rank.get(a.stage) ?? 0) - (rank.get(b.stage) ?? 0) || a.id - b.id).map((item) => item.row);
 }
 
-function ciTable(rows: string[][]): string {
-	const all = [["stage", "job", "status", "time", "runner", "id"], ...rows];
-	const widths = all[0].map((_, i) => Math.max(...all.map((row) => row[i].length)));
-	return all.map((row) => row.map((cell, i) => (i === row.length - 1 ? cell : cell.padEnd(widths[i]))).join("  ").trimEnd()).join("\n");
+/** Rows of cells in aligned columns, the last one unpadded. */
+function ciColumns(rows: string[][]): string {
+	const widths = rows[0].map((_, i) => Math.max(...rows.map((row) => row[i].length)));
+	return rows.map((row) => row.map((cell, i) => (i === row.length - 1 ? cell : cell.padEnd(widths[i]))).join("  ").trimEnd()).join("\n");
 }
+
+const ciTable = (rows: string[][]): string => ciColumns([["stage", "job", "status", "time", "runner", "id"], ...rows]);
 
 function ciPipelineHead(pipeline: JsonObject): string {
 	const ref = ciText(pipeline.ref);
@@ -1454,6 +1467,38 @@ function ciVariables(variables: Record<string, unknown> | undefined): Array<{ ke
 	});
 }
 
+/** What a chain's check of a URL found: the final status (none when unreachable), the time, and where it ended. */
+type CiProbe = { status?: number; ms: number; url: URL; error?: string };
+
+/** GETs a URL as a browser reaches it, never with a token, following up to MAX_REDIRECTS redirects. */
+async function ciProbe(url: URL, signal: AbortSignal | undefined): Promise<CiProbe> {
+	const started = Date.now();
+	const timeout = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
+	const abort = signal ? AbortSignal.any([signal, timeout]) : timeout;
+	let current = url;
+	for (let hop = 0; ; hop++) {
+		let response: Response;
+		try {
+			response = await request(current, "GET", { Accept: "text/html, */*;q=0.1", "User-Agent": USER_AGENT }, undefined, abort);
+		} catch (error) {
+			if (signal?.aborted) throw error;
+			const plain = timeout.aborted
+				? `no answer within ${REQUEST_TIMEOUT_MS / 1000}s`
+				: error instanceof Error
+					? error.message || String((error as { code?: unknown }).code ?? error.name)
+					: String(error);
+			return { ms: Date.now() - started, url: current, error: certificateProblem(error) ?? plain };
+		}
+		await response.body?.cancel().catch(() => {});
+		const location = response.headers.get("location");
+		if (location && response.status >= 300 && response.status < 400 && hop < MAX_REDIRECTS) {
+			current = new URL(location, current);
+			continue;
+		}
+		return { status: response.status, ms: Date.now() - started, url: current };
+	}
+}
+
 /** Whether gitlab.json leaves gitlab_pipeline in: everything but "pipelines": false. */
 function ciToolWanted(): boolean {
 	try {
@@ -1467,7 +1512,7 @@ function ciToolWanted(): boolean {
 const CiParams = {
 	action: StringEnum(CI_ACTIONS, {
 		description:
-			"status: the pipeline and its jobs; wait: until a job or the pipeline settles; log: the end of a job log; play: start a manual job; retry: a job, or the failed jobs of the pipeline; cancel: a job or the pipeline; run: a new pipeline for ref; stop_wait: end a background wait (waitId), the pipeline or job itself goes on; list: the background waits, the wait tool's too",
+			"status: the pipeline and its jobs; wait: until a job or the pipeline settles; log: the end of a job log; play: start a manual job; retry: a job, or the failed jobs of the pipeline; cancel: a job or the pipeline; run: a new pipeline for ref; chain: run jobs one after the other, then check URLs; stop_wait: end a background wait (waitId), the pipeline or job itself goes on; list: the background waits, the wait tool's too",
 	}),
 	project: Type.Optional(
 		Type.String({
@@ -1488,22 +1533,36 @@ const CiParams = {
 	variables: Type.Optional(
 		Type.Object({}, {
 			additionalProperties: Type.String(),
-			description: "CI/CD variables, key → value: for run, of the new pipeline; for play, of the manual job",
+			description: "CI/CD variables, key → value: for run, of the new pipeline; for play and chain, of each job played",
+		}),
+	),
+	jobs: Type.Optional(
+		Type.Array(Type.String(), {
+			description:
+				"chain: the names of jobs in the pipeline, in the order to run them. A manual one is played, one not ready yet awaited, " +
+				"one that succeeded already left alone; one that fails stops the chain. All must exist, or nothing is played",
+		}),
+	),
+	check: Type.Optional(
+		Type.Array(Type.String(), {
+			description:
+				"chain: http(s) URLs to GET without a token once all jobs succeeded: status, time, and where redirects end. A 5xx " +
+				"or no answer is tried again for about a minute and fails the chain; 401 and 403 count as reachable",
 		}),
 	),
 	wait: Type.Optional(Type.Boolean({ description: "play, retry, run: wait for the job or pipeline afterwards, as action wait does" })),
 	needResult: Type.Optional(
 		Type.Boolean({
 			description:
-				"Required with wait, and with wait: true on play/retry/run: does your next step need the result? true: wait here " +
+				"Required with wait and chain, and with wait: true on play/retry/run: does your next step need the result? true: wait here " +
 				"(up to 5 minutes, then in the background). false: return at once, wait in the background, a message brings the result",
 		}),
 	),
 	waitId: Type.Optional(Type.String({ description: "stop_wait: the id of the background wait, as gp1" })),
-	interval: Type.Optional(Type.Number({ description: `wait: seconds between checks (default ${CI_INTERVAL_S}, 5 to 300)` })),
+	interval: Type.Optional(Type.Number({ description: `wait, chain: seconds between checks (default ${CI_INTERVAL_S}, 5 to 300)` })),
 	timeout: Type.Optional(
 		Type.Number({
-			description: `wait: minutes before giving up (default ${CI_TIMEOUT_MIN}, with needResult: false ${CI_BACKGROUND_TIMEOUT_MIN}; at most ${CI_MAX_TIMEOUT_MIN})`,
+			description: `wait, chain (the whole chain): minutes before giving up (default ${CI_TIMEOUT_MIN}, with needResult: false ${CI_BACKGROUND_TIMEOUT_MIN}; at most ${CI_MAX_TIMEOUT_MIN})`,
 		}),
 	),
 	lines: Type.Optional(Type.Integer({ description: `log: lines from the end (default ${CI_LOG_LINES}, at most ${CI_MAX_LOG_LINES})` })),
@@ -1523,6 +1582,8 @@ interface CiWait {
 	intervalMs: number;
 	timeoutMs: number;
 	abort: AbortController;
+	/** A chain plays jobs: stopping it ends its plays, while stopping a wait leaves what it waits for alone. */
+	chain: boolean;
 }
 
 // A copy of BackgroundWaitView from wait.ts, the event-bus contract between wait.ts, gitlab.ts, background-agents.ts,
@@ -1588,7 +1649,7 @@ function ciView(entry: CiWait): BackgroundWaitView {
 		id: entry.id,
 		tool: CI_MESSAGE_TYPE,
 		label: entry.what,
-		until: `the ${entry.what.split(" ")[0]} settles`,
+		until: entry.chain ? "the chain ends" : `the ${entry.what.split(" ")[0]} settles`,
 		startedAt: entry.started,
 		checks: entry.checks,
 		last: entry.progress,
@@ -1631,7 +1692,10 @@ function stopCiWait(id: string): string {
 	ciShared.waits.delete(id);
 	ciPublish();
 	const span = ciDuration((Date.now() - entry.started) / 1000) || "0s";
-	return `Stopped background wait ${id} for ${entry.what} after ${span}; the ${entry.what.split(" ")[0]} itself goes on.`;
+	const rest = entry.chain
+		? "it plays no further job, and a job already running goes on"
+		: `the ${entry.what.split(" ")[0]} itself goes on`;
+	return `Stopped background wait ${id} for ${entry.what} after ${span}; ${rest}.`;
 }
 
 /** One line per background wait, of every tool that waits. */
@@ -1907,7 +1971,11 @@ export default function (pi: ExtensionAPI) {
 			"the logs of its failed jobs. log: the end of a job log, or the " +
 			"lines matching grep, without colour codes and timestamps. play starts a manual job (with variables), retry runs " +
 			"a job again (without job: the failed jobs of the pipeline), cancel stops a job or the pipeline, run starts a " +
-			"pipeline for ref (with variables); with wait: true they wait afterwards. Every wait needs needResult. false returns " +
+			"pipeline for ref (with variables); with wait: true they wait afterwards. chain runs jobs (names, in order) in one " +
+			"call, as for a rollout: plays each manual one once the one before succeeded, awaits one not ready yet, leaves one " +
+			"that succeeded already, stops at a failure with the end of its log, then GETs the check URLs without a token " +
+			"(status, time, redirect), trying a 5xx or unreachable one again for about a minute. Every wait and chain needs " +
+			"needResult. false returns " +
 			"at once with an id, and a message brings the result later, with your next step or as a turn of its own; true " +
 			"waits here until the user sends a message or 5 minutes pass, then it goes on in the background. Background " +
 			"waits go on over /reload. stop_wait " +
@@ -1915,10 +1983,11 @@ export default function (pi: ExtensionAPI) {
 			"The project defaults to the one of " +
 			"the working directory's origin remote; the pipeline is pipeline (its id), the head pipeline of mr, or the " +
 			"latest of ref or of the project; a job is its name in that pipeline or its id.",
-		promptSnippet: "See, wait for, and drive GitLab CI pipelines and jobs: status, wait, log, play, retry, cancel, run",
+		promptSnippet: "See, wait for, and drive GitLab CI pipelines and jobs: status, wait, log, play, retry, cancel, run, chain",
 		promptGuidelines: [
 			"Use gitlab_pipeline for CI pipelines and jobs (their state, waiting for them, job logs, manual jobs, retries) instead of the gitlab tool or wait: it answers in a few lines and waits without model requests.",
 			"gitlab_pipeline: play, retry, cancel, and run only what the user asked for; a deploy job, to production above all, only on the user's word for that deploy.",
+			"gitlab_pipeline: chain plays exactly the jobs given and never picks an environment itself; include a production deploy job only on the user's word for that deploy.",
 			"gitlab_pipeline: without project it acts on the project of the working directory's origin remote; a web URL of a pipeline, job, or merge request in project names that one.",
 			"gitlab_pipeline: needResult: true only when your very next step needs the outcome and nothing else is left to do until then (a deploy to check right after, a failure to fix); otherwise needResult: false, go on with the work that does not depend on it, and end your turn when nothing is left: the result arrives as a message and starts the next turn. Never wait here for a pipeline you only report on.",
 		],
@@ -1933,7 +2002,7 @@ export default function (pi: ExtensionAPI) {
 				return { content: [{ type: "text", text: stopCiWait(id) }], details: { host: "", project: "", action } };
 			}
 			if (action === "list") return { content: [{ type: "text", text: ciListText(allWaits()) }], details: { host: "", project: "", action } };
-			const waits = action === "wait" || (params.wait === true && (action === "play" || action === "retry" || action === "run"));
+			const waits = action === "wait" || action === "chain" || (params.wait === true && (action === "play" || action === "retry" || action === "run"));
 			if (waits && typeof params.needResult !== "boolean") {
 				throw new Error(
 					"needResult is required with a wait: true when your next step needs the result, false to wait in the background and go on",
@@ -2090,12 +2159,24 @@ export default function (pi: ExtensionAPI) {
 			/** When a wait in the foreground makes way for the background by itself; set as it starts, with a terminal. */
 			let detachAt = Number.POSITIVE_INFINITY;
 			const interrupted = () => !background && !moved && handOver !== undefined && (ctx.hasPendingMessages() || Date.now() >= detachAt);
+			// Sleeps until the next check; a wait in the foreground goes to the background meanwhile when it is interrupted.
+			const pause = async (ms: number, started: number, checks: number, found: string) => {
+				const until = Date.now() + ms;
+				while (Date.now() < until && !active?.aborted) {
+					if (interrupted()) handOver?.(started, checks, found);
+					await new Promise((resolve) => setTimeout(resolve, Math.min(1000, until - Date.now())));
+				}
+			};
 			type Polled<T> = { outcome: "settled" | "timeout"; value: T; checks: number; elapsedMs: number };
-			const poll = async <T>(check: () => Promise<{ settled: boolean; progress: string; value: T }>): Promise<Polled<T>> => {
-				const started = Date.now();
+			// A chain polls from its own start and goes on counting, so its timeout and its checks span all of its jobs.
+			const poll = async <T>(
+				check: () => Promise<{ settled: boolean; progress: string; value: T }>,
+				started = Date.now(),
+				before = 0,
+			): Promise<Polled<T>> => {
 				let failures = 0;
 				let found = "first check";
-				for (let checks = 1; ; checks++) {
+				for (let checks = before + 1; ; checks++) {
 					if (active?.aborted) throw new Error("gitlab_pipeline: wait aborted");
 					let state: { settled: boolean; progress: string; value: T } | undefined;
 					try {
@@ -2120,11 +2201,7 @@ export default function (pi: ExtensionAPI) {
 						found = `the last ${failures} failed, trying again`;
 						progressTo(`${span}, ${checks} checks: ${found}`, checks, found);
 					}
-					const until = Date.now() + Math.min(intervalMs, Math.max(timeoutMs - elapsedMs, 1000));
-					while (Date.now() < until && !active?.aborted) {
-						if (interrupted()) handOver?.(started, checks, found);
-						await new Promise((resolve) => setTimeout(resolve, Math.min(1000, until - Date.now())));
-					}
+					await pause(Math.min(intervalMs, Math.max(timeoutMs - elapsedMs, 1000)), started, checks, found);
 				}
 			};
 			const lead = (polled: Polled<unknown>, what: string, status: string): string => {
@@ -2174,6 +2251,7 @@ export default function (pi: ExtensionAPI) {
 					intervalMs,
 					timeoutMs,
 					abort: new AbortController(),
+					chain: action === "chain",
 				};
 				ciShared.waits.set(entry.id, entry);
 				ciPublish();
@@ -2193,10 +2271,8 @@ export default function (pi: ExtensionAPI) {
 			};
 			const failed = (entry: CiWait, error: unknown) =>
 				`Background wait ${entry.id} for ${entry.what} ended without a result: ${error instanceof Error ? error.message : String(error)}`;
-			// Waits for a job or pipeline here, or hands the wait to the background and says so.
-			const settle = async (kind: "job" | "pipeline", id: number): Promise<string> => {
-				const run = () => (kind === "job" ? waitJob(id) : waitPipeline(id));
-				const what = `${kind} ${id} of ${label}`;
+			// Runs a wait (for a job, a pipeline, or a chain) here, or hands it to the background and says so.
+			const settle = async (what: string, run: () => Promise<string>): Promise<string> => {
 				const every = ciDuration(intervalMs / 1000);
 				if (background) {
 					const entry = register(what, Date.now(), 0, "first check");
@@ -2238,14 +2314,136 @@ export default function (pi: ExtensionAPI) {
 					handOver = undefined;
 				}
 			};
+			const settleOn = (kind: "job" | "pipeline", id: number) =>
+				settle(`${kind} ${id} of ${label}`, () => (kind === "job" ? waitJob(id) : waitPipeline(id)));
+			// The chain: each job once the one before succeeded, played where it is manual, then the checks of the URLs.
+			const runChain = async (
+				pipeline: JsonObject,
+				steps: Array<{ name: string; id: number }>,
+				urls: URL[],
+				playBody: unknown,
+			): Promise<string> => {
+				const started = Date.now();
+				const aborted = () => {
+					if (active?.aborted) throw new Error("gitlab_pipeline: chain aborted");
+				};
+				let checks = 0;
+				const rows: string[][] = [];
+				let stop = "";
+				let tail = "";
+				for (const [index, step] of steps.entries()) {
+					const nth = `job ${index + 1} of ${steps.length}`;
+					/** The status the first check found, and the pipeline's while the job stays created. */
+					let first: string | undefined;
+					let pipelineStatus = "";
+					let idle = 0;
+					const watch = (id: number) =>
+						poll(
+							async () => {
+								const job = ciObject(await get(`/projects/${P}/jobs/${id}`), "a job");
+								const status = ciText(job.status);
+								first ??= status;
+								// A created job waits for an earlier stage; if the pipeline stands still twice in a row, a manual job
+								// before it holds it, and it will not move by itself.
+								if (status === "created") {
+									pipelineStatus = ciText((await pipelineOf(pipeline.id)).status);
+									idle = CI_ACTIVE.has(pipelineStatus) ? 0 : idle + 1;
+								}
+								const settled = !CI_ACTIVE.has(status) || (status === "created" && idle >= 2);
+								return { settled, progress: `${step.name} ${status} (${nth})`, value: job };
+							},
+							started,
+							checks,
+						);
+					let polled = await watch(step.id);
+					checks = polled.checks;
+					let played = false;
+					if (polled.outcome === "settled" && polled.value.status === "manual") {
+						aborted();
+						const job = ciObject(await post(`/projects/${P}/jobs/${step.id}/play`, playBody), "a job");
+						played = true;
+						polled = await watch(Number(job.id));
+						checks = polled.checks;
+					}
+					const job = polled.value;
+					const status = ciText(job.status);
+					const time = ciJobRow(job)[3];
+					const id = `#${ciText(job.id)}`;
+					const before = !played && first === status ? " (before the chain)" : "";
+					if (polled.outcome === "settled" && status === "success") {
+						rows.push(before ? [`↷ ${step.name}`, "already succeeded", "", id] : [`✓ ${step.name}`, status, time, id]);
+						continue;
+					}
+					const span = ciDuration(polled.elapsedMs / 1000) || "0s";
+					if (polled.outcome === "timeout") {
+						rows.push([`✗ ${step.name}`, `still ${status}`, time, id]);
+						stop = `gave up after ${span}: ${step.name} is still ${status}`;
+					} else if (status === "created") {
+						rows.push([`✗ ${step.name}`, `still created, the pipeline ${pipelineStatus}`, "", id]);
+						stop = `stopped: ${step.name} waits for a job before it that is not running, such as a manual job not among jobs`;
+					} else {
+						const reason = job.failure_reason ? ` (${ciText(job.failure_reason)})` : "";
+						rows.push([`✗ ${step.name}`, `${status}${reason}${before}`, time, id]);
+						stop = `failed: ${step.name} ${status}${before}`;
+						tail = await tails([job]);
+					}
+					const rest = steps.slice(index + 1).map((later) => later.name);
+					if (rest.length > 0) stop += `; not played: ${rest.join(", ")}`;
+					break;
+				}
+				const probes: string[][] = [];
+				let down = 0;
+				for (const url of stop ? [] : urls) {
+					const from = Date.now();
+					let tries = 1;
+					let probe: CiProbe;
+					for (; ; tries++) {
+						aborted();
+						probe = await ciProbe(url, active);
+						checks++;
+						const final = probe.status !== undefined && probe.status < 500;
+						if (final || Date.now() - from >= CI_CHECK_WINDOW_MS || Date.now() - started >= timeoutMs) break;
+						const found = `${url.href} ${probe.status ?? "unreachable"}, trying again`;
+						progressTo(`${ciDuration((Date.now() - started) / 1000) || "0s"}, ${checks} checks: ${found}`, checks, found);
+						await pause(CI_CHECK_EVERY_MS, started, checks, found);
+					}
+					const status = probe.status;
+					const bad = status === undefined || status >= 500;
+					if (bad) down++;
+					const mark = bad ? "✗" : status < 400 || status === 401 || status === 403 ? "✓" : "!";
+					const notes = [
+						probe.url.href !== url.href ? `→ ${probe.url.href}` : "",
+						status === 401 || status === 403 ? "(reachable, behind a login)" : "",
+						status !== undefined && status >= 300 && status < 400 ? `(more than ${MAX_REDIRECTS} redirects)` : "",
+						probe.error ? `(${probe.error})` : "",
+						tries > 1 ? `(try ${tries})` : "",
+					];
+					const ms = probe.ms < 60_000 ? `${(probe.ms / 1000).toFixed(1)}s` : ciDuration(probe.ms / 1000);
+					probes.push([`${mark} ${status ?? "unreachable"}`, ms, [url.href, ...notes].filter(Boolean).join(" ")]);
+				}
+				const span = ciDuration((Date.now() - started) / 1000) || "0s";
+				const ran = `${steps.length} job${steps.length === 1 ? "" : "s"}`;
+				const result = stop
+					? `Chain ${stop}.`
+					: down > 0
+						? `Chain failed: ${ran} succeeded, but ${down} of ${urls.length} checks answered 5xx or not at all, after ${span}.`
+						: `Chain succeeded: ${ran}${urls.length > 0 ? `, ${urls.length} check${urls.length === 1 ? "" : "s"}` : ""}, in ${span}.`;
+				const latest = await pipelineOf(pipeline.id).catch(() => pipeline);
+				return [
+					ciPipelineHead(latest),
+					ciColumns(rows),
+					...(probes.length > 0 ? [ciColumns(probes)] : []),
+					result + tail,
+				].join("\n");
+			};
 			// The answer of play, retry, and run: what they did, then the wait wait: true asks for.
 			const after = async (done: () => string | Promise<string>, kind: "job" | "pipeline", id: number): Promise<string> => {
 				if (!params.wait) return done();
 				if (!background) {
-					const text = await settle(kind, id);
+					const text = await settleOn(kind, id);
 					return moved ? `${await done()}\n${text}` : text;
 				}
-				return `${await done()}\n${await settle(kind, id)}`;
+				return `${await done()}\n${await settleOn(kind, id)}`;
 			};
 
 			let head: string;
@@ -2256,7 +2454,7 @@ export default function (pi: ExtensionAPI) {
 					head = await statusText(await findPipeline());
 					break;
 				case "wait":
-					head = hasJob ? await settle("job", Number((await findJob()).id)) : await settle("pipeline", Number((await findPipeline()).id));
+					head = hasJob ? await settleOn("job", Number((await findJob()).id)) : await settleOn("pipeline", Number((await findPipeline()).id));
 					break;
 				case "log": {
 					const job = await findJob();
@@ -2351,6 +2549,34 @@ export default function (pi: ExtensionAPI) {
 					head = await after(async () => `Started a pipeline for ${ref}.\n${await statusText(created)}`, "pipeline", Number(created.id));
 					break;
 				}
+				case "chain": {
+					const names = (params.jobs ?? []).map((name) => String(name).trim());
+					if (names.length === 0 || names.includes("")) throw new Error("chain needs jobs: the names of the jobs to run, in their order");
+					const urls = (params.check ?? []).map((given) => {
+						const url = URL.canParse(given.trim()) ? new URL(given.trim()) : undefined;
+						if (!url || !/^https?:$/.test(url.protocol)) throw new Error(`check: ${given} is not an http(s) URL`);
+						return url;
+					});
+					const attributes = ciVariables(params.variables as Record<string, unknown> | undefined);
+					const pipeline = await findPipeline();
+					const jobs = await jobsOf(Number(pipeline.id));
+					const latest = (name: string) => jobs.filter((job) => job.name === name).sort((a, b) => Number(b.id) - Number(a.id))[0];
+					const missing = names.filter((name) => !latest(name));
+					if (missing.length > 0) {
+						const bridges = new Set((await bridgesOf(Number(pipeline.id))).map((bridge) => ciText(bridge.name)));
+						const which = missing.map((name) => (bridges.has(name) ? `${name} (a trigger job, which chain does not play)` : name));
+						const manual = [...new Set(jobs.filter((job) => job.status === "manual").map((job) => ciText(job.name)))];
+						throw new Error(
+							`pipeline ${ciText(pipeline.id)} has no job ${which.join(", ")}; nothing was played. Its manual jobs: ${manual.join(", ") || "none"}`,
+						);
+					}
+					const steps = names.map((name) => ({ name, id: Number(latest(name).id) }));
+					const playBody = attributes.length > 0 ? { job_variables_attributes: attributes } : undefined;
+					head = await settle(`chain › ${label} ${ciText(pipeline.ref)}: ${names.join(", ")}`, () =>
+						runChain(pipeline, steps, urls, playBody),
+					);
+					break;
+				}
 				default:
 					throw new Error(`unknown action ${String(action)}`);
 			}
@@ -2363,6 +2589,7 @@ export default function (pi: ExtensionAPI) {
 				args.project,
 				args.pipeline !== undefined ? `pipeline ${args.pipeline}` : args.mr !== undefined ? `!${args.mr}` : args.ref,
 				args.job !== undefined ? `job ${args.job}` : undefined,
+				Array.isArray(args.jobs) ? args.jobs.join(" → ") : undefined,
 				args.waitId,
 			].filter((part) => part !== undefined && part !== "");
 			return new Text(
@@ -2370,7 +2597,7 @@ export default function (pi: ExtensionAPI) {
 					(host ? theme.fg("muted", `${host} `) : "") +
 					theme.fg("muted", `${args.action ?? "?"}${which.length > 0 ? " " : ""}`) +
 					theme.fg("accent", which.join(" ")) +
-					(args.needResult === false && (args.action === "wait" || args.wait) ? theme.fg("dim", " (background)") : args.wait ? theme.fg("dim", " (wait)") : ""),
+					(args.needResult === false && (args.action === "wait" || args.action === "chain" || args.wait) ? theme.fg("dim", " (background)") : args.wait ? theme.fg("dim", " (wait)") : ""),
 				0,
 				0,
 			);

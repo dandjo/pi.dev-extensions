@@ -872,10 +872,22 @@ out.
     running; `run` starts a pipeline for `ref` (default the default branch)
     with `variables`. With `wait: true` they wait for the job or pipeline
     afterwards.
+  - `chain` runs a rollout in one call: the jobs of `jobs` one after the
+    other, then the URLs of `check`. A manual job is played (with
+    `variables`), one not ready yet — an earlier stage still running — is
+    awaited until it can be played, and one that succeeded already is left
+    alone; a job that fails stops the chain, with the end of its log, and the
+    jobs after it are not played. All names must exist in the pipeline, or
+    nothing is played and the manual jobs it has are listed. Once all jobs
+    succeeded, each URL is fetched without a token, up to five redirects: a
+    5xx or no answer is tried again for about a minute and fails the chain,
+    401 and 403 count as reachable (a login in front). The answer is one line
+    per job and per URL and one for the outcome; `timeout` covers the whole
+    chain, and `stop_wait` or the panel stop it before the next play.
   - `stop_wait` ends the background wait `waitId`; the pipeline or job
     itself goes on.
   - `list` lists the background waits, those of [wait](#wait) too.
-- `needResult` is required with `wait` and with `wait: true`, as with
+- `needResult` is required with `wait`, `chain`, and with `wait: true`, as with
   [wait](#wait): the model says each time whether its next step needs the
   result. `false` returns at once with an id (`gp1`) and waits on its own,
   for at most `timeout` minutes (120 there). Your messages do not stop it.
@@ -909,7 +921,8 @@ out.
   played, a finished pipeline cannot be canceled, a name the pipeline lacks
   lists the names it has.
 - The guidelines tell the model to play, retry, cancel, and run only what you
-  asked for, and a deploy job only on your word for that deploy.
+  asked for, and a deploy job only on your word for that deploy; `chain`
+  plays exactly the jobs given and never picks an environment itself.
 
 ## onepassword
 
