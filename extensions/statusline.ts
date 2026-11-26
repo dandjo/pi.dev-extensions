@@ -222,14 +222,16 @@ export default function (pi: ExtensionAPI) {
 					// --- Line 2: context bar, tokens, cost ------------------------
 					const { cost, input, cacheRead, output, usage: ctxUsage } = sessionTotals();
 					const tokens = ctxUsage?.tokens ?? null;
-					const cacheShare = input > 0 ? theme.fg("dim", ` (${Math.round((cacheRead / input) * 100)}% Cache)`) : "";
+					// ♻ without the emoji selector: one cell wide, as pi-tui counts it and terminals draw it.
+					const cacheShare = input > 0 ? theme.fg("dim", ` (♻ ${Math.round((cacheRead / input) * 100)}%)`) : "";
 					lines.push(
 						meter(theme, "Context", ctxUsage?.percent ?? null) +
 							` ${theme.fg("accent", tokens === null ? "?" : fmtTokens(tokens))}` +
 							sep +
-							`🪙 In ${theme.fg("accent", fmtTokens(input))}${cacheShare}` +
+							// The arrows as in Pi's own footer: ↑ what goes to the provider, ↓ what comes back.
+							`🪙 ↑ ${theme.fg("accent", fmtTokens(input))}${cacheShare}` +
 							theme.fg("dim", " · ") +
-							`Out ${theme.fg("accent", fmtTokens(output))}` +
+							`↓ ${theme.fg("accent", fmtTokens(output))}` +
 							` (${theme.fg("warning", `$${cost.toFixed(2)}`)})` +
 							// Without the bottom border's hook the elapsed time stays in this line.
 							(clock ? "" : sep + `⏳ ${fmtElapsed(Date.now() - startedAt)}`),
