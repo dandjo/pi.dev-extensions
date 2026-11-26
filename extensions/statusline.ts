@@ -3,7 +3,8 @@
  * (https://github.com/dandjo/claude-code-cli-status-line), for any provider.
  *
  * Line 1: [model · thinking level]  📂 working dir  🌿 git branch
- * Line 2: context-window usage bar, tokens in context, session cost, elapsed time
+ * Line 2: context-window usage bar with the tokens in context; the session's input tokens (cache reads and writes
+ *   included, as they are billed) with the cache-read share, its output tokens, and its cost; elapsed time
  * Then: the rows other extensions add as sections (claude-usage.ts: the Claude subscription limits)
  * Last line (optional): statuses other extensions set via ctx.ui.setStatus()
  * Prompt: the session name at the right end of the prompt's top border, as Claude Code shows it
@@ -34,6 +35,7 @@ export interface StatuslineSection {
 }
 
 function fmtTokens(n: number): string {
+	if (n >= 1_000_000_000) return `${(n / 1_000_000_000).toFixed(2)}G`;
 	if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(2)}M`;
 	if (n >= 1000) return `${(n / 1000).toFixed(1)}k`;
 	return `${n}`;
@@ -145,18 +147,36 @@ export default function (pi: ExtensionAPI) {
 			/** Where each extension status sits in the last render, for a click on it. */
 			let statusLine = -1;
 			let statusSpans: { key: string; from: number; to: number }[] = [];
-			/** Cost and context usage of the last walk over the session, and what they were taken for. */
-			let totals: { key: string; at: number; cost: number; usage: ReturnType<typeof ctx.getContextUsage> } | undefined;
+			/** Cost, token sums, and context usage of the last walk over the session, and what they were taken for. */
+			let totals:
+				| {
+						key: string;
+						at: number;
+						cost: number;
+						/** All input tokens, cache reads and writes included. */
+						input: number;
+						cacheRead: number;
+						output: number;
+						usage: ReturnType<typeof ctx.getContextUsage>;
+				  }
+				| undefined;
 			const sessionTotals = () => {
 				const key = `${ctx.sessionManager.getLeafId()}|${ctx.model?.provider}/${ctx.model?.id}`;
 				if (totals?.key === key && Date.now() - totals.at < TICK_MS) return totals;
 				let cost = 0;
+				let input = 0;
+				let cacheRead = 0;
+				let output = 0;
 				for (const e of ctx.sessionManager.getBranch()) {
 					if (e.type === "message" && e.message.role === "assistant") {
-						cost += (e.message as AssistantMessage).usage.cost.total;
+						const u = (e.message as AssistantMessage).usage;
+						cost += u.cost.total;
+						input += u.input + u.cacheRead + u.cacheWrite;
+						cacheRead += u.cacheRead;
+						output += u.output;
 					}
 				}
-				totals = { key, at: Date.now(), cost, usage: ctx.getContextUsage() };
+				totals = { key, at: Date.now(), cost, input, cacheRead, output, usage: ctx.getContextUsage() };
 				return totals;
 			};
 
@@ -191,12 +211,16 @@ export default function (pi: ExtensionAPI) {
 					const lines = [`${modelFmt} 📂 ${dir}${branchFmt}`];
 
 					// --- Line 2: context bar, tokens, cost, time ------------------
-					const { cost, usage: ctxUsage } = sessionTotals();
+					const { cost, input, cacheRead, output, usage: ctxUsage } = sessionTotals();
 					const tokens = ctxUsage?.tokens ?? null;
+					const cacheShare = input > 0 ? theme.fg("dim", ` (${Math.round((cacheRead / input) * 100)}% Cache)`) : "";
 					lines.push(
 						meter(theme, "Context", ctxUsage?.percent ?? null) +
+							` ${theme.fg("accent", tokens === null ? "?" : fmtTokens(tokens))}` +
 							sep +
-							`🪙 Tokens ${theme.fg("accent", tokens === null ? "?" : fmtTokens(tokens))}` +
+							`🪙 In ${theme.fg("accent", fmtTokens(input))}${cacheShare}` +
+							theme.fg("dim", " · ") +
+							`Out ${theme.fg("accent", fmtTokens(output))}` +
 							` (${theme.fg("warning", `$${cost.toFixed(2)}`)})` +
 							sep +
 							`⏳ ${fmtElapsed(Date.now() - startedAt)}`,
