@@ -2344,8 +2344,8 @@ provider and model are in use:
   plus output per million tokens), if that is cheaper than the current model.
   Otherwise it keeps the current model. With `claude-bridge` or `anthropic`
   that is Claude Haiku 5.5, with `openai` currently `gpt-5-nano`.
-  `claude-bridge` lists its models without a price; they count at the price of
-  the same model at another provider.
+  `claude-bridge` lists its models without a price;
+  [claude-sdk-prices](#claude-sdk-prices) gives them Anthropic's.
 - A side task never moves to another provider or account, so prompts and page
   text only go where the conversation already goes.
 - On providers that serve several makers' models and name the maker in the id

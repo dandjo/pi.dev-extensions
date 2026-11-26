@@ -296,8 +296,7 @@ const FetchParams = Type.Object({
  * one with the lowest list price (input + output per million tokens), if it is cheaper than the current model;
  * otherwise the current model. So a side task never moves to another provider or account. On providers that serve
  * several makers' models with the maker in the id ("anthropic/claude-…" on OpenRouter, "us.anthropic.claude-…" on
- * Bedrock), only models of the current maker qualify. A current model without a price (local, unknown) is kept; one
- * that only its provider lists without a price is priced as the same model elsewhere in the registry (claude-bridge).
+ * Bedrock), only models of the current maker qualify. A current model without a price (local, unknown) is kept.
  * PI_SMALL_MODEL=<provider>/<model-id> overrides the choice.
  *
  * session-title.ts carries a copy of this block: change them alike.
@@ -310,16 +309,9 @@ const REQUEST_TIMEOUT_MS = 120_000;
  */
 const THINKING_ROOM = 4_096;
 
-/**
- * A model's list price, input + output per million tokens. A provider that passes another's models on without their
- * prices (claude-bridge lists its Claude models at no cost) gets the price of a model of the same id elsewhere in the
- * registry, so its cheaper models still count as cheaper.
- */
-function price(ctx: ExtensionContext, model: Model<Api>): number {
-	const own = model.cost.input + model.cost.output;
-	if (own > 0) return own;
-	const other = ctx.modelRegistry.getAll().find((m) => m.id === model.id && m.cost.input + m.cost.output > 0);
-	return other ? other.cost.input + other.cost.output : own;
+/** A model's list price, input + output per million tokens (claude-sdk-prices.ts gives claude-bridge its prices). */
+function price(model: Model<Api>): number {
+	return model.cost.input + model.cost.output;
 }
 
 /** The model maker named at the start of an id, or "" when the id names none. */
@@ -337,12 +329,12 @@ async function pickSmallModel(ctx: ExtensionContext): Promise<Model<Api> | undef
 	}
 
 	const current = ctx.model;
-	if (!current || !(price(ctx, current) > 0)) return current;
+	if (!current || !(price(current) > 0)) return current;
 	const currentMaker = maker(current.id);
 	let best = current;
 	for (const model of await ctx.modelRegistry.getAvailableOfType("chat", current.provider)) {
 		if (!model.input.includes("text") || maker(model.id) !== currentMaker) continue;
-		if (price(ctx, model) > 0 && price(ctx, model) < price(ctx, best)) best = model;
+		if (price(model) > 0 && price(model) < price(best)) best = model;
 	}
 	return best;
 }
