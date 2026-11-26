@@ -1,17 +1,30 @@
 /**
- * Compact tools: cuts each collapsed tool row to one line, or to the lines compact-tools.json sets, and leaves
- * everything else as Pi draws it.
+ * Compact tools: cuts each collapsed tool row to one line, or to the lines compact-tools.json sets, describes it in
+ * words the model gives with the call, and leaves everything else as Pi draws it.
+ *
+ * Descriptions (the default; {"describe": false} in ~/.pi/agent/compact-tools.json turns them off):
+ * - Each tool the model is offered gets a parameter "activity": what the call does, a few words in the language of
+ *   the conversation. It is added to the declarations of each request (context_with_system), first among the
+ *   parameters and required, and taken out of the arguments the tool runs with (tool_call), so no tool ever sees it;
+ *   the stored call keeps it, as the provider sent it.
+ * - A collapsed row then shows the tool's name in bold and that activity ("bash Zeigt die geänderten Dateien")
+ *   instead of the raw call; a call without one (an older one, or a tool left out) shows the call as before.
+ *   Expanded, the row shows the raw call.
+ * - Left out: a tool whose parameters are not an object, allow no other properties (additionalProperties false:
+ *   Pi would refuse the call), or have an "activity" of their own, and the tools in UNCUT.
+ * - The rows have one line then; "lines" applies only without descriptions.
  *
  * One line (the default):
- * - A collapsed row is the call as the tool draws it, its first line cut to fit, and on the right how many lines the
- *   result has and how long the tool ran ("17 lines · 0.4s"; while it runs the time counts up). Pi's padding lines
+ * - A collapsed row is the call as the tool draws it (or its description), its first line cut to fit, and on the
+ *   right how many lines the result has and how long the tool ran ("17 lines · 0.4s"; while it runs the time counts
+ *   up). Pi's padding lines
  *   above and below the row go too, so that a row takes one line of the screen; its background keeps Pi's colours
  *   for running, done, and failed.
  * - A failed tool (an error result) shows its count in the error colour, a shell command's exit code with it
  *   ("exit 2 · …"), and below the row the last line of its output, so that the reason shows without expanding.
  * - Expanded, the row is Pi's, in Pi's padding.
  *
- * {"lines": n} in ~/.pi/agent/compact-tools.json with n of 2 or more keeps up to n lines instead:
+ * {"lines": n} in compact-tools.json with n of 2 or more keeps up to n lines instead, when descriptions are off:
  * - A row whose content fits in n lines stays exactly as Pi draws it. A longer one first loses its blank
  *   lines. If it still does not fit, it shows its first lines (the call, then the result) and, as its last line, how
  *   many lines are hidden, in Pi's form "... (N more lines, ctrl+o to expand)". Shell output shows its last lines
@@ -24,7 +37,8 @@
  *   its output.
  * - It applies to Pi's tools, those of other extensions, and MCP tools, through pi.registerToolRenderer(). Pi draws
  *   edit in a box of its own; here it sits in Pi's default box, which looks the same.
- * - Nothing changes in what the model sees, and nothing is stored: remove this file and the rows are Pi's again.
+ * - Without descriptions nothing changes in what the model sees, and nothing is stored: remove this file and the rows
+ *   are Pi's again.
  */
 
 import { readFileSync } from "node:fs";
@@ -35,19 +49,35 @@ import { type Component, Container, Text, truncateToWidth, visibleWidth } from "
 const CONFIG_FILE = path.join(getAgentDir(), "compact-tools.json");
 /** Lines of content a collapsed row shows, the line with the number of hidden lines included; 1 is the one-line row. */
 let MAX_LINES = 1;
+/** The model describes each call in ACTIVITY, and the collapsed row shows that description. */
+let DESCRIBE = true;
+/** The parameter the model describes a call in. */
+const ACTIVITY = "activity";
+const ACTIVITY_SCHEMA = {
+	type: "string",
+	description:
+		"What this call does, shown to the user in place of the raw call: a short phrase of 2 to 6 words in the " +
+		'language of the conversation, without the tool\'s name, e.g. "Liest die Konfiguration".',
+};
 /** A running tool's row is redrawn this often for its time; a row not drawn for STALE_MS stops it. */
 const TICK_MS = 1_000;
 const STALE_MS = 5_000;
 /** The width a one-line row draws the call at before cutting it. */
 const WIDE = 1_000;
 
-function loadLines(): number {
+/** compact-tools.json: "describe" (default true) and "lines" (default 1, used only without descriptions). */
+function loadConfig(): { describe: boolean; lines: number } {
+	let config: { describe?: unknown; lines?: unknown } = {};
 	try {
-		const lines = JSON.parse(readFileSync(CONFIG_FILE, "utf8"))?.lines;
-		return Number.isInteger(lines) && lines >= 1 ? lines : 1;
+		config = JSON.parse(readFileSync(CONFIG_FILE, "utf8")) ?? {};
 	} catch {
-		return 1;
+		// No file, or not JSON: the defaults.
 	}
+	const lines = config.lines;
+	return {
+		describe: config.describe !== false,
+		lines: Number.isInteger(lines) && (lines as number) >= 1 ? (lines as number) : 1,
+	};
 }
 /** Tools whose row is left as Pi draws it. */
 const UNCUT = new Set(["codemode"]);
@@ -371,6 +401,24 @@ function tick(one: OneLine): void {
 	one.timer.unref?.();
 }
 
+/** A tool declaration's parameters with ACTIVITY first and required, or the same object where the tool is left out. */
+function withActivity(tool: string, parameters: any): any {
+	if (UNCUT.has(tool) || parameters?.type !== "object" || parameters.additionalProperties === false) return parameters;
+	if (parameters.properties?.[ACTIVITY] !== undefined) return parameters;
+	return {
+		...parameters,
+		properties: { [ACTIVITY]: ACTIVITY_SCHEMA, ...(parameters.properties ?? {}) },
+		required: [ACTIVITY, ...(parameters.required ?? []).filter((name: string) => name !== ACTIVITY)],
+	};
+}
+
+/** The description of a call: the tool's name in bold and the activity the model gave, or none without one. */
+function describedCall(tool: string, args: unknown, theme: Theme): Component | undefined {
+	const activity = args && typeof args === "object" ? (args as Record<string, unknown>)[ACTIVITY] : undefined;
+	if (typeof activity !== "string" || !activity.trim()) return undefined;
+	return new Text(`${theme.fg("toolTitle", theme.bold(tool))} ${activity.trim().replace(/\s+/g, " ")}`, 0, 0);
+}
+
 /** The call as Pi draws it for a tool without a call renderer: the name and the arguments. */
 function fallbackCall(tool: string, args: unknown, theme: Theme, expanded: boolean): Component {
 	const header = theme.fg("toolTitle", theme.bold(tool));
@@ -459,6 +507,8 @@ function compact(tool: string, base: Renderers): Renderers {
 				tick(one);
 			}
 			draw(row.call, context, context.expanded, (inner, expanded) => {
+				const described = DESCRIBE && !expanded ? describedCall(tool, args, theme) : undefined;
+				if (described) return described;
 				try {
 					if (base.renderCall) return base.renderCall(args, theme, inner);
 				} catch {
@@ -498,7 +548,35 @@ function compact(tool: string, base: Renderers): Renderers {
 }
 
 export default function (pi: ExtensionAPI) {
-	MAX_LINES = loadLines();
+	const config = loadConfig();
+	DESCRIBE = config.describe;
+	MAX_LINES = DESCRIBE ? 1 : config.lines;
+
+	if (DESCRIBE) {
+		/** Tools whose declarations got ACTIVITY: their calls lose it before they run. */
+		const described = new Set<string>();
+		// Every request: the declarations in the leading system message and in later tool changes.
+		pi.on("context_with_system", (event) => {
+			const messages = event.messages.map((message: any) => {
+				if (message.role !== "system" || !Array.isArray(message.toolsAdded)) return message;
+				return {
+					...message,
+					toolsAdded: message.toolsAdded.map((tool: any) => {
+						const parameters = withActivity(tool.name, tool.parameters);
+						if (parameters === tool.parameters) return tool;
+						described.add(tool.name);
+						return { ...tool, parameters };
+					}),
+				};
+			});
+			return { messages };
+		});
+		// The tool runs without it; the stored call keeps it (the input here is the copy the tool runs with).
+		pi.on("tool_call", (event) => {
+			if (described.has(event.toolName)) delete (event.input as Record<string, unknown>)[ACTIVITY];
+		});
+	}
+
 	pi.registerToolRenderer((toolName, next) => {
 		const base = next() as Renderers | undefined;
 		// A tool Pi has no definition for keeps Pi's plain row.
