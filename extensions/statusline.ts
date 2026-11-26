@@ -4,10 +4,11 @@
  *
  * Line 1: [model · thinking level]  📂 working dir  🌿 git branch
  * Line 2: context-window usage bar with the tokens in context; the session's input tokens (cache reads and writes
- *   included, as they are billed) with the cache-read share, its output tokens, and its cost; elapsed time
+ *   included, as they are billed) with the cache-read share, its output tokens, and its cost
  * Then: the rows other extensions add as sections (claude-usage.ts: the Claude subscription limits)
  * Last line (optional): statuses other extensions set via ctx.ui.setStatus()
- * Prompt: the session name at the right end of the prompt's top border, as Claude Code shows it
+ * Prompt: the session name at the right end of the prompt's top border, as Claude Code shows it, and the elapsed
+ * time at the right end of its bottom border
  *
  * Sections come through the event bus, whatever the load order: an extension emits "statusline:section" with a
  * StatuslineSection at load and again on every "statusline:section-request"; "statusline:changed" asks for a render.
@@ -53,28 +54,33 @@ function tildify(dir: string): string {
 	return dir.startsWith(home) ? `~${dir.slice(home.length)}` : dir;
 }
 
-/** The text at the right end of the prompt's top border; one per process, since /reload evaluates this module anew. */
+/** The text at the right end of one of the prompt's borders; one per process, since /reload evaluates this module anew. */
 interface BorderLabel {
 	text?: () => string | undefined;
 }
 
-const BORDER_LABEL = Symbol.for("pi.statusline.border-label");
+const BORDERS = {
+	top: { method: "renderTopBorder", key: Symbol.for("pi.statusline.border-label") },
+	bottom: { method: "renderBottomBorder", key: Symbol.for("pi.statusline.border-label.bottom") },
+} as const;
 
 /**
- * Hooks the label into the top border of every prompt editor, Pi's own and the ones extensions set: all of them are
- * CustomEditors, so the hook goes on its prototype, once. As in Claude Code's prompt box, the text sits near the
- * right end with a stub of the line after it ("─── text ──"). Undefined when Pi's editor no longer draws its border
- * there.
+ * Hooks the label into the top or bottom border of every prompt editor, Pi's own and the ones extensions set: all of
+ * them are CustomEditors, so the hook goes on its prototype, once per border. As in Claude Code's prompt box, the text
+ * sits near the right end with a stub of the line after it ("─── text ──"). Undefined when Pi's editor no longer
+ * draws that border there.
  */
-function borderLabel(): BorderLabel | undefined {
+function borderLabel(border: keyof typeof BORDERS): BorderLabel | undefined {
 	type Render = (this: unknown, width: number, hiddenLineCount: number) => string;
-	const proto = CustomEditor.prototype as unknown as { renderTopBorder?: Render; [BORDER_LABEL]?: BorderLabel };
-	if (proto[BORDER_LABEL]) return proto[BORDER_LABEL];
-	const original = proto.renderTopBorder;
+	const { method, key } = BORDERS[border];
+	const proto = CustomEditor.prototype as unknown as Record<string, Render | undefined> & { [k: symbol]: BorderLabel };
+	if (proto[key]) return proto[key];
+	// The bottom border is drawn by pi-tui's Editor; the lookup finds it through the prototype chain.
+	const original = proto[method];
 	if (typeof original !== "function") return undefined;
 	const label: BorderLabel = {};
-	proto[BORDER_LABEL] = label;
-	proto.renderTopBorder = function (width, hiddenLineCount) {
+	proto[key] = label;
+	proto[method] = function (width, hiddenLineCount) {
 		let text: string | undefined;
 		try {
 			text = label.text?.()?.trim();
@@ -123,19 +129,22 @@ export default function (pi: ExtensionAPI) {
 	});
 	pi.events.emit("statusline:section-request", undefined);
 
-	const label = borderLabel();
+	const label = borderLabel("top");
+	const clock = borderLabel("bottom");
 	let requestRender: (() => void) | undefined;
 
 	pi.on("session_info_changed", () => requestRender?.());
 
 	pi.on("session_shutdown", () => {
 		if (label) label.text = undefined;
+		if (clock) clock.text = undefined;
 		requestRender = undefined;
 	});
 
 	pi.on("session_start", async (_event, ctx) => {
 		if (ctx.mode !== "tui") return;
 		if (label) label.text = () => pi.getSessionName();
+		if (clock) clock.text = () => `⏳ ${fmtElapsed(Date.now() - startedAt)}`;
 
 		ctx.ui.setFooter((tui, theme, footerData) => {
 			const rerender = () => tui.requestRender();
@@ -210,7 +219,7 @@ export default function (pi: ExtensionAPI) {
 
 					const lines = [`${modelFmt} 📂 ${dir}${branchFmt}`];
 
-					// --- Line 2: context bar, tokens, cost, time ------------------
+					// --- Line 2: context bar, tokens, cost ------------------------
 					const { cost, input, cacheRead, output, usage: ctxUsage } = sessionTotals();
 					const tokens = ctxUsage?.tokens ?? null;
 					const cacheShare = input > 0 ? theme.fg("dim", ` (${Math.round((cacheRead / input) * 100)}% Cache)`) : "";
@@ -222,8 +231,8 @@ export default function (pi: ExtensionAPI) {
 							theme.fg("dim", " · ") +
 							`Out ${theme.fg("accent", fmtTokens(output))}` +
 							` (${theme.fg("warning", `$${cost.toFixed(2)}`)})` +
-							sep +
-							`⏳ ${fmtElapsed(Date.now() - startedAt)}`,
+							// Without the bottom border's hook the elapsed time stays in this line.
+							(clock ? "" : sep + `⏳ ${fmtElapsed(Date.now() - startedAt)}`),
 					);
 
 					// --- Sections of other extensions ----------------------------

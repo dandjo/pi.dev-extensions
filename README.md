@@ -372,7 +372,7 @@ provider. Below them come the rows other extensions add —
 that other extensions set appear as a last line.
 
 The second line reads `Context █░░…   9% 92.8k | 🪙 In 2.83M (97% Cache) ·
-Out 13.6k ($1.56) | ⏳ 4m 2s`. `In` counts every input token of the session,
+Out 13.6k ($1.56)`. `In` counts every input token of the session,
 cache reads and writes included, as they are billed; the share in brackets is
 what came from the cache. `Out` counts the output, thinking included. Both
 follow the session's current branch, as the cost does.
@@ -381,12 +381,17 @@ The session name stands in the line above the prompt, as in Claude Code's
 prompt box, set in from the right end as far as Pi sets in the working status
 from the left: `── ⠋ Working ──── … ──── <name> ──`. It is the name
 [session-title](#session-title) gives the session, or the one set with `/name`
-or `--name`, cut with `…` to half the width. It changes as soon as the name does, and stays away while a session has
-none. Every prompt editor draws it, Pi's own and the one
+or `--name`, cut with `…` to half the width. It changes as soon as the name
+does, and stays away while a session has none. The time since Pi started or
+last reloaded stands the same way at the right end of the line below the
+prompt: `──── ⏳ 4m 2s ──`.
+
+Every prompt editor draws both, Pi's own and the one
 [background-agents](#background-agents) sets, because the extension hooks
-`renderTopBorder` of Pi's `CustomEditor` class. That method is not a
-documented extension interface: when a Pi update removes it, the name is
-simply not shown.
+`renderTopBorder` and `renderBottomBorder` of Pi's `CustomEditor` class.
+Those methods are not a documented extension interface: when a Pi update
+removes one, the name is simply not shown, and the time goes back to the end
+of the second line.
 
 An extension adds rows through the event bus: it emits `statusline:section`
 with an `id` and a `render(theme)` that returns the rows, at load and again on
