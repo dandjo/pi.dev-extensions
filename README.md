@@ -474,6 +474,9 @@ edit src/index.ts                                          +2 −1 · 0.0s
   Pi's colours for running, done, and failed.
 - A failed tool shows its count in the error colour, a shell command its exit
   code, and below the row the last line of its output.
+- A call that hands its work to the background (`wait`, `gitlab_pipeline`,
+  `agent`) shows its id on the right instead (`→ w4`), and the time only when
+  it waited here first.
 - Ctrl+O, or in fullscreen mode a click on the row, shows the row in full, as
   Pi does.
 - `{"lines": n}` in `~/.pi/agent/compact-tools.json` with n of 2 or more keeps
@@ -809,7 +812,9 @@ out.
   result into the conversation: while Pi works, with its next step, so the
   result is not stale by the time it comes; when Pi is idle, it starts a
   turn. `/gitlab-waits` lists the background waits with their last state,
-  `/gitlab-waits stop <id>` ends one.
+  `/gitlab-waits stop <id>` ends one. The message takes one line, the wait's
+  id and what it waited for on the left, how it ended and the time on the
+  right (`✓ success · 3m 12s`); a click or Ctrl+O shows its whole text.
 - `needResult: true` waits in the foreground. A message from you, or five
   minutes without a result, sends the wait to the background, where it goes
   on with the checks it made. Without a terminal, in a subagent or in print
@@ -2277,6 +2282,11 @@ is a request that reads the whole context.
   the tool's `list: true` list the background waits, those of
   [`gitlab_pipeline`](#gitlab_pipeline) too; `/waits cancel <id>` or the
   tool's `cancel` stops one.
+- That message takes one line: the wait's id and purpose on the left, on the
+  right how it ended (`✓`, `■ timeout`, `! alert`), the shell's exit code,
+  the checks, and the time, as in
+  `[wait] w3 Reload the companion   ✓ exit 0 · 1 check · 2s`. A click or
+  Ctrl+O shows its whole text; the model gets all of it in any case.
 - `needResult: true` waits in the foreground: the call returns when the
   condition holds, with the last output; the tool row counts the checks
   meanwhile, and Esc stops it. When you send a message meanwhile, or after

@@ -58,11 +58,13 @@ import {
 	type ExtensionContext,
 	formatSize,
 	getAgentDir,
+	getMarkdownTheme,
 	getShellConfig,
+	type Theme,
 	truncateHead,
 	truncateTail,
 } from "@earendil-works/pi-coding-agent";
-import { Text } from "@earendil-works/pi-tui";
+import { Box, type Component, Markdown, MouseRegion, Spacer, Text, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { spawn, spawnSync } from "node:child_process";
 
@@ -1662,6 +1664,79 @@ interface BackgroundWaitView {
 	deadline: number;
 }
 
+/** Whether a result message is open: a click toggles it, ctrl+o sets all of them anew. */
+const resultOpen = new WeakMap<object, { expanded: boolean; open: boolean }>();
+
+/** The text of a custom message. */
+function messageText(content: string | ReadonlyArray<{ type: string; text?: string }>): string {
+	return typeof content === "string" ? content : content.map((part) => (part.type === "text" ? (part.text ?? "") : "")).join("\n");
+}
+
+/**
+ * A background wait's result message in one line, in the colours of Pi's custom messages: [label] and what was awaited
+ * on the left, the outcome on the right. A click or ctrl+o opens the whole text as Pi draws it. Copied in wait.ts and
+ * gitlab.ts, which keep it alike.
+ */
+function resultLine(
+	message: object,
+	label: string,
+	left: string,
+	right: string,
+	body: string,
+	options: { expanded: boolean; outputPad: number },
+	theme: Theme,
+): Component {
+	let state = resultOpen.get(message);
+	if (!state || state.expanded !== options.expanded) {
+		state = { expanded: options.expanded, open: options.expanded };
+		resultOpen.set(message, state);
+	}
+	const shown = state;
+	const paint = (text: string) => theme.bg("customMessageBg", text);
+	const tag = theme.fg("customMessageLabel", `\x1b[1m[${label}]\x1b[22m`);
+	const full = new Box(options.outputPad, 1, paint);
+	full.addChild(new Text(tag, 0, 0));
+	full.addChild(new Spacer(1));
+	full.addChild(new Markdown(body, 0, 0, getMarkdownTheme(), { color: (text) => theme.fg("customMessageText", text) }));
+	const row: Component = {
+		render(width) {
+			if (shown.open) return full.render(width);
+			const pad = Math.min(options.outputPad, Math.floor((width - 1) / 2));
+			const inner = Math.max(1, width - 2 * pad);
+			const end = visibleWidth(right) > inner - 2 ? truncateToWidth(right, Math.max(0, inner - 2), "") : right;
+			const room = Math.max(1, inner - (end ? visibleWidth(end) + 2 : 0));
+			const start = truncateToWidth(`${tag} ${theme.fg("customMessageText", left)}`, room, "…");
+			const gap = Math.max(end ? 2 : 0, inner - visibleWidth(start) - visibleWidth(end));
+			const line = " ".repeat(pad) + start + " ".repeat(gap) + end;
+			return [paint(line + " ".repeat(Math.max(0, width - visibleWidth(line))))];
+		},
+		invalidate() {
+			full.invalidate();
+		},
+	};
+	return new MouseRegion(row, (event) => {
+		if (event.type !== "click" || event.button !== "left") return undefined;
+		shown.open = !shown.open;
+		return { handled: true };
+	});
+}
+
+/** How a background result reads on the right of its line: the mark, its colour, and a few words. */
+function ciOutcome(first: string): { color: "success" | "error" | "warning" | "accent" | "muted"; mark: string; word: string } {
+	const lead = first.replace(/^Background wait [\w-]+: /, "").replace(/\.$/, "");
+	if (/^Background wait [\w-]+ for .* ended without a result/.test(first)) return { color: "error", mark: "✗", word: "no result" };
+	const gaveUp = /^Gave up after [^:]+: .* is still (\w+)/.exec(lead);
+	if (gaveUp) return { color: "warning", mark: "■", word: `gave up, still ${gaveUp[1]}` };
+	if (/^Chain succeeded/.test(lead)) return { color: "success", mark: "✓", word: "chain succeeded" };
+	if (/^Chain /.test(lead)) return { color: "error", mark: "✗", word: truncateToWidth(lead, 48, "…") };
+	const status = /^(?:Pipeline|Job) .* is (\w+)/.exec(lead)?.[1];
+	if (status === "success") return { color: "success", mark: "✓", word: status };
+	if (status === "failed") return { color: "error", mark: "✗", word: status };
+	if (status === "manual") return { color: "accent", mark: "◆", word: "waits at a manual job" };
+	if (status === "canceled") return { color: "warning", mark: "■", word: status };
+	return { color: "muted", mark: "•", word: status ?? truncateToWidth(lead, 48, "…") };
+}
+
 /** A result that came while no session runtime could take it, during a /reload. */
 interface CiHeld {
 	content: string;
@@ -2915,6 +2990,17 @@ export default function (pi: ExtensionAPI) {
 		if (ciShared.waits.has(id)) ciShared.live?.ctx.ui.notify(stopCiWait(id), "info");
 	});
 
+	// A result in one line: the wait's id and what it waited for, then how it ended and the time it took.
+	pi.registerMessageRenderer<{ project?: string; waitId?: string; what?: string; elapsedMs?: number }>(CI_MESSAGE_TYPE, (message, options, theme) => {
+		const d = message.details;
+		if (!d?.waitId) return undefined;
+		const body = messageText(message.content);
+		const { color, mark, word } = ciOutcome(body.split("\n")[0] ?? "");
+		const took = d.elapsedMs === undefined ? "" : ciDuration(d.elapsedMs / 1000) || "0s";
+		const right = `${theme.fg(color, `${mark} ${word}`)}${took ? theme.fg("muted", ` · ${took}`) : ""}`;
+		return resultLine(message, CI_MESSAGE_TYPE, `${d.waitId} ${d.what ?? d.project ?? ""}`.trim(), right, body, options, theme);
+	});
+
 	pi.registerTool({
 		name: "gitlab_pipeline",
 		label: "GitLab pipeline",
@@ -3195,7 +3281,8 @@ export default function (pi: ExtensionAPI) {
 				if (entry.abort.signal.aborted) return;
 				if (ciShared.waits.get(entry.id) === entry) ciShared.waits.delete(entry.id);
 				ciPublish();
-				ciDeliver({ content: limited(mask(text), "", false), details: { ...details, waitId: entry.id } });
+				const elapsedMs = Date.now() - entry.started;
+				ciDeliver({ content: limited(mask(text), "", false), details: { ...details, waitId: entry.id, what: entry.what, elapsedMs } });
 			};
 			const failed = (entry: CiWait, error: unknown) =>
 				`Background wait ${entry.id} for ${entry.what} ended without a result: ${error instanceof Error ? error.message : String(error)}`;

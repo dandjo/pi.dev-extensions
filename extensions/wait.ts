@@ -40,8 +40,8 @@ import { spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { StringEnum } from "@earendil-works/pi-ai";
-import { type ExtensionAPI, type ExtensionContext, getAgentDir } from "@earendil-works/pi-coding-agent";
-import { Text } from "@earendil-works/pi-tui";
+import { type ExtensionAPI, type ExtensionContext, getAgentDir, getMarkdownTheme, type Theme } from "@earendil-works/pi-coding-agent";
+import { Box, type Component, Markdown, MouseRegion, Spacer, Text, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 
 const CONFIG_FILE = path.join(getAgentDir(), "wait.json");
@@ -187,6 +187,63 @@ function formatDuration(ms: number): string {
 	if (s < 60) return `${s}s`;
 	const m = Math.floor(s / 60);
 	return m < 60 ? `${m}m ${s % 60}s` : `${Math.floor(m / 60)}h ${m % 60}m`;
+}
+
+/** Whether a result message is open: a click toggles it, ctrl+o sets all of them anew. */
+const resultOpen = new WeakMap<object, { expanded: boolean; open: boolean }>();
+
+/** The text of a custom message. */
+function messageText(content: string | ReadonlyArray<{ type: string; text?: string }>): string {
+	return typeof content === "string" ? content : content.map((part) => (part.type === "text" ? (part.text ?? "") : "")).join("\n");
+}
+
+/**
+ * A background wait's result message in one line, in the colours of Pi's custom messages: [label] and what was awaited
+ * on the left, the outcome on the right. A click or ctrl+o opens the whole text as Pi draws it. Copied in wait.ts and
+ * gitlab.ts, which keep it alike.
+ */
+function resultLine(
+	message: object,
+	label: string,
+	left: string,
+	right: string,
+	body: string,
+	options: { expanded: boolean; outputPad: number },
+	theme: Theme,
+): Component {
+	let state = resultOpen.get(message);
+	if (!state || state.expanded !== options.expanded) {
+		state = { expanded: options.expanded, open: options.expanded };
+		resultOpen.set(message, state);
+	}
+	const shown = state;
+	const paint = (text: string) => theme.bg("customMessageBg", text);
+	const tag = theme.fg("customMessageLabel", `\x1b[1m[${label}]\x1b[22m`);
+	const full = new Box(options.outputPad, 1, paint);
+	full.addChild(new Text(tag, 0, 0));
+	full.addChild(new Spacer(1));
+	full.addChild(new Markdown(body, 0, 0, getMarkdownTheme(), { color: (text) => theme.fg("customMessageText", text) }));
+	const row: Component = {
+		render(width) {
+			if (shown.open) return full.render(width);
+			const pad = Math.min(options.outputPad, Math.floor((width - 1) / 2));
+			const inner = Math.max(1, width - 2 * pad);
+			const end = visibleWidth(right) > inner - 2 ? truncateToWidth(right, Math.max(0, inner - 2), "") : right;
+			const room = Math.max(1, inner - (end ? visibleWidth(end) + 2 : 0));
+			const start = truncateToWidth(`${tag} ${theme.fg("customMessageText", left)}`, room, "…");
+			const gap = Math.max(end ? 2 : 0, inner - visibleWidth(start) - visibleWidth(end));
+			const line = " ".repeat(pad) + start + " ".repeat(gap) + end;
+			return [paint(line + " ".repeat(Math.max(0, width - visibleWidth(line))))];
+		},
+		invalidate() {
+			full.invalidate();
+		},
+	};
+	return new MouseRegion(row, (event) => {
+		if (event.type !== "click" || event.button !== "left") return undefined;
+		shown.open = !shown.open;
+		return { handled: true };
+	});
 }
 
 /** A time as HH:MM, with the date before it when it is not today. */
@@ -761,6 +818,26 @@ export default function (pi: ExtensionAPI) {
 				d.status === "met" ? theme.fg("success", "✓") : d.status === "background" ? theme.fg("accent", "◆") : theme.fg("warning", "■");
 			return new Text(`${icon} ${theme.fg("muted", body.split("\n")[0])}`, 0, 0);
 		},
+	});
+
+	// A result in one line: the wait's id and purpose, then how it ended, the shell's exit, the checks, and the time.
+	pi.registerMessageRenderer<WaitDetails>(MESSAGE_TYPE, (message, options, theme) => {
+		const d = message.details;
+		if (!d) return undefined;
+		const body = messageText(message.content);
+		const exit = /^Last output \(([^)]*)\):/m.exec(body)?.[1];
+		const outcome = {
+			met: ["success", "✓", ""],
+			alert: ["warning", "!", "alert"],
+			timeout: ["warning", "■", "timeout"],
+			cancelled: ["muted", "■", "cancelled"],
+			aborted: ["muted", "■", "aborted"],
+			ended: ["warning", "■", "ended with /reload"],
+		} as const;
+		const [color, mark, word] = outcome[d.status as keyof typeof outcome] ?? (["muted", "•", d.status] as const);
+		const facts = [exit, `${d.checks} check${d.checks === 1 ? "" : "s"}`, formatDuration(d.elapsedMs)].filter(Boolean).join(" · ");
+		const right = `${theme.fg(color, word ? `${mark} ${word}` : mark)}${theme.fg("muted", `${word ? " · " : " "}${facts}`)}`;
+		return resultLine(message, MESSAGE_TYPE, `${d.id ?? ""} ${d.label}`.trim(), right, body, options, theme);
 	});
 
 	pi.registerCommand("waits", {

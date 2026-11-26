@@ -53,6 +53,8 @@ function loadLines(): number {
 const UNCUT = new Set(["codemode"]);
 /** Tools whose cut result shows its last lines, as Pi's preview of them does. */
 const FROM_END = new Set(["bash", "powershell"]);
+/** Tools that may hand their work to the background: their row names its id instead of the count. */
+const BACKGROUND_TOOLS = new Set(["wait", "gitlab_pipeline", "agent"]);
 /** What Pi shows of a tool without renderers of its own: lines of output collapsed, characters of arguments. */
 const FALLBACK_PREVIEW_LINES = 10;
 const FALLBACK_ARGS_CHARS = 100;
@@ -130,6 +132,8 @@ interface OneLine {
 	exitCode?: number;
 	/** The last line of a failed tool's output. */
 	errorLine?: string;
+	/** The id of what goes on in the background (a wait, a pipeline wait, an agent) when the call returned at once. */
+	background?: string;
 	startedAt?: number;
 	endedAt?: number;
 	durationMs?: number;
@@ -259,14 +263,19 @@ function duration(ms: number): string {
 function summary(one: OneLine): string {
 	const { theme } = one;
 	const parts: string[] = [];
-	if (one.error && one.exitCode !== undefined) parts.push(`exit ${one.exitCode}`);
-	if (one.diff) parts.push(`+${one.diff.added} −${one.diff.removed}`);
-	else if (one.count !== undefined) parts.push(`${one.count} ${one.count === 1 ? "line" : "lines"}`);
 	const ms = !one.partial && one.durationMs !== undefined
 		? one.durationMs
 		: one.startedAt !== undefined
 			? (one.endedAt ?? Date.now()) - one.startedAt
 			: undefined;
+	// A call that handed its work to the background: its id, and the time only when it waited here first.
+	if (one.background && !one.partial && !one.error) {
+		const id = theme.fg("accent", `→ ${one.background}`);
+		return ms !== undefined && ms >= 1000 ? `${id}${theme.fg("muted", ` · ${duration(ms)}`)}` : id;
+	}
+	if (one.error && one.exitCode !== undefined) parts.push(`exit ${one.exitCode}`);
+	if (one.diff) parts.push(`+${one.diff.added} −${one.diff.removed}`);
+	else if (one.count !== undefined) parts.push(`${one.count} ${one.count === 1 ? "line" : "lines"}`);
 	if (ms !== undefined) parts.push(duration(ms));
 	if (parts.length === 0) return "";
 	return theme.fg(one.error ? "error" : "muted", parts.join(" · "));
@@ -311,7 +320,7 @@ function frame(row: Row, one: OneLine, width: number): readonly string[] {
 }
 
 /** What the summary takes from a result: the line count, a shell exit code, and a failed tool's last line. */
-function readResult(one: OneLine, result: Result): void {
+function readResult(one: OneLine, result: Result, tool: string): void {
 	const text = (result.content ?? [])
 		.filter((block) => block.type === "text")
 		.map((block) => (block.text ?? "").replace(STYLE, "").replace(/\r/g, ""))
@@ -335,6 +344,15 @@ function readResult(one: OneLine, result: Result): void {
 		};
 	} else one.diff = undefined;
 	one.errorLine = end > 0 ? lines[end - 1].trim() : undefined;
+	// What these tools answer when they hand their work to the background: wait and gitlab_pipeline ("Waiting in the
+	// background as w4: …", "… so the wait goes on in the background as gp2 for …"), agent ("Agent a1b2 (Explore) is
+	// running in the background. …"). Only their first line counts, so quoted output elsewhere does not.
+	const first = lines[0] ?? "";
+	const background = BACKGROUND_TOOLS.has(tool)
+		? (/^(?:Waiting|Repeating) in the background as ([\w-]+)|\bso the wait goes on in the background as ([\w-]+)/.exec(first) ??
+			/^Agent ([\w-]+) \([^)]*\) is running in the background/.exec(first))
+		: null;
+	one.background = background ? (background[1] ?? background[2]) : undefined;
 }
 
 /** Redraws a running tool's row every TICK_MS for its time, until it ends or its row is no longer drawn. */
@@ -458,7 +476,7 @@ function compact(tool: string, base: Renderers): Renderers {
 				one.invalidate = context.invalidate;
 				one.partial = options.isPartial && !context.isError;
 				one.error = context.isError;
-				readResult(one, result);
+				readResult(one, result, tool);
 				if (one.partial) tick(one);
 				else {
 					one.endedAt ??= Date.now();
