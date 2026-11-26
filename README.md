@@ -18,7 +18,7 @@ names `extensions/`, which holds one file per extension.
 | Extension                   | What it does                                                                              | Needs                                                            |
 | :-------------------------- | :---------------------------------------------------------------------------------------- | :--------------------------------------------------------------- |
 | `statusline.ts`             | Replaces Pi's footer with a Claude Code style status line, for any provider               | —                                                                |
-| `compact-tools.ts`          | Cuts each collapsed tool row to four lines; Ctrl+O shows all of it                        | —                                                                |
+| `compact-tools.ts`          | Cuts each collapsed tool row to one line with its count and time; Ctrl+O shows all        | —                                                                |
 | `web-tools.ts`              | Adds `web_fetch`: reads a page locally and lets a small model answer from it              | —                                                                |
 | `openproject.ts`            | Adds `openproject`: reads and changes OpenProject through its API v3, as you              | An OpenProject API token for each instance                       |
 | `gitlab.ts`                 | Adds `gitlab`, `gitlab_pipeline`, `gitlab_work`: GitLab's API as you, CI and issues brief | A GitLab personal access token for each instance                 |
@@ -457,29 +457,35 @@ time of the next attempt.
 
 ## compact-tools
 
-Cuts each collapsed tool row to four lines and leaves everything else as Pi
+Cuts each collapsed tool row to one line and leaves everything else as Pi
 draws it:
 
 ```
-$ git status --short
- M src/index.ts
- M README.md
-... (6 more lines, ctrl+o to expand)
+$ cat big.txt                                            30 lines · 0.0s
+$ ls /nonexistent                               exit 2 · 1 line · 0.0s
+ls: cannot access '/nonexistent': No such file or directory
+edit src/index.ts                                          +2 −1 · 0.0s
 ```
 
-- A row that fits in four lines stays exactly as Pi draws it. A longer one
-  first loses its blank lines. If it still does not fit, it shows its first
-  lines — the call, then the result — and as the fourth line how many lines
-  are hidden. Shell output shows its last lines instead, as Pi's own preview
-  does, with that line between the command and the output. The line with the
-  time a command took stays below as the last line and does not count.
+- The row is the call as the tool draws it, its first line cut to fit, and on
+  the right how many lines the result has and how long the tool ran; while it
+  runs, the time counts up. An edit shows the lines it added and removed.
+  Pi's padding lines above and below the row go too; the background keeps
+  Pi's colours for running, done, and failed.
+- A failed tool shows its count in the error colour, a shell command its exit
+  code, and below the row the last line of its output.
 - Ctrl+O, or in fullscreen mode a click on the row, shows the row in full, as
   Pi does.
+- `{"lines": n}` in `~/.pi/agent/compact-tools.json` with n of 2 or more keeps
+  up to n lines instead: a row that fits stays as Pi draws it, a longer one
+  first loses its blank lines, then shows its first lines (shell output its
+  last ones, as Pi's preview does) and how many lines are hidden. The file is
+  read at load, so `/reload` applies a change.
 - `codemode` keeps Pi's row as it is: its own preview already limits the
   script, its calls, and its output.
 - It covers Pi's tools, those of other extensions, and MCP tools, through
   `pi.registerToolRenderer()`. What the model sees does not change, and
-  nothing is stored. `MAX_LINES` at the top of the file sets the four lines.
+  nothing is stored.
 
 ## web-tools
 

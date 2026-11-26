@@ -1,12 +1,25 @@
 /**
- * Compact tools: cuts each collapsed tool row to MAX_LINES lines and leaves everything else as Pi draws it.
+ * Compact tools: cuts each collapsed tool row to one line, or to the lines compact-tools.json sets, and leaves
+ * everything else as Pi draws it.
  *
- * - A row whose content fits in MAX_LINES lines stays exactly as Pi draws it. A longer one first loses its blank
+ * One line (the default):
+ * - A collapsed row is the call as the tool draws it, its first line cut to fit, and on the right how many lines the
+ *   result has and how long the tool ran ("17 lines · 0.4s"; while it runs the time counts up). Pi's padding lines
+ *   above and below the row go too, so that a row takes one line of the screen; its background keeps Pi's colours
+ *   for running, done, and failed.
+ * - A failed tool (an error result) shows its count in the error colour, a shell command's exit code with it
+ *   ("exit 2 · …"), and below the row the last line of its output, so that the reason shows without expanding.
+ * - Expanded, the row is Pi's, in Pi's padding.
+ *
+ * {"lines": n} in ~/.pi/agent/compact-tools.json with n of 2 or more keeps up to n lines instead:
+ * - A row whose content fits in n lines stays exactly as Pi draws it. A longer one first loses its blank
  *   lines. If it still does not fit, it shows its first lines (the call, then the result) and, as its last line, how
  *   many lines are hidden, in Pi's form "... (N more lines, ctrl+o to expand)". Shell output shows its last lines
  *   instead, as Pi's own preview does, with that line between the command and the output, where the hidden lines
  *   are. The line with the time a shell command took stays below as the last line and does not count.
- * - Expanding (ctrl+o, or a click on the row) shows the row as Pi does, in full.
+ *
+ * Either way:
+ * - Expanding (ctrl+o, or a click on the row) shows the row as Pi does, in full. The file is read at load (/reload).
  * - The tools in UNCUT keep Pi's row as it is: codemode, whose own preview already limits the script, its calls and
  *   its output.
  * - It applies to Pi's tools, those of other extensions, and MCP tools, through pi.registerToolRenderer(). Pi draws
@@ -14,11 +27,28 @@
  * - Nothing changes in what the model sees, and nothing is stored: remove this file and the rows are Pi's again.
  */
 
-import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
-import { type Component, Container, Text, truncateToWidth } from "@earendil-works/pi-tui";
+import { readFileSync } from "node:fs";
+import path from "node:path";
+import { type ExtensionAPI, getAgentDir, type Theme } from "@earendil-works/pi-coding-agent";
+import { type Component, Container, Text, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 
-/** Lines of content a collapsed row shows, the line with the number of hidden lines included. */
-const MAX_LINES = 4;
+const CONFIG_FILE = path.join(getAgentDir(), "compact-tools.json");
+/** Lines of content a collapsed row shows, the line with the number of hidden lines included; 1 is the one-line row. */
+let MAX_LINES = 1;
+/** A running tool's row is redrawn this often for its time; a row not drawn for STALE_MS stops it. */
+const TICK_MS = 1_000;
+const STALE_MS = 5_000;
+/** The width a one-line row draws the call at before cutting it. */
+const WIDE = 1_000;
+
+function loadLines(): number {
+	try {
+		const lines = JSON.parse(readFileSync(CONFIG_FILE, "utf8"))?.lines;
+		return Number.isInteger(lines) && lines >= 1 ? lines : 1;
+	} catch {
+		return 1;
+	}
+}
 /** Tools whose row is left as Pi draws it. */
 const UNCUT = new Set(["codemode"]);
 /** Tools whose cut result shows its last lines, as Pi's preview of them does. */
@@ -36,6 +66,10 @@ interface RenderContext {
 	lastComponent?: Component;
 	expanded: boolean;
 	outputPad: number;
+	executionStarted: boolean;
+	isError: boolean;
+	durationMs?: number;
+	invalidate(): void;
 	keyHint(keybinding: string, description: string): string;
 }
 
@@ -78,6 +112,31 @@ interface Row {
 	fromEnd: boolean;
 	hint: (hidden: number, earlier: boolean) => string;
 	layout?: Layout;
+	/** The one-line form: the row draws its own frame (renderShell "self"), and the call's part draws all of it. */
+	oneLine?: OneLine;
+}
+
+/** What the one-line form of a row needs besides the drawn parts. */
+interface OneLine {
+	theme: Theme;
+	pad: number;
+	partial: boolean;
+	error: boolean;
+	/** Lines of the result's text, or the total the tool reports for output it cut. */
+	count?: number;
+	/** Lines an edit added and removed, from its diff. */
+	diff?: { added: number; removed: number };
+	/** A shell command's exit code, from "Command exited with code N". */
+	exitCode?: number;
+	/** The last line of a failed tool's output. */
+	errorLine?: string;
+	startedAt?: number;
+	endedAt?: number;
+	durationMs?: number;
+	timer?: ReturnType<typeof setInterval>;
+	drawnAt: number;
+	invalidate?: () => void;
+	frame?: { width: number; lines: readonly string[] };
 }
 
 /** The part of a row that Pi holds as a component: the call or the result. */
@@ -87,10 +146,15 @@ class Part implements Component {
 		readonly part: "call" | "result",
 	) {}
 	render(width: number): readonly string[] {
-		return layout(this.row, Math.max(1, width))[this.part];
+		const one = this.row.oneLine;
+		if (!one) return layout(this.row, Math.max(1, width))[this.part];
+		if (this.part === "result") return [];
+		one.drawnAt = Date.now();
+		return frame(this.row, one, Math.max(1, width));
 	}
 	invalidate(): void {
 		this.row.layout = undefined;
+		if (this.row.oneLine) this.row.oneLine.frame = undefined;
 		const slot = this.part === "call" ? this.row.call : this.row.result;
 		slot?.collapsed?.invalidate?.();
 		slot?.expanded?.invalidate?.();
@@ -181,6 +245,114 @@ function layout(row: Row, width: number): Layout {
 	return done(shownCall, tail ? [hint, ...shownResult, ...timer] : [...shownResult, hint, ...timer]);
 }
 
+/** Duration as Pi writes it: `4.2s` below a minute, then `1m 30s` and `2h 3m 4s`. */
+function duration(ms: number): string {
+	const seconds = ms / 1000;
+	if (seconds < 60) return `${seconds.toFixed(1)}s`;
+	const total = Math.floor(seconds);
+	const minutes = Math.floor(total / 60);
+	if (minutes < 60) return `${minutes}m ${total % 60}s`;
+	return `${Math.floor(minutes / 60)}h ${minutes % 60}m ${total % 60}s`;
+}
+
+/** The right-hand side of a one-line row: exit code, count, time. */
+function summary(one: OneLine): string {
+	const { theme } = one;
+	const parts: string[] = [];
+	if (one.error && one.exitCode !== undefined) parts.push(`exit ${one.exitCode}`);
+	if (one.diff) parts.push(`+${one.diff.added} −${one.diff.removed}`);
+	else if (one.count !== undefined) parts.push(`${one.count} ${one.count === 1 ? "line" : "lines"}`);
+	const ms = !one.partial && one.durationMs !== undefined
+		? one.durationMs
+		: one.startedAt !== undefined
+			? (one.endedAt ?? Date.now()) - one.startedAt
+			: undefined;
+	if (ms !== undefined) parts.push(duration(ms));
+	if (parts.length === 0) return "";
+	return theme.fg(one.error ? "error" : "muted", parts.join(" · "));
+}
+
+/**
+ * The whole row in the one-line form, in the frame Pi would give it: collapsed the call's first line with the summary
+ * on the right (and a failed tool's last output line below), without padding lines; expanded Pi's row with them.
+ */
+function frame(row: Row, one: OneLine, width: number): readonly string[] {
+	if (one.frame?.width === width) return one.frame.lines;
+	const { theme } = one;
+	const pad = Math.min(one.pad, Math.floor((width - 1) / 2));
+	const inner = Math.max(1, width - 2 * pad);
+	const background = one.partial ? "toolPendingBg" : one.error ? "toolErrorBg" : "toolSuccessBg";
+	const paint = (line: string) => {
+		const padded = " ".repeat(pad) + line;
+		return theme.bg(background as Parameters<Theme["bg"]>[0], padded + " ".repeat(Math.max(0, width - visibleWidth(padded))));
+	};
+
+	let lines: string[];
+	if (row.expanded) {
+		const { call, result } = layout(row, inner);
+		lines = [paint(""), ...[...call, ...result].map(paint), paint("")];
+	} else {
+		// Drawn wide, so that a long command stays on its first line and is cut here instead of wrapped.
+		const call = linesOf(row.call.collapsed, Math.max(inner, WIDE), row.ownShell).filter((line) => !isBlank(line));
+		// Without the spaces that pad the line to the width, also where styles follow them.
+		let left = (call[0] ?? "").replace(/\s+((?:\x1b\[[0-9;]*m)*)$/, "$1");
+		// More call lines (a command over several lines) get a mark; an edit's diff is the summary on the right.
+		if (call.length > 1 && !one.diff) left += theme.fg("muted", " …");
+		let right = summary(one);
+		if (visibleWidth(right) > inner - 2) right = truncateToWidth(right, Math.max(0, inner - 2), "");
+		const room = Math.max(1, inner - (right ? visibleWidth(right) + 2 : 0));
+		left = truncateToWidth(left, room, "…");
+		const gap = Math.max(right ? 2 : 0, inner - visibleWidth(left) - visibleWidth(right));
+		lines = [paint(left + " ".repeat(gap) + right)];
+		if (one.error && one.errorLine) lines.push(paint(truncateToWidth(theme.fg("error", one.errorLine), inner, "…")));
+	}
+	one.frame = { width, lines };
+	return lines;
+}
+
+/** What the summary takes from a result: the line count, a shell exit code, and a failed tool's last line. */
+function readResult(one: OneLine, result: Result): void {
+	const text = (result.content ?? [])
+		.filter((block) => block.type === "text")
+		.map((block) => (block.text ?? "").replace(STYLE, "").replace(/\r/g, ""))
+		.join("\n")
+		.trimEnd();
+	const lines = text ? text.split("\n") : [];
+	let end = lines.length;
+	const exit = end > 0 ? /^Command exited with code (\d+)$/.exec(lines[end - 1].trim()) : null;
+	one.exitCode = exit ? Number(exit[1]) : undefined;
+	if (exit) end--;
+	while (end > 0 && lines[end - 1].trim() === "") end--;
+	const details = result.details as { truncation?: { totalLines?: unknown }; diff?: unknown } | undefined;
+	const total = details?.truncation?.totalLines;
+	one.count = typeof total === "number" ? total : end;
+	// Pi's edit diff: "+12 text" for an added line, "-12 text" for a removed one.
+	if (typeof details?.diff === "string") {
+		const diff = details.diff.split("\n");
+		one.diff = {
+			added: diff.filter((line) => /^\+\s*\d/.test(line)).length,
+			removed: diff.filter((line) => /^-\s*\d/.test(line)).length,
+		};
+	} else one.diff = undefined;
+	one.errorLine = end > 0 ? lines[end - 1].trim() : undefined;
+}
+
+/** Redraws a running tool's row every TICK_MS for its time, until it ends or its row is no longer drawn. */
+function tick(one: OneLine): void {
+	if (one.timer || !one.partial || one.startedAt === undefined) return;
+	one.drawnAt = Date.now();
+	one.timer = setInterval(() => {
+		if (!one.partial || Date.now() - one.drawnAt > STALE_MS) {
+			clearInterval(one.timer);
+			one.timer = undefined;
+			return;
+		}
+		one.frame = undefined;
+		one.invalidate?.();
+	}, TICK_MS);
+	one.timer.unref?.();
+}
+
 /** The call as Pi draws it for a tool without a call renderer: the name and the arguments. */
 function fallbackCall(tool: string, args: unknown, theme: Theme, expanded: boolean): Component {
 	const header = theme.fg("toolTitle", theme.bold(tool));
@@ -219,6 +391,7 @@ function fallbackResult(result: Result, theme: Theme, expanded: boolean, context
 /** Pi's renderers for one tool, cut to MAX_LINES lines when collapsed. `base` are the renderers Pi would use. */
 function compact(tool: string, base: Renderers): Renderers {
 	const ownShell = base.renderShell === "self";
+	const oneLine = MAX_LINES === 1;
 
 	const rowOf = (theme: Theme, context: RenderContext, expanded: boolean): Row => {
 		const row = ((context.state.compactRow as Row | undefined) ??= {
@@ -227,9 +400,15 @@ function compact(tool: string, base: Renderers): Renderers {
 			ownShell,
 			fromEnd: FROM_END.has(tool),
 			hint: () => "",
+			oneLine: oneLine ? { theme, pad: context.outputPad, partial: true, error: false, drawnAt: Date.now() } : undefined,
 		});
 		row.expanded = expanded;
 		row.layout = undefined;
+		if (row.oneLine) {
+			row.oneLine.theme = theme;
+			row.oneLine.pad = context.outputPad;
+			row.oneLine.frame = undefined;
+		}
 		row.hint = (hidden, earlier) =>
 			`${theme.fg("muted", `... (${hidden} ${earlier ? "earlier" : "more"} lines,`)} ${context.keyHint("app.tools.expand", "to expand")}${theme.fg("muted", ")")}`;
 		return row;
@@ -237,8 +416,8 @@ function compact(tool: string, base: Renderers): Renderers {
 
 	/** Draws a slot with the tool's own renderer: collapsed at once, expanded when needed (always, when expanded). */
 	const draw = (slot: Slot, context: RenderContext, expanded: boolean, render: (context: RenderContext, expanded: boolean) => Component) => {
-		// A tool with a box of its own sits in Pi's box here, which brings the padding.
-		const inner = { ...context, outputPad: ownShell ? 0 : context.outputPad };
+		// A tool with a box of its own sits in Pi's box here, or in the one-line frame, which brings the padding.
+		const inner = { ...context, outputPad: ownShell || oneLine ? 0 : context.outputPad };
 		slot.drawExpanded = () => {
 			slot.expanded = render({ ...inner, expanded: true, lastComponent: slot.expanded }, true);
 		};
@@ -249,11 +428,18 @@ function compact(tool: string, base: Renderers): Renderers {
 
 	return {
 		...base,
-		// Pi's box for every tool, edit included, so that a cut row keeps Pi's padding and background.
-		renderShell: "default",
+		// Pi's box for every tool, edit included, so that a cut row keeps Pi's padding and background; the one-line form
+		// draws that frame itself, without the padding lines.
+		renderShell: oneLine ? "self" : "default",
 
 		renderCall(args: unknown, theme: Theme, context: RenderContext): Component {
 			const row = rowOf(theme, context, context.expanded);
+			const one = row.oneLine;
+			if (one) {
+				one.invalidate = context.invalidate;
+				if (context.executionStarted && one.startedAt === undefined) one.startedAt = Date.now();
+				tick(one);
+			}
 			draw(row.call, context, context.expanded, (inner, expanded) => {
 				try {
 					if (base.renderCall) return base.renderCall(args, theme, inner);
@@ -267,6 +453,18 @@ function compact(tool: string, base: Renderers): Renderers {
 
 		renderResult(result: Result, options: RenderOptions, theme: Theme, context: RenderContext): Component {
 			const row = rowOf(theme, context, options.expanded);
+			const one = row.oneLine;
+			if (one) {
+				one.invalidate = context.invalidate;
+				one.partial = options.isPartial && !context.isError;
+				one.error = context.isError;
+				readResult(one, result);
+				if (one.partial) tick(one);
+				else {
+					one.endedAt ??= Date.now();
+					one.durationMs = context.durationMs;
+				}
+			}
 			const slot = (row.result ??= {});
 			draw(slot, context, options.expanded, (inner, expanded) => {
 				try {
@@ -282,6 +480,7 @@ function compact(tool: string, base: Renderers): Renderers {
 }
 
 export default function (pi: ExtensionAPI) {
+	MAX_LINES = loadLines();
 	pi.registerToolRenderer((toolName, next) => {
 		const base = next() as Renderers | undefined;
 		// A tool Pi has no definition for keeps Pi's plain row.
