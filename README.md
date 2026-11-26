@@ -2231,15 +2231,19 @@ the price of the whole context.
   its last request is summarised in the background with Pi's own summariser,
   on the session's model. The session stays free meanwhile.
 - Your next message after an hour without a request compacts the session with
-  that summary before it goes out, so it carries the small context only. If
-  the summary is still being written, the message waits for it. A message
-  within the hour, while the cache still holds the conversation, drops the
-  summary unused.
+  that summary before it goes out, so it carries the small context only. A
+  summary still being written by then is dropped, and the message goes out
+  at once as it is: it never waits for the summary. A message within the
+  hour, while the cache still holds the conversation, drops the summary
+  unused.
 - The summary covers the whole conversation; Pi keeps its recent messages as
   they are, as with `/compact`. A summary of a conversation that changed
   meanwhile, by a background result or a message, is dropped.
 - After a start or `/reload`, the time of the last request comes from the
-  session, so a conversation idle long enough already is summarised at once.
+  session, so a conversation idle for 50 minutes is summarised at once, but
+  only while its cache is still warm. A session resumed after the hour gets
+  no summary: it would cost a full read of the conversation, as much as the
+  next message.
 - It works in the interactive session only: a subagent ends with its run, and
   so does print mode.
 - Settings, all optional, in `~/.pi/agent/idle-compaction.json`: `enabled`

@@ -7,14 +7,16 @@
  *   stays idle for prepareMinutes after its last request is summarised in the background with Pi's own summariser,
  *   on the session's model, while the session stays free.
  * - The next message after coldMinutes since the last request compacts the session with that summary before it goes
- *   out, so it is sent with the small context only. If the summary is still being written, the message waits for
- *   it. A message within coldMinutes, while the cache still holds the conversation, drops the summary unused.
+ *   out, so it is sent with the small context only. A summary still being written by then is dropped, and the
+ *   message goes out at once as it is: a message never waits for it. A message within coldMinutes, while the cache
+ *   still holds the conversation, drops the summary unused.
  * - The summary covers the whole conversation; Pi keeps its recent messages (keepRecentTokens) as they are, as with
  *   /compact. A summary written for a conversation that changed meanwhile (a background result, a message) is
  *   dropped. The file lists go into the summary text; Pi carries those of a summary from an extension no further in
  *   the entry's details.
- * - After a start or /reload, the time of the last request comes from the session: a conversation idle long enough
- *   already is summarised at once.
+ * - After a start or /reload, the time of the last request comes from the session: a conversation idle for
+ *   prepareMinutes is summarised at once, but only while its cache is still warm. Once coldMinutes have passed, a
+ *   summary would cost a full read of the conversation, as much as the next message, so none is written.
  * - Only in the interactive session: a subagent and print mode end with their run.
  * - Settings, all optional, in ~/.pi/agent/idle-compaction.json: {"enabled": true, "minTokens": 100000,
  *   "prepareMinutes": 50, "coldMinutes": 60}. Under "providers", every key can be set for one provider and wins there
@@ -54,6 +56,8 @@ interface Prepared {
 	anchor: string;
 	abort: AbortController;
 	result: Promise<Summary | undefined>;
+	/** Set once the summary request has ended, with or without a summary. */
+	settled: boolean;
 }
 
 function readSettings(provider: string | undefined): Settings {
@@ -125,6 +129,8 @@ export default function (pi: ExtensionAPI) {
 		const model = ctx.model;
 		if (!model || !ctx.isIdle() || prepared) return;
 		const settings = readSettings(model.provider);
+		// A timer that fires late (a suspended machine) finds the cache cold: a summary would cost the full context.
+		if (lastRequestAt === undefined || Date.now() - lastRequestAt >= settings.coldMinutes * 60_000) return;
 		const tokens = ctx.getContextUsage()?.tokens;
 		if (!settings.enabled || tokens == null || tokens < settings.minTokens) return;
 		const anchor = conversationAnchor(ctx);
@@ -156,7 +162,11 @@ export default function (pi: ExtensionAPI) {
 			}
 			return undefined;
 		});
-		prepared = { anchor, abort, result };
+		const pending: Prepared = { anchor, abort, result, settled: false };
+		void result.finally(() => {
+			pending.settled = true;
+		});
+		prepared = pending;
 	}
 
 	function schedule(ctx: ExtensionContext): void {
@@ -164,6 +174,8 @@ export default function (pi: ExtensionAPI) {
 		if (ctx.mode !== "tui" || lastRequestAt === undefined || prepared) return;
 		const settings = readSettings(ctx.model?.provider);
 		if (!settings.enabled) return;
+		// The cache expired already (a session resumed after hours): no summary, see prepare().
+		if (Date.now() - lastRequestAt >= settings.coldMinutes * 60_000) return;
 		const delay = Math.max(0, lastRequestAt + settings.prepareMinutes * 60_000 - Date.now());
 		timer = setTimeout(() => prepare(ctx), delay);
 		timer.unref?.();
@@ -202,7 +214,8 @@ export default function (pi: ExtensionAPI) {
 		prepared = undefined;
 		const settings = readSettings(ctx.model?.provider);
 		const cold = lastRequestAt !== undefined && Date.now() - lastRequestAt >= settings.coldMinutes * 60_000;
-		if (!cold || !ctx.isIdle() || conversationAnchor(ctx) !== pending.anchor) {
+		// An unfinished summary is dropped: the message must not wait for it, which can take minutes on a long session.
+		if (!cold || !pending.settled || !ctx.isIdle() || conversationAnchor(ctx) !== pending.anchor) {
 			pending.abort.abort();
 			return { action: "continue" };
 		}
