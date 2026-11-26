@@ -4,7 +4,7 @@
  *
  * Line 1: [model · thinking level]  📂 working dir  🌿 git branch
  * Line 2: context-window usage bar with the tokens in context; the session's input tokens (cache reads and writes
- *   included, as they are billed) with the cache-read share, its output tokens, and its cost
+ *   included, as they are billed) with the part not read from the cache, its output tokens, and its cost
  * Then: the rows other extensions add as sections (claude-usage.ts: the Claude subscription limits)
  * Last line (optional): statuses other extensions set via ctx.ui.setStatus()
  * Prompt: the session name at the right end of the prompt's top border, as Claude Code shows it, and the elapsed
@@ -164,7 +164,8 @@ export default function (pi: ExtensionAPI) {
 						cost: number;
 						/** All input tokens, cache reads and writes included. */
 						input: number;
-						cacheRead: number;
+						/** The input not read from the cache: uncached input and cache writes. */
+						fresh: number;
 						output: number;
 						usage: ReturnType<typeof ctx.getContextUsage>;
 				  }
@@ -174,18 +175,18 @@ export default function (pi: ExtensionAPI) {
 				if (totals?.key === key && Date.now() - totals.at < TICK_MS) return totals;
 				let cost = 0;
 				let input = 0;
-				let cacheRead = 0;
+				let fresh = 0;
 				let output = 0;
 				for (const e of ctx.sessionManager.getBranch()) {
 					if (e.type === "message" && e.message.role === "assistant") {
 						const u = (e.message as AssistantMessage).usage;
 						cost += u.cost.total;
 						input += u.input + u.cacheRead + u.cacheWrite;
-						cacheRead += u.cacheRead;
+						fresh += u.input + u.cacheWrite;
 						output += u.output;
 					}
 				}
-				totals = { key, at: Date.now(), cost, input, cacheRead, output, usage: ctx.getContextUsage() };
+				totals = { key, at: Date.now(), cost, input, fresh, output, usage: ctx.getContextUsage() };
 				return totals;
 			};
 
@@ -220,18 +221,19 @@ export default function (pi: ExtensionAPI) {
 					const lines = [`${modelFmt} 📂 ${dir}${branchFmt}`];
 
 					// --- Line 2: context bar, tokens, cost ------------------------
-					const { cost, input, cacheRead, output, usage: ctxUsage } = sessionTotals();
+					const { cost, input, fresh, output, usage: ctxUsage } = sessionTotals();
 					const tokens = ctxUsage?.tokens ?? null;
-					// ♻ without the emoji selector: one cell wide, as pi-tui counts it and terminals draw it.
-					const cacheShare = input > 0 ? theme.fg("dim", ` (♻ ${Math.round((cacheRead / input) * 100)}%)`) : "";
+					// The part that costs: a token not read from the cache is billed 10 to 12.5 times a cache read. On Claude
+					// nearly all of it is cache writes, so they count here with the uncached input.
+					const freshFmt = input > 0 ? theme.fg("dim", ` (${fmtTokens(fresh)} new)`) : "";
 					lines.push(
 						meter(theme, "Context", ctxUsage?.percent ?? null) +
 							` ${theme.fg("accent", tokens === null ? "?" : fmtTokens(tokens))}` +
 							sep +
-							// The arrows as in Pi's own footer: ↑ what goes to the provider, ↓ what comes back.
-							`🪙 ↑ ${theme.fg("accent", fmtTokens(input))}${cacheShare}` +
+							// Up and down as in Pi's own footer: ▲ what goes to the provider, ▼ what comes back.
+							`🪙 ▲ ${theme.fg("accent", fmtTokens(input))}${freshFmt}` +
 							theme.fg("dim", " · ") +
-							`↓ ${theme.fg("accent", fmtTokens(output))}` +
+							`▼ ${theme.fg("accent", fmtTokens(output))}` +
 							` (${theme.fg("warning", `$${cost.toFixed(2)}`)})` +
 							// Without the bottom border's hook the elapsed time stays in this line.
 							(clock ? "" : sep + `⏳ ${fmtElapsed(Date.now() - startedAt)}`),

@@ -371,11 +371,14 @@ provider. Below them come the rows other extensions add —
 [claude-usage](#claude-usage) adds the subscription limits — and the statuses
 that other extensions set appear as a last line.
 
-The second line reads `Context █░░…   9% 92.8k | 🪙 ↑ 2.83M (♻ 97%) · ↓ 13.6k
-($1.56)`. As in Pi's own footer, `↑` counts every input token of the session,
-cache reads and writes included, as they are billed, and `↓` the output,
-thinking included; `♻` is the share of the input that came from the cache.
-The cost covers both. All of them follow the session's current branch.
+The second line reads `Context █░░…   9% 92.8k | 🪙 ▲ 2.83M (92.4k new) · ▼
+13.6k ($1.56)`. As up and down in Pi's own footer, `▲` counts every input
+token of the session, cache reads and writes included, as they are billed,
+and `▼` the output, thinking included. In brackets stands the input not read
+from the cache, the part that costs: a cache read is billed at a tenth of the
+input price, a cache write at 1.25 times it. On Claude nearly all of it is
+cache writes, so they count there with the uncached input. The cost covers
+input and output. All of them follow the session's current branch.
 
 The session name stands in the line above the prompt, as in Claude Code's
 prompt box, set in from the right end as far as Pi sets in the working status
