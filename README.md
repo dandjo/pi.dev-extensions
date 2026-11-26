@@ -65,6 +65,7 @@ connects only while a Claude model is active.
 
 | Extension                   | What it does                                                                              | Needs                                                            |
 | :-------------------------- | :---------------------------------------------------------------------------------------- | :--------------------------------------------------------------- |
+| `claude-sdk-prices.ts`      | Gives the claude-bridge models Anthropic's list prices, so replies show what they cost    | `pi-claude-agent-sdk`                                            |
 | `claude-sdk-rules.ts`       | Passes Pi's rules, the guidelines of the tools among them, on to Claude Code              | `pi-claude-agent-sdk`                                            |
 | `claude-sdk-stream-only.ts` | Keeps Claude Code on streamed responses, so a stalled one cannot leave Pi waiting         | `pi-claude-agent-sdk`                                            |
 | `claude-sdk-update.ts`      | Installs a newer Claude Agent SDK, and with it Claude Code, as soon as there is one       | `pi-claude-agent-sdk`, npm                                       |
@@ -1884,6 +1885,25 @@ and you can work on from there while Pi keeps running on your machine.
   [claude-sdk-update](#claude-sdk-update) installs a newer one, which loads at
   the next start or `/reload`. The bridge API is not a public interface and
   can change with any SDK release.
+
+## claude-sdk-prices
+
+Puts a price on the replies of `claude-bridge`. `pi-claude-agent-sdk`
+registers its models with every price at 0, because a Claude subscription is
+not billed per token. Pi computes the cost of a reply from the model's prices,
+so the status line, the subagents panel, and every reply showed $0, and
+[subagents](#subagents) offered no model ladder, which needs a price for every
+rung.
+
+- At the start of a session, and before a prompt to a model still without a
+  price, each `claude-bridge` model gets the prices of the model with the same
+  id at the provider `anthropic` (Pi's catalog: input, output, cache read,
+  cache write, and the tiers above a context size). Pi then takes the priced
+  model for the next reply.
+- These are Anthropic's API list prices: what the tokens would cost on the
+  API, not what the subscription costs. Replies before it ran keep $0.
+- A model without a twin at `anthropic` keeps 0; with any other provider it
+  does nothing.
 
 ## claude-sdk-rules
 
