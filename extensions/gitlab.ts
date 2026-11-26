@@ -1766,7 +1766,7 @@ function ciParameters(instances: Instance[]) {
 
 /**
  * The gitlab_work tool: in one call what takes several gitlab calls otherwise, through the instances, tokens, and
- * requests of the gitlab tool.
+ * requests of the gitlab tool. A Python port of it for Claude Code carries the same logic: change them alike.
  *
  * - The project is found as for gitlab_pipeline (ciTarget); a web URL of an issue or merge request gives iid too.
  * - issue_template lists a project's issue templates, or shows one. issue_create checks a description against the
