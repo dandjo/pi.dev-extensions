@@ -325,9 +325,12 @@ function frame(row: Row, one: OneLine, width: number): readonly string[] {
 	const pad = Math.min(one.pad, Math.floor((width - 1) / 2));
 	const inner = Math.max(1, width - 2 * pad);
 	const background = one.partial ? "toolPendingBg" : one.error ? "toolErrorBg" : "toolSuccessBg";
+	const bg = (text: string) => theme.bg(background as Parameters<Theme["bg"]>[0], text);
+	// A reset inside the line (truncateToWidth puts one before and after its "…") ends the background too: set it again.
+	const open = bg("\0").split("\0")[0];
 	const paint = (line: string) => {
-		const padded = " ".repeat(pad) + line;
-		return theme.bg(background as Parameters<Theme["bg"]>[0], padded + " ".repeat(Math.max(0, width - visibleWidth(padded))));
+		const padded = " ".repeat(pad) + line.replace(/\x1b\[(?:0|49)?m/g, (reset) => reset + open);
+		return bg(padded + " ".repeat(Math.max(0, width - visibleWidth(padded))));
 	};
 
 	let lines: string[];

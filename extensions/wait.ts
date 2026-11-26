@@ -218,6 +218,8 @@ function resultLine(
 	}
 	const shown = state;
 	const paint = (text: string) => theme.bg("customMessageBg", text);
+	// A reset inside the line (truncateToWidth puts one before and after its "…") ends the background too: set it again.
+	const open = paint("\0").split("\0")[0];
 	const tag = theme.fg("customMessageLabel", `\x1b[1m[${label}]\x1b[22m`);
 	const full = new Box(options.outputPad, 1, paint);
 	full.addChild(new Text(tag, 0, 0));
@@ -234,7 +236,8 @@ function resultLine(
 			const gap = Math.max(end ? 2 : 0, inner - visibleWidth(start) - visibleWidth(end));
 			const line = " ".repeat(pad) + start + " ".repeat(gap) + end;
 			const blank = paint(" ".repeat(width));
-			return [blank, paint(line + " ".repeat(Math.max(0, width - visibleWidth(line)))), blank];
+			const filled = line.replace(/\x1b\[(?:0|49)?m/g, (reset) => reset + open);
+			return [blank, paint(filled + " ".repeat(Math.max(0, width - visibleWidth(line)))), blank];
 		},
 		invalidate() {
 			full.invalidate();
