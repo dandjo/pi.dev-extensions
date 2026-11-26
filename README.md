@@ -480,6 +480,11 @@ edit Korrigiert den Import in src/index.ts                +2 −1 · 0.0s
   (`additionalProperties: false`, Pi would refuse the call) or have an
   `activity` of their own, and `codemode`. Their rows, and calls without an
   activity, show the call as before.
+- On `claude-bridge`, a session sees the parameter only from its next new
+  Claude Code session on: Claude Code keeps the tool declarations of a
+  session as it started (its prompt snapshot) and replays them, so a
+  `/reload` alone does not change them. A restart of Pi, a compaction, or
+  another model starts a new one.
 - It costs a sentence per call and about 90 tokens per tool in the
   declarations.
   `{"describe": false}` in `~/.pi/agent/compact-tools.json` turns it off;
