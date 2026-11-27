@@ -383,8 +383,36 @@ async function applyFields(item: Item, specs: FieldSpec[], cwd: string, signal?:
 	return { changed, notes };
 }
 
+/**
+ * Shows onepassword_run in file-preview.ts's panel like bash: its command and its output, which op masks before it is
+ * returned and is never sent as an update while the command runs, so the panel shows only what the model gets. The
+ * registry is a plain Map on globalThis that only file-preview.ts reads; without it the entry goes unused, and nothing
+ * here may fail the extension. vault.ts carries a copy of this function: change them alike.
+ */
+function registerPreview(tool: string): void {
+	try {
+		const key = Symbol.for("pi.file-preview.tools");
+		const tools = ((globalThis as Record<symbol, unknown>)[key] ??= new Map()) as Map<string, unknown>;
+		tools.set(tool, {
+			code: "command",
+			language: "bash",
+			output: true,
+			// The result ends with a note of its own: [exit code N], [stopped after N s], or [cancelled].
+			outcome: (text: string, isError: boolean) => {
+				const note = text.match(/\n?\[(exit code (\d+)|stopped after [^\]\n]*|cancelled)\]$/);
+				if (!note) return { status: isError ? "failed" : "exit 0", text };
+				const status = note[2] ? `exit ${note[2]}` : note[1] === "cancelled" ? "aborted" : "timed out";
+				return { status, text: text.slice(0, note.index) };
+			},
+		});
+	} catch {
+		// No preview then.
+	}
+}
+
 export default function (pi: ExtensionAPI) {
 	if (!onPath("op")) return;
+	registerPreview("onepassword_run");
 
 	pi.registerTool({
 		name: "onepassword_items",

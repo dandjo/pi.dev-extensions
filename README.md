@@ -954,7 +954,8 @@ can see.
   - `onepassword_run` runs a shell command with secrets in environment
     variables given as `op://` references (`op run`): `op` resolves them for
     that command alone and masks their values in its output. The command
-    runs without a terminal, as the `bash` tool's do.
+    runs without a terminal, as the `bash` tool's do. The
+    [file preview](#file-preview) shows it like a `bash` call.
   - `onepassword_write` creates or changes an item: text fields from values
     in the call, secret fields (concealed, one-time password) only from a
     generated password, a command's output, or a file. The item goes to `op`
@@ -990,7 +991,8 @@ a tool may do is up to the token's policies.
   - `vault_run` runs a shell command with secrets in environment variables
     given as `path#field` references. The values go to that command alone
     and are masked in its output. The command runs without a terminal, as
-    the `bash` tool's do.
+    the `bash` tool's do. The [file preview](#file-preview) shows it like a
+    `bash` call.
   - `vault_write` sets or removes fields of a secret and keeps the others. It
     reads the secret and writes it back with check-and-set, so a change made
     meanwhile is not overwritten. A secret value comes only from a generated
@@ -1733,9 +1735,10 @@ the call, and `✕`.
   or `not applied`, and notes such as `oldText not found` or `new file`.
 - Once the call has run, the removed lines go and the panel shows the file as
   it is now on disk; the changed lines keep their bar until your next prompt.
-- A `bash` or `codemode` call shows its command or script the same way, as the
-  model writes it, long lines wrapped to at most 8 rows each, and below a rule
-  its output while it runs; for `codemode` the tools the script calls, then its
+- A `bash`, `powershell`, or `codemode` call, or one of `vault_run` and
+  `onepassword_run`, shows its command or script the same way, as the model
+  writes it, long lines wrapped to at most 8 rows each, and below a rule its
+  output while it runs; for `codemode` the tools the script calls, then its
   output. Once written, the view stays at the top. An output longer than the
   panel shows its start and its end, with a line in between that says how many
   lines are hidden; the first turn of the wheel shows all of it, until the next
@@ -1746,6 +1749,13 @@ the call, and `✕`.
   with `!` are not shown.
 - It always shows the call written last: an edit of another file switches to
   it, a `bash` call to the command, the next edit back to the file.
+- Other extensions can have their own command tools shown the same way: they
+  add an entry to a `Map` on `globalThis[Symbol.for("pi.file-preview.tools")]`,
+  creating it when missing, with the argument holding the command, its
+  language, whether the output is safe to show (only then is it shown), and
+  optionally a function that reads the status from the result. Without the
+  file preview the entry goes unused; the format is described at the top of
+  `file-preview.ts`.
 - Mouse: the wheel scrolls; then the panel stops following until the next
   call starts. `✕` closes it.
 - Keyboard: `alt+g` moves into the panel and back (and opens it when closed).

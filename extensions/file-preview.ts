@@ -9,16 +9,17 @@
  *   keep the gutter bar until the next prompt.
  * - The header holds the path (relative to the working directory), the status of the call — writing…, queued (Claude
  *   Code runs a response's calls once the response is complete), applying…, applied, failed, or not applied — and ✕.
- * - A bash or codemode call shows its command or script instead, with line numbers, syntax highlighting, and the bar in
- *   the gutter, as the model writes it; long lines wrap, each to at most 8 rows (cut with …, or while written showing
- *   its end); below a rule follows the output while it runs, then the final result: for codemode the nested tool calls
- *   with their status and the script's output. Escape sequences are stripped, the last 2000 lines kept. While the
- *   command is written the view keeps its end in sight; once written it stays at the top, the command first and the
- *   output below it. An output longer than the panel shows its start and its end, with a line in between saying how
- *   many lines are hidden; the first wheel turn or key shows all of it to scroll through, until the next call starts.
- *   The header names the tool and the command's first line, and the status: writing…, queued, running…, exit 0 or exit
- *   N, timed out, aborted, failed, or not run (bash); done or failed (codemode). Calls a codemode script makes itself
- *   are not followed; the script's view lists them. Commands the user runs with ! are not shown.
+ * - A bash, powershell, or codemode call, or a call of a command tool another extension registers (see RunTool), shows
+ *   its command or script instead, with line numbers, syntax highlighting, and the bar in the gutter, as the model
+ *   writes it; long lines wrap, each to at most 8 rows (cut with …, or while written showing its end); below a rule
+ *   follows the output while it runs, then the final result: for codemode the nested tool calls with their status and
+ *   the script's output. Escape sequences are stripped, the last 2000 lines kept. While the command is written the view
+ *   keeps its end in sight; once written it stays at the top, the command first and the output below it. An output
+ *   longer than the panel shows its start and its end, with a line in between saying how many lines are hidden; the
+ *   first wheel turn or key shows all of it to scroll through, until the next call starts. The header names the tool
+ *   and the command's first line, and the status: writing…, queued, running…, exit 0 or exit N, timed out, aborted,
+ *   failed, or not run (bash); done or failed (codemode). Calls a codemode script makes itself are not followed; the
+ *   script's view lists them. Commands the user runs with ! are not shown.
  * - It always shows the call written last: an edit of another file switches the preview to it, a bash call to the
  *   command, an edit after it back to the file.
  * - The mouse wheel scrolls; once the user scrolls, following pauses until the next call starts. alt+g moves the
@@ -84,23 +85,61 @@ interface Snapshot {
 	content: string | null;
 	lines: string[];
 	note?: string;
+	/** The language to highlight in; else taken from the path. */
+	lang?: string;
 	/** Highlighted lines, computed once per snapshot and theme. */
 	hl?: { theme: Theme; lines: string[] };
 	/** Highlighted lines cut to the text width, filled as they are drawn. */
 	fmt?: { theme: Theme; width: number; lines: string[] };
 }
 
-type Tool = "edit" | "write" | "bash" | "codemode";
+/** A tool's name: edit, write, codemode, a shell, or a tool another extension registered. */
+type Tool = string;
 
-const TOOLS: ReadonlySet<string> = new Set<Tool>(["edit", "write", "bash", "codemode"]);
-
-function isTool(name: unknown): name is Tool {
-	return typeof name === "string" && TOOLS.has(name);
+/**
+ * A tool that runs a command, shown like bash. Other extensions register theirs in the registry below, a Map from the
+ * tool's name to this, on globalThis[Symbol.for("pi.file-preview.tools")]; without this extension nothing reads it. A
+ * registering extension creates the Map when it is missing and only sets its own entries, e.g.:
+ *
+ *   const key = Symbol.for("pi.file-preview.tools");
+ *   const tools = ((globalThis as Record<symbol, unknown>)[key] ??= new Map()) as Map<string, unknown>;
+ *   tools.set("my_run", { code: "command", language: "bash", output: true });
+ */
+interface RunTool {
+	/** The argument that holds the command or script. */
+	code: string;
+	/** The language to highlight it in, a name highlightCode knows: bash, javascript, python, powershell, … */
+	language: string;
+	/** Whether the output may be shown: only when the tool's updates and result never carry a secret unmasked. */
+	output?: boolean;
+	/** From the result's text and error flag: the header's status and the text without the tool's closing note. */
+	outcome?: (text: string, isError: boolean) => { status: string; text: string } | undefined;
 }
 
-/** A call that runs something: a bash command or a codemode script. */
+const REGISTRY_KEY = Symbol.for("pi.file-preview.tools");
+
+/** Pi's shells: their results end with "Command exited with code N" and the like, read by shellOutcome. */
+const SHELLS: Readonly<Record<string, RunTool>> = {
+	bash: { code: "command", language: "bash", output: true },
+	powershell: { code: "command", language: "powershell", output: true },
+};
+
+/** A tool shown as a command: one of Pi's shells or a registered one; codemode is handled apart. */
+function runTool(name: string): RunTool | undefined {
+	if (Object.hasOwn(SHELLS, name)) return SHELLS[name];
+	const registry = (globalThis as Record<symbol, unknown>)[REGISTRY_KEY];
+	const entry = registry instanceof Map ? (registry.get(name) as Partial<RunTool> | undefined) : undefined;
+	if (!entry || typeof entry.code !== "string" || typeof entry.language !== "string") return undefined;
+	return entry as RunTool;
+}
+
+function isTool(name: unknown): name is Tool {
+	return typeof name === "string" && (name === "edit" || name === "write" || name === "codemode" || runTool(name) !== undefined);
+}
+
+/** A call that runs something: a command or a codemode script. */
 function isRun(tool: Tool): boolean {
-	return tool === "bash" || tool === "codemode";
+	return tool !== "edit" && tool !== "write";
 }
 
 /** A call from the moment the model starts writing it. */
@@ -246,14 +285,14 @@ function pathOf(entry: LiveEdit): string {
 	return args.path;
 }
 
-/** Whether the preview can show the call: a bash or codemode call at once, an edit or write once its path is known. */
+/** Whether the preview can show the call: a command or script at once, an edit or write once its path is known. */
 function ready(entry: LiveEdit): boolean {
 	return isRun(entry.tool) || pathOf(entry) !== "";
 }
 
-/** The command of a bash call or the script of a codemode call, as far as it has arrived. */
+/** The command or the codemode script of a call, as far as it has arrived. */
 function runText(entry: LiveEdit): string {
-	const value = argsOf(entry)[entry.tool === "bash" ? "command" : "code"];
+	const value = argsOf(entry)[entry.tool === "codemode" ? "code" : (runTool(entry.tool)?.code ?? "command")];
 	return typeof value === "string" ? value.replace(/\r\n?/g, "\n") : "";
 }
 
@@ -283,14 +322,30 @@ function resultTexts(result: unknown): string[] {
 
 const CALL_ICON: Record<string, string> = { running: "…", ok: "✓", error: "✗", cancelled: "⊘" };
 
+/** A registered tool's outcome(), or undefined when it has none or it throws. */
+function registeredOutcome(tool: Tool, text: string, isError: boolean): { status: string; text: string } | undefined {
+	try {
+		const outcome = runTool(tool)?.outcome?.(text, isError);
+		return outcome && typeof outcome.status === "string" && typeof outcome.text === "string" ? outcome : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
 /**
- * The output of a bash or codemode call, from an update while it runs or from its result: for bash the text without
- * the closing "Command exited with code N", which the header shows; for codemode the nested calls from the details,
- * then the script's output without the "Script completed" header.
+ * The output of a command or codemode call, from an update while it runs or from its result: for a shell the text
+ * without the closing "Command exited with code N", which the header shows; for a registered tool the text its
+ * outcome() leaves, or a note when it does not declare its output safe to show; for codemode the nested calls from the
+ * details, then the script's output without the "Script completed" header.
  */
-function runOutput(tool: Tool, result: unknown): string[] {
+function runOutput(tool: Tool, result: unknown, isError = false): string[] {
 	const texts = resultTexts(result);
-	if (tool === "bash") return outputLines(texts.join("\n").replace(/\n*Command exited with code \d+\s*$/, ""));
+	if (Object.hasOwn(SHELLS, tool)) return outputLines(texts.join("\n").replace(/\n*Command exited with code \d+\s*$/, ""));
+	if (tool !== "codemode") {
+		if (!runTool(tool)?.output) return [`(${tool} does not declare its output safe to show here)`];
+		const text = texts.join("\n");
+		return outputLines(registeredOutcome(tool, text, isError)?.text ?? text);
+	}
 	if (/^Script (completed|failed)\n/.test(texts[0] ?? "")) texts.shift();
 	const calls = (result as { details?: { calls?: unknown } } | undefined)?.details?.calls;
 	const lines = Array.isArray(calls)
@@ -302,8 +357,18 @@ function runOutput(tool: Tool, result: unknown): string[] {
 	return outputLines([...lines, ...(lines.length > 0 && text ? [""] : []), ...(text ? [text] : [])].join("\n"));
 }
 
-/** How a bash call ended: exit N, timed out, aborted, or failed (blocked, no exit code). */
-function bashOutcome(isError: boolean, result: unknown): string {
+/** How a call ended: for a shell exit N, timed out, aborted, or failed; for codemode done or failed. */
+function runOutcome(tool: Tool, isError: boolean, result: unknown): string {
+	if (Object.hasOwn(SHELLS, tool)) return shellOutcome(isError, result);
+	if (tool !== "codemode") {
+		const status = registeredOutcome(tool, resultTexts(result).join("\n"), isError)?.status;
+		if (status) return status;
+	}
+	return isError ? "failed" : "done";
+}
+
+/** How a shell call ended: exit N, timed out, aborted, or failed (blocked, no exit code). */
+function shellOutcome(isError: boolean, result: unknown): string {
 	const code = (result as { structuredContent?: { exit_code?: unknown } } | undefined)?.structuredContent?.exit_code;
 	if (typeof code === "number") return `exit ${code}`;
 	const text = resultTexts(result).join("\n");
@@ -515,7 +580,7 @@ function clean(text: string): string {
 function highlighted(file: Snapshot, theme: Theme): string[] {
 	if (file.hl?.theme === theme) return file.hl.lines;
 	const text = file.lines.map(clean).join("\n");
-	const lang = getLanguageFromPath(file.abs);
+	const lang = file.lang ?? getLanguageFromPath(file.abs);
 	let lines: string[];
 	try {
 		lines = lang && text.length <= MAX_HIGHLIGHT_BYTES ? highlightCode(text, lang) : text.split("\n").map((l) => theme.fg("toolDiffContext", l));
@@ -768,7 +833,8 @@ export default function (pi: ExtensionAPI) {
 		if (entry && isRun(entry.tool)) {
 			const code = runText(entry);
 			if (entry.file?.content !== code) {
-				entry.file = { abs: entry.tool === "bash" ? "command.sh" : "script.js", exists: true, content: code, lines: splitLines(code) };
+				const lang = entry.tool === "codemode" ? "javascript" : (runTool(entry.tool)?.language ?? "bash");
+				entry.file = { abs: entry.tool, lang, exists: true, content: code, lines: splitLines(code) };
 			}
 			const status = entry.stopped
 				? "not run"
@@ -1097,8 +1163,8 @@ export default function (pi: ExtensionAPI) {
 		const entry = live.get(id);
 		if (!entry || entry.done || entry.failed) return;
 		if (isRun(entry.tool)) {
-			entry.output = runOutput(entry.tool, result);
-			entry.outcome = entry.tool === "bash" ? bashOutcome(isError, result) : isError ? "failed" : "done";
+			entry.output = runOutput(entry.tool, result, isError);
+			entry.outcome = runOutcome(entry.tool, isError, result);
 			entry.done = true;
 			entry.streaming = false;
 		} else if (isError) entry.failed = true;
