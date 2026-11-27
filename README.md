@@ -33,7 +33,7 @@ names `extensions/`, which holds one file per extension.
 | `subagents.ts`              | Adds the `agent` tool: subagents in their own Pi process, on a tier or a model of choice  | —                                                                |
 | `btw.ts`                    | `/btw`: a side question about the session that stays out of the conversation              | —                                                                |
 | `scheduled-tasks.ts`        | `/cron` and the cron tools: prompts on a schedule within the session                      | —                                                                |
-| `diff.ts`                   | `/diff`: a panel beside the conversation with the changes and each turn's edits           | git                                                              |
+| `diff.ts`                   | `/diff`: a panel beside the conversation with the changes, live, and each turn's edits    | git                                                              |
 | `background-agents.ts`      | The agent panel below the prompt: ↓ to the agents, Enter opens one, Ctrl+B to background  | `subagents.ts`                                                   |
 | `network-resilience.ts`     | Claude Code's handling of dropped connections: stall notice, restart, network wait        | —                                                                |
 | `auto-continue.ts`          | Waits out a used-up usage limit, quota, or rate limit and continues after the reset       | —                                                                |
@@ -1724,6 +1724,24 @@ do.
   lists the changed files with their added and removed lines, each file's diff
   under the list. Test and generated files, and the changes from before this
   session, are folded into one line each.
+- Live: while the model writes an `edit` or `write` call, before it runs, the
+  call shows at the top of the panel as it arrives: the lines it removes and
+  adds, at their place in the file with two lines around them, and the line
+  number once its `oldText` is found in the file. A `write` shows the new
+  content from its first changed line, and once it is complete, the lines it
+  replaces too. Long changes show their last lines while they are written. The
+  call's file reads `editing…` in the list, and its preview reads `writing…`,
+  `queued` until it runs (Claude Code runs a response's calls once it is
+  complete), `applying…`, and `applied`, until the refresh after it shows the
+  real diff. With `claude-bridge` the arguments arrive piece by piece through
+  [claude-sdk-stream-only](#claude-sdk-stream-only); without it, a long text
+  arrives whole when the model has written it.
+- Then the panel follows the change: it selects the file and scrolls to the
+  hunk, which keeps an accent bar in the gutter until your next prompt; the
+  file gets a `•` in the list. Of calls that run side by side it follows the
+  one written last. Scrolling the panel or picking a file pauses following
+  until your next prompt; `f`, or the `follow` label at the right of the second
+  line, switches it off and on, also for later sessions.
 - Mouse: click a file to jump to its diff; click `ask`, right of a file's name
   above its diff, to attach that diff to your next prompt (it reads `asked ✓`
   until you send it); click the source label to step through `Current` and the
@@ -1733,11 +1751,11 @@ do.
   scrolls.
 - Keyboard: `alt+g` moves into the panel and back. There ↑↓ pick a file,
   PgUp/PgDn scroll, Tab switches the source, `b` the base, `a` asks, `e`
-  unfolds, `r` refreshes, Esc returns to the editor, `x` closes.
-- The panel opens on its own at the session's first edit when the terminal has
-  144 columns, or 110 once you have opened it with `/diff`. Closed, it stays
-  closed, in later sessions too, until `/diff` opens it again. `/diff` toggles
-  it.
+  unfolds, `f` follows, `r` refreshes, Esc returns to the editor, `x` closes.
+- The panel opens on its own when the model starts the session's first edit
+  and the terminal has 144 columns, or 110 once you have opened it with
+  `/diff`. Closed, it stays closed, in later sessions too, until `/diff` opens
+  it again. `/diff` toggles it.
 - Otherwise `/diff` opens a bordered block above the prompt with the same
   views: ↑↓ select, Enter opens a file's diff, `a` asks, Tab switches the
   source, `b` the base, `r` refreshes, Esc goes back and closes.
@@ -1746,7 +1764,9 @@ do.
   "This session's changes" compares against the files as they were when Pi
   started, kept as temporary copies of the files that were already changed
   then.
-- The panel state and the base per repository are stored in
+- The live preview reads the calls' arguments from Pi's message stream
+  (`message_update`) and the file as it was before the call.
+- The panel state, the base per repository, and following are stored in
   `~/.pi/agent/diff-panel.json`. The panel splits Pi's fullscreen layout with
   `tui.setLayoutRoot()`, which is not a documented extension interface: when a
   Pi update changes that layout, `/diff` falls back to the block above the
