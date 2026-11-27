@@ -10,15 +10,15 @@
  * - The header holds the path (relative to the working directory), the status of the call — writing…, queued (Claude
  *   Code runs a response's calls once the response is complete), applying…, applied, failed, or not applied — and ✕.
  * - A bash or codemode call shows its command or script instead, with line numbers, syntax highlighting, and the bar in
- *   the gutter, as the model writes it; below a rule follows the output while it runs, then the final result: for
- *   codemode the nested tool calls with their status and the script's output. Escape sequences are stripped, the last
- *   2000 lines kept. While the command is written the view keeps its end in sight; once written it stays at the top,
- *   the command first and the output below it. An output longer than the panel shows its start and its end, with a
- *   line in between saying how many lines are hidden; the first wheel turn or key shows all of it to scroll through,
- *   until the next call starts. The header names the tool and the command's first line, and the status: writing…,
- *   queued, running…, exit 0 or exit N, timed out, aborted, failed, or not run (bash); done or failed (codemode).
- *   Calls a codemode script makes itself are not followed; the script's view lists them. Commands the user runs with
- *   ! are not shown.
+ *   the gutter, as the model writes it; long lines wrap, each to at most 8 rows (cut with …, or while written showing
+ *   its end); below a rule follows the output while it runs, then the final result: for codemode the nested tool calls
+ *   with their status and the script's output. Escape sequences are stripped, the last 2000 lines kept. While the
+ *   command is written the view keeps its end in sight; once written it stays at the top, the command first and the
+ *   output below it. An output longer than the panel shows its start and its end, with a line in between saying how
+ *   many lines are hidden; the first wheel turn or key shows all of it to scroll through, until the next call starts.
+ *   The header names the tool and the command's first line, and the status: writing…, queued, running…, exit 0 or exit
+ *   N, timed out, aborted, failed, or not run (bash); done or failed (codemode). Calls a codemode script makes itself
+ *   are not followed; the script's view lists them. Commands the user runs with ! are not shown.
  * - It always shows the call written last: an edit of another file switches the preview to it, a bash call to the
  *   command, an edit after it back to the file.
  * - The mouse wheel scrolls; once the user scrolls, following pauses until the next call starts. alt+g moves the
@@ -47,12 +47,14 @@ import {
 	Key,
 	matchesKey,
 	ScrollView,
+	sliceByColumn,
 	type TUI,
 	type TuiMouseEvent,
 	type TuiMouseEventResult,
 	truncateToWidth,
 	VStack,
 	visibleWidth,
+	wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
 import { readFileSync, statSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
@@ -148,6 +150,8 @@ interface Layout {
 	focus?: { from: number; to: number };
 	/** Keep the end of the focus at the bottom, like a terminal. */
 	tail?: boolean;
+	/** Wrap long lines of the text (a command or script) instead of cutting them, each to at most MAX_WRAP_ROWS rows. */
+	wrap?: boolean;
 	note?: string;
 }
 
@@ -435,7 +439,9 @@ function composeRun(code: Snapshot, streaming: boolean, output: string[] | undef
 		rows.push({ kind: "r", num: 0, text: "" });
 		for (const text of output) rows.push({ kind: "o", num: 0, text });
 	}
-	return streaming ? { rows, focus: { from: rows.length - 1, to: rows.length - 1 }, tail: true } : { rows, focus: { from: 0, to: 0 } };
+	return streaming
+		? { rows, focus: { from: rows.length - 1, to: rows.length - 1 }, tail: true, wrap: true }
+		: { rows, focus: { from: 0, to: 0 }, wrap: true };
 }
 
 // --- Changed lines -------------------------------------------------------------------------------------------------
@@ -521,7 +527,34 @@ function highlighted(file: Snapshot, theme: Theme): string[] {
 	return lines;
 }
 
-/** The rows of a layout as panel lines of `width` columns: border, line number, a space, gutter, sign, text. */
+/** Rows a wrapped line of a command takes at most; the rest is cut with …, or while it is written its start. */
+const MAX_WRAP_ROWS = 8;
+
+/** `text` wrapped to `width` columns, at most MAX_WRAP_ROWS rows, with `cursor` after its end when it is written. */
+function wrapRows(text: string, width: number, cursor: string): string[] {
+	let parts = text === "" ? [""] : wrapTextWithAnsi(text, width);
+	if (parts.length === 0) parts = [""];
+	if (cursor) {
+		const last = parts[parts.length - 1];
+		if (visibleWidth(last) < width) parts[parts.length - 1] = last + cursor;
+		else parts.push(cursor);
+	}
+	if (parts.length <= MAX_WRAP_ROWS) return parts;
+	if (cursor) {
+		// While it is written, its end matters: keep the last rows, … in front.
+		parts = parts.slice(-MAX_WRAP_ROWS);
+		parts[0] = `…${sliceByColumn(parts[0], 1, Math.max(0, width - 1))}`;
+		return parts;
+	}
+	parts = parts.slice(0, MAX_WRAP_ROWS);
+	parts[MAX_WRAP_ROWS - 1] = `${sliceByColumn(parts[MAX_WRAP_ROWS - 1], 0, Math.max(0, width - 1))}\x1b[0m…`;
+	return parts;
+}
+
+/**
+ * The rows of a layout as panel lines of `width` columns: border, line number, a space, gutter, sign, text. A wrapped
+ * row continues on lines with an empty number column.
+ */
 function renderRows(theme: Theme, layout: Layout, file: Snapshot | undefined, width: number): string[] {
 	const border = theme.fg("border", "│");
 	if (layout.rows.length === 0) {
@@ -536,13 +569,18 @@ function renderRows(theme: Theme, layout: Layout, file: Snapshot | undefined, wi
 	if (file && (file.fmt?.theme !== theme || file.fmt.width !== textWidth)) file.fmt = { theme, width: textWidth, lines: [] };
 	const bar = theme.fg("accent", "▌");
 	const cursor = theme.fg("accent", "▍");
-	return layout.rows.map((r) => {
+	return layout.rows.flatMap((r) => {
 		if (r.kind === "r") return `${border} ${theme.fg("dim", "─".repeat(Math.max(1, width - 3)))}`;
 		if (r.kind === "o") return `${border} ${theme.fg("toolOutput", truncateToWidth(r.text, Math.max(1, width - 2), "…"))}`;
 		const num = `${String(r.num).padStart(numWidth)} `;
 		if (r.kind === " ") {
 			let text: string;
 			const line = r.src !== undefined ? hl[r.src] : undefined;
+			if (layout.wrap) {
+				const gutter = `${border} ${theme.fg(r.mark ? "accent" : "dim", num)}${r.mark ? bar : " "} `;
+				const more = `${border} ${" ".repeat(num.length)}${r.mark ? bar : " "} `;
+				return wrapRows(line ?? clean(r.text), textWidth, r.cursor ? cursor : "").map((p, k) => (k === 0 ? gutter : more) + p);
+			}
 			if (r.cursor) text = truncateToWidth(line ?? clean(r.text), Math.max(1, textWidth - 1), "…") + cursor;
 			else if (file?.fmt && r.src !== undefined) text = file.fmt.lines[r.src] ??= truncateToWidth(hl[r.src] ?? clean(r.text), textWidth, "…");
 			else text = truncateToWidth(clean(r.text), textWidth, "…");
@@ -663,10 +701,11 @@ const MIN_OUTPUT_ROWS = 7;
  */
 function cutOutput(theme: Theme, layout: Layout, lines: string[], height: number, width: number): string[] {
 	const rule = layout.rows.findIndex((r) => r.kind === "r");
-	if (rule < 0 || lines.length !== layout.rows.length || lines.length <= height) return lines;
-	const start = rule + 1;
+	// The output's rows are one line each; the command's may wrap, so the output starts `count` lines from the end.
+	const count = rule < 0 ? 0 : layout.rows.length - rule - 1;
+	if (rule < 0 || lines.length < count + 1 || lines.length <= height) return lines;
+	const start = lines.length - count;
 	const room = Math.max(MIN_OUTPUT_ROWS, height - start);
-	const count = lines.length - start;
 	if (count <= room) return lines;
 	const head = Math.floor((room - 1) / 2);
 	const tail = room - 1 - head;
@@ -810,14 +849,14 @@ export default function (pi: ExtensionAPI) {
 		 * Centres the focused rows: the whole change when it fits, else its end while it is written, else its start. A
 		 * command being written keeps its last row at the bottom; once written, its first row is the focus, at the top.
 		 */
-		function follow(v: View): void {
+		function follow(v: View, total: number): void {
 			const f = v.layout.focus;
 			if (paused || !f) return;
 			scroll.jump(() => {
 				const height = scroll.viewportHeight || Math.max(5, tui.terminal.rows - 6);
 				const size = f.to - f.from + 1;
 				const top = v.layout.tail
-					? f.to - height + 1
+					? total - height
 					: size <= height - 4 ? f.from - Math.floor((height - size) / 2) : v.streaming ? f.to - height + 3 : f.from - 2;
 				return Math.max(0, top);
 			});
@@ -890,7 +929,7 @@ export default function (pi: ExtensionAPI) {
 						if (!paused && !v.streaming) lines = cutOutput(t, v.layout, lines, height, width);
 						scroll.cut = lines !== all;
 						bodyCache = { key, theme: t, lines };
-						follow(v);
+						follow(v, lines.length);
 					}
 					lines = bodyCache.lines;
 				} catch (e) {

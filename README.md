@@ -1733,16 +1733,17 @@ the call, and `✕`.
   or `not applied`, and notes such as `oldText not found` or `new file`.
 - Once the call has run, the removed lines go and the panel shows the file as
   it is now on disk; the changed lines keep their bar until your next prompt.
-- A `bash` or `codemode` call shows its command or script the same way, as
-  the model writes it, and below a rule its output while it runs; for
-  `codemode` the tools the script calls, then its output. Once written, the
-  view stays at the top. An output longer than the panel shows its start and
-  its end, with a line in between that says how many lines are hidden; the
-  first turn of the wheel shows all of it, until the next call starts. The header names the tool and the command's first
-  line, and reads `writing…`, `queued`, `running…`, then `exit 0` or `exit N`,
-  `timed out`, `aborted`, `failed`, or `not run` (`done` or `failed` for
-  `codemode`). Calls a `codemode` script makes itself do not take over the
-  panel. Commands you run with `!` are not shown.
+- A `bash` or `codemode` call shows its command or script the same way, as the
+  model writes it, long lines wrapped to at most 8 rows each, and below a rule
+  its output while it runs; for `codemode` the tools the script calls, then its
+  output. Once written, the view stays at the top. An output longer than the
+  panel shows its start and its end, with a line in between that says how many
+  lines are hidden; the first turn of the wheel shows all of it, until the next
+  call starts. The header names the tool and the command's first line, and reads
+  `writing…`, `queued`, `running…`, then `exit 0` or `exit N`, `timed out`,
+  `aborted`, `failed`, or `not run` (`done` or `failed` for `codemode`). Calls a
+  `codemode` script makes itself do not take over the panel. Commands you run
+  with `!` are not shown.
 - It always shows the call written last: an edit of another file switches to
   it, a `bash` call to the command, the next edit back to the file.
 - Mouse: the wheel scrolls; then the panel stops following until the next
