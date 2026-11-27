@@ -445,9 +445,23 @@ export default function (pi: ExtensionAPI) {
 		return present;
 	}
 
+	/**
+	 * Whether this runtime is still the session's. After /reload, /new, /resume, or /fork, `pi` throws ("extension ctx
+	 * is stale"), and a request still running would end Pi through an unhandled rejection when it emits its result.
+	 */
+	let live = true;
+	const emit = (name: string, data: unknown) => {
+		if (!live) return;
+		try {
+			pi.events.emit(name, data);
+		} catch {
+			live = false;
+		}
+	};
+
 	const changed = () => {
-		pi.events.emit("statusline:changed", undefined);
-		pi.events.emit("plan-usage:changed", { id: "claude" });
+		emit("statusline:changed", undefined);
+		emit("plan-usage:changed", { id: "claude" });
 	};
 
 	/** Takes over a newer state another session wrote; true when it did. */
@@ -506,7 +520,7 @@ export default function (pi: ExtensionAPI) {
 		// The status line renders at least every 10 s while it is shown, so it paces the refresh
 		if (Date.now() - polledAt >= POLL_MS) {
 			polledAt = Date.now();
-			void refreshUsage();
+			void refreshUsage().catch(() => {});
 		}
 
 		if (!loggedIn || !claudeModel) return [];
@@ -566,10 +580,14 @@ export default function (pi: ExtensionAPI) {
 		const claude = isClaudeModel(model);
 		if (claude === claudeModel) return;
 		claudeModel = claude;
-		pi.events.emit("statusline:changed", undefined);
+		emit("statusline:changed", undefined);
 	};
+	pi.on("session_shutdown", () => {
+		live = false;
+	});
 	// A restored session fires no model_select, so session_start reads the model as well
 	pi.on("session_start", (_event, ctx) => {
+		live = true;
 		useRegistry(ctx);
 		modelChanged(ctx.model);
 	});
@@ -614,7 +632,7 @@ export default function (pi: ExtensionAPI) {
 			const snap = state?.snapshot;
 			return snap && Date.now() - snap.fetchedAt < USAGE_MAX_AGE_MS ? snap : null;
 		},
-		refresh: () => refreshUsage(),
+		refresh: () => refreshUsage().catch(() => {}),
 	};
 	pi.events.on("plan-usage:source-request", () => pi.events.emit("plan-usage:source", source));
 	pi.events.emit("plan-usage:source", source);
