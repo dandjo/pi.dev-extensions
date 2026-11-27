@@ -1734,9 +1734,9 @@ the call, and `✕`.
 - Once the call has run, the removed lines go and the panel shows the file as
   it is now on disk; the changed lines keep their bar until your next prompt.
 - A `bash` or `codemode` call shows its command or script the same way, as
-  the model writes it, and below a rule its output while it runs, like a
-  terminal that keeps the end in view; for `codemode` the tools the script
-  calls, then its output. The header names the tool and the command's first
+  the model writes it, and below a rule its output while it runs; for
+  `codemode` the tools the script calls, then its output. Once written, the
+  view stays at the top, the wheel scrolls to the rest. The header names the tool and the command's first
   line, and reads `writing…`, `queued`, `running…`, then `exit 0` or `exit N`,
   `timed out`, `aborted`, `failed`, or `not run` (`done` or `failed` for
   `codemode`). Calls a `codemode` script makes itself do not take over the

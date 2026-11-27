@@ -12,9 +12,9 @@
  * - A bash or codemode call shows its command or script instead, with line numbers, syntax highlighting, and the bar in
  *   the gutter, as the model writes it; below a rule follows the output while it runs, then the final result: for
  *   codemode the nested tool calls with their status and the script's output. Escape sequences are stripped, the last
- *   2000 lines kept. The view follows the end, like a terminal: the command stays in view as long as it and the output
- *   fit, a long command shows its end above the output's start, and a long output its tail; the header names the tool
- *   and the command's first line, and the status: writing…, queued, running…, exit 0 or exit N, timed out, aborted,
+ *   2000 lines kept. While the command is written the view keeps its end in sight; once written it stays at the top,
+ *   the command first and the output below it, the wheel scrolling to the rest. The header names the tool and the
+ *   command's first line, and the status: writing…, queued, running…, exit 0 or exit N, timed out, aborted,
  *   failed, or not run (bash); done or failed (codemode). Calls a codemode script makes itself are not followed; the
  *   script's view lists them. Commands the user runs with ! are not shown.
  * - It always shows the call written last: an edit of another file switches the preview to it, a bash call to the
@@ -421,7 +421,10 @@ function composeFile(file: Snapshot, marks?: Set<number>, focus?: Layout["focus"
 	return { rows: file.lines.map((_, i) => contextRow(file, i, 0, marks)), focus };
 }
 
-/** A command or script with the bar in the gutter, the cursor while it is written, then a rule and its output. */
+/**
+ * A command or script with the bar in the gutter, the cursor while it is written, then a rule and its output. While it
+ * is written the view keeps its end in sight; once written it stays at the top, the output below it.
+ */
 function composeRun(code: Snapshot, streaming: boolean, output: string[] | undefined): Layout {
 	const lines = streaming ? (code.content ?? "").split("\n") : code.lines;
 	const rows: Row[] = lines.map((text, i) => ({ kind: " ", num: i + 1, text, src: i, mark: true }));
@@ -430,7 +433,7 @@ function composeRun(code: Snapshot, streaming: boolean, output: string[] | undef
 		rows.push({ kind: "r", num: 0, text: "" });
 		for (const text of output) rows.push({ kind: "o", num: 0, text });
 	}
-	return { rows, focus: { from: rows.length - 1, to: rows.length - 1 }, tail: true };
+	return streaming ? { rows, focus: { from: rows.length - 1, to: rows.length - 1 }, tail: true } : { rows, focus: { from: 0, to: 0 } };
 }
 
 // --- Changed lines -------------------------------------------------------------------------------------------------
@@ -772,7 +775,7 @@ export default function (pi: ExtensionAPI) {
 
 		/**
 		 * Centres the focused rows: the whole change when it fits, else its end while it is written, else its start. A
-		 * command keeps its last row at the bottom.
+		 * command being written keeps its last row at the bottom; once written, its first row is the focus, at the top.
 		 */
 		function follow(v: View): void {
 			const f = v.layout.focus;
