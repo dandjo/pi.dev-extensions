@@ -13,10 +13,12 @@
  *   the gutter, as the model writes it; below a rule follows the output while it runs, then the final result: for
  *   codemode the nested tool calls with their status and the script's output. Escape sequences are stripped, the last
  *   2000 lines kept. While the command is written the view keeps its end in sight; once written it stays at the top,
- *   the command first and the output below it, the wheel scrolling to the rest. The header names the tool and the
- *   command's first line, and the status: writing…, queued, running…, exit 0 or exit N, timed out, aborted,
- *   failed, or not run (bash); done or failed (codemode). Calls a codemode script makes itself are not followed; the
- *   script's view lists them. Commands the user runs with ! are not shown.
+ *   the command first and the output below it. An output longer than the panel shows its start and its end, with a
+ *   line in between saying how many lines are hidden; the first wheel turn or key shows all of it to scroll through,
+ *   until the next call starts. The header names the tool and the command's first line, and the status: writing…,
+ *   queued, running…, exit 0 or exit N, timed out, aborted, failed, or not run (bash); done or failed (codemode).
+ *   Calls a codemode script makes itself are not followed; the script's view lists them. Commands the user runs with
+ *   ! are not shown.
  * - It always shows the call written last: an edit of another file switches the preview to it, a bash call to the
  *   command, an edit after it back to the file.
  * - The mouse wheel scrolls; once the user scrolls, following pauses until the next call starts. alt+g moves the
@@ -609,6 +611,8 @@ function writePrefs(prefs: Prefs): void {
  */
 class PanelScroll extends ScrollView {
 	onUserScroll: () => void = () => {};
+	/** Whether the body shows a command's output cut in the middle; the first wheel or key then shows all of it. */
+	cut = false;
 	private jumpTarget: (() => number) | undefined;
 	private jumping = false;
 
@@ -617,7 +621,10 @@ class PanelScroll extends ScrollView {
 	}
 
 	override updateLayout(contentHeight: number, viewportHeight: number, requestRender: () => void): void {
+		const before = this.viewportHeight;
 		super.updateLayout(contentHeight, viewportHeight, requestRender);
+		// An output is cut for the panel's height: when that changes and the body was cut or does not fit, cut it anew.
+		if (this.viewportHeight !== before && (this.cut || contentHeight > this.viewportHeight)) requestRender();
 		const target = this.jumpTarget;
 		if (!target) return;
 		this.jumpTarget = undefined;
@@ -637,10 +644,36 @@ class PanelScroll extends ScrollView {
 	}
 
 	override scrollBy(lines: number): number {
+		if (this.cut && lines !== 0) {
+			this.onUserScroll();
+			return 0;
+		}
 		const rest = super.scrollBy(lines);
 		if (rest !== lines) this.onUserScroll();
 		return rest;
 	}
+}
+
+/** Output rows a command keeps at least when it is cut, even when the command itself fills the panel. */
+const MIN_OUTPUT_ROWS = 7;
+
+/**
+ * The panel lines of a command's view cut to `height` rows: the command, then the start and the end of the output with
+ * a line in the middle that says how many lines are hidden. Unchanged when it fits, or when it is no command's view.
+ */
+function cutOutput(theme: Theme, layout: Layout, lines: string[], height: number, width: number): string[] {
+	const rule = layout.rows.findIndex((r) => r.kind === "r");
+	if (rule < 0 || lines.length !== layout.rows.length || lines.length <= height) return lines;
+	const start = rule + 1;
+	const room = Math.max(MIN_OUTPUT_ROWS, height - start);
+	const count = lines.length - start;
+	if (count <= room) return lines;
+	const head = Math.floor((room - 1) / 2);
+	const tail = room - 1 - head;
+	const hidden = count - head - tail;
+	const note = `⋯ ${hidden} ${hidden === 1 ? "line" : "lines"} hidden, scroll to show them`;
+	const marker = `${theme.fg("border", "│")} ${theme.fg("muted", truncateToWidth(note, Math.max(1, width - 2), "…"))}`;
+	return [...lines.slice(0, start + head), marker, ...lines.slice(lines.length - tail)];
 }
 
 // --- Extension -----------------------------------------------------------------------------------------------------
@@ -847,10 +880,15 @@ export default function (pi: ExtensionAPI) {
 				const border = t.fg("border", "│");
 				let lines: string[];
 				try {
-					const key = `${version}:${width}`;
+					const height = scroll.viewportHeight || Math.max(5, tui.terminal.rows - 6);
+					const key = `${version}:${width}:${paused ? "all" : height}`;
 					if (bodyCache?.key !== key || bodyCache.theme !== t) {
 						const v = view();
 						lines = v.title ? renderRows(t, v.layout, v.file, width) : v.status ? [] : [`${border} ${t.fg("muted", "Nothing edited or run yet.")}`];
+						// Following, a long output shows its start and its end; once the user scrolls, all of it.
+						const all = lines;
+						if (!paused && !v.streaming) lines = cutOutput(t, v.layout, lines, height, width);
+						scroll.cut = lines !== all;
 						bodyCache = { key, theme: t, lines };
 						follow(v);
 					}
@@ -869,6 +907,10 @@ export default function (pi: ExtensionAPI) {
 		const scroll = new PanelScroll(body, { scrollbar: "auto", overscroll: "contain" });
 		scroll.onUserScroll = () => {
 			paused = true;
+			if (scroll.cut) {
+				scroll.cut = false;
+				tui.requestRender();
+			}
 		};
 		const column = new VStack([
 			{ component: header, basis: "auto", grow: 0, shrink: 0 },
