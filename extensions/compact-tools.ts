@@ -97,6 +97,7 @@ type Result = { content: Array<{ type: string; text?: string }>; details?: unkno
 /** What Pi passes to a tool's renderers; only the fields used here. */
 interface RenderContext {
 	state: Record<string, unknown>;
+	toolCallId?: string;
 	lastComponent?: Component;
 	expanded: boolean;
 	outputPad: number;
@@ -449,9 +450,38 @@ class Described implements Component {
 	invalidate(): void {}
 }
 
+/**
+ * The activity of calls still being written, by tool call id, read from the provider's raw JSON. pi-claude-agent-sdk
+ * parses a call's arguments only once they are complete, so its rows would get their description only when the call
+ * is written to the end; the models write the activity first, so it is there at once.
+ */
+const streamedActivity = new Map<string, string>();
+/** The activity as the first key of the raw arguments, its string closed: a later key could sit inside a value. */
+const LEADING_ACTIVITY = /^\s*\{\s*"activity"\s*:\s*("(?:[^"\\]|\\.)*")/;
+
+/** Notes the activity of a call being written, from a message_update event. */
+function noteStreamedActivity(event: { message?: unknown; assistantMessageEvent?: unknown }): void {
+	const update = event.assistantMessageEvent as { type?: string; contentIndex?: number } | undefined;
+	if (update?.type !== "toolcall_delta") return;
+	const content = (event.message as { content?: unknown } | undefined)?.content;
+	const block = (Array.isArray(content) ? content[update.contentIndex ?? -1] : undefined) as
+		| { id?: unknown; partialJson?: unknown }
+		| undefined;
+	if (typeof block?.id !== "string" || typeof block.partialJson !== "string" || streamedActivity.has(block.id)) return;
+	const match = LEADING_ACTIVITY.exec(block.partialJson);
+	if (!match) return;
+	try {
+		const activity: unknown = JSON.parse(match[1]);
+		if (typeof activity === "string") streamedActivity.set(block.id, activity);
+	} catch {
+		// not a JSON string after all: the row gets its description with the complete arguments
+	}
+}
+
 /** The description of a call from the activity the model gave, or none without one. */
-function describedCall(tool: string, args: unknown, theme: Theme): Component | undefined {
-	const activity = args && typeof args === "object" ? (args as Record<string, unknown>)[ACTIVITY] : undefined;
+function describedCall(tool: string, args: unknown, theme: Theme, toolCallId?: string): Component | undefined {
+	let activity = args && typeof args === "object" ? (args as Record<string, unknown>)[ACTIVITY] : undefined;
+	if (activity === undefined && toolCallId) activity = streamedActivity.get(toolCallId);
 	if (typeof activity !== "string" || !activity.trim()) return undefined;
 	return new Described(theme.fg("toolTitle", theme.bold(tool)), activity.trim().replace(/\s+/g, " "));
 }
@@ -544,7 +574,7 @@ function compact(tool: string, base: Renderers): Renderers {
 				tick(one);
 			}
 			draw(row.call, context, context.expanded, (inner, expanded) => {
-				const described = DESCRIBE && !expanded ? describedCall(tool, args, theme) : undefined;
+				const described = DESCRIBE && !expanded ? describedCall(tool, args, theme, context.toolCallId) : undefined;
 				if (!expanded) row.described = described !== undefined;
 				if (described) return described;
 				try {
@@ -613,6 +643,9 @@ export default function (pi: ExtensionAPI) {
 		pi.on("tool_call", (event) => {
 			if (described.has(event.toolName)) delete (event.input as Record<string, unknown>)[ACTIVITY];
 		});
+		pi.on("message_update", (event) => noteStreamedActivity(event));
+		// The rows have the complete arguments by now, or keep Pi's plain row after a broken-off response.
+		pi.on("message_end", () => streamedActivity.clear());
 	}
 
 	pi.registerToolRenderer((toolName, next) => {
