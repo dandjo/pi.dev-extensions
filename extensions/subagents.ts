@@ -2014,6 +2014,7 @@ export default function (pi: ExtensionAPI) {
 			promptGuidelines: [
 				"agent: hand a search that takes more than a few greps or reads (where something is defined, how a feature works across files, which files use something) to Explore with a thoroughness, instead of reading file after file in this conversation: Explore runs on a small model with its own context, and only its report enters this one. Read or grep yourself when you know the file or need one or two lookups.",
 				"agent: choose the model of each call by what the task needs, from the ladder in the model parameter: the weakest rung that does it reliably; a stronger one for judgement (unclear bugs, design, reviews, security), and the strongest only when a mistake would be expensive or a weaker agent's work fell short. A stronger model is slower and costs more; a weaker one that fails costs a second run. Without model the definition's or the default model runs, which may not fit the task.",
+				"agent: the only way to start another agent. Never start one through bash or a script (pi -p, claude -p, codex exec, gemini -p, opencode run, and the like): it would run unseen, outside the agent panel, where nobody can follow or stop it. When agent refuses (depth or concurrency limit), do the work yourself instead of a way around it. A short run to test an extension or a CLI is no agent.",
 			],
 			parameters: agentParams(modelText),
 			executionMode: "parallel",

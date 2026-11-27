@@ -1551,6 +1551,12 @@ Without `subagents.ts` it does nothing.
   definition names one. `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH` (default 3) and
   `CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS` (default 20) set how deep subagents
   nest and how many run at once.
+- The tool's guidelines tell the model that `agent` is the only way to start
+  another agent: never through bash or a script (`pi -p`, `claude -p`,
+  `codex exec`, and the like), where it would run unseen, outside the agent
+  panel; and to do the work itself when `agent` refuses at a limit. A short
+  run to test an extension or a CLI is exempt. It is an instruction, not a
+  block.
 
 ## background-agents
 
