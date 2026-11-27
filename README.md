@@ -1993,8 +1993,14 @@ others wait for Pi while Pi waits for the answer, until the run is aborted.
 - Sets `CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK=1` in Pi's own environment,
   which the provider hands to every Claude Code process it starts. A stalled
   stream then ends as a retried stream or as an error, and both reach Pi.
+- Sets `CLAUDE_CODE_ENABLE_FINE_GRAINED_TOOL_STREAMING=1` as well. Without
+  fine-grained tool streaming the API holds a long argument, such as an edit's
+  text, back until it is complete; Claude Code asks for it only where a feature
+  flag of its own allows it. With it, Pi gets a tool call's arguments as the
+  model writes them, and the [diff](#diff) panel shows the change coming.
 - Applies to Pi alone, not to the shell. A value set before Pi starts is
-  kept.
+  kept: `CLAUDE_CODE_ENABLE_FINE_GRAINED_TOOL_STREAMING=0` turns the streamed
+  arguments off.
 - Claude Code processes started before the extension was loaded keep their
   environment; start Pi anew to apply it.
 
