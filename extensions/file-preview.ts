@@ -399,7 +399,7 @@ function highlighted(file: Snapshot, theme: Theme): string[] {
 	return lines;
 }
 
-/** The rows of a layout as panel lines of `width` columns: border, line number, gutter, sign, text. */
+/** The rows of a layout as panel lines of `width` columns: border, line number, a space, gutter, sign, text. */
 function renderRows(theme: Theme, layout: Layout, file: Snapshot | undefined, width: number): string[] {
 	const border = theme.fg("border", "│");
 	if (layout.rows.length === 0) {
@@ -409,12 +409,12 @@ function renderRows(theme: Theme, layout: Layout, file: Snapshot | undefined, wi
 	let max = 1;
 	for (const r of layout.rows) if (r.num > max) max = r.num;
 	const numWidth = String(max).length;
-	const textWidth = Math.max(1, width - numWidth - 4);
+	const textWidth = Math.max(1, width - numWidth - 5);
 	const hl = file && file.content !== null ? highlighted(file, theme) : [];
 	if (file && (file.fmt?.theme !== theme || file.fmt.width !== textWidth)) file.fmt = { theme, width: textWidth, lines: [] };
 	const bar = theme.fg("accent", "▌");
 	return layout.rows.map((r) => {
-		const num = String(r.num).padStart(numWidth);
+		const num = `${String(r.num).padStart(numWidth)} `;
 		if (r.kind === " ") {
 			let text: string;
 			if (file?.fmt && r.src !== undefined) text = file.fmt.lines[r.src] ??= truncateToWidth(hl[r.src] ?? clean(r.text), textWidth, "…");
