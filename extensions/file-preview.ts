@@ -1,28 +1,38 @@
 /**
- * File preview: a live view of the file the model is editing, in a panel beside the conversation.
+ * File preview: a live view of the file the model edits, or of the command it runs, in a panel beside the conversation.
  *
- * - Shows the whole file with line numbers and syntax highlighting. While the model writes an edit or write call, before
- *   it runs, the place being edited is centred: removed lines red, added lines green, both with an accent bar in the
- *   gutter, and added lines grow as the arguments stream in. A write shows its content as it arrives: for an existing
- *   file the region that differs from the old content, for a new file just the content.
+ * - Shows the whole file with line numbers and syntax highlighting. While the model writes an edit or write call,
+ *   before it runs, the place being edited is centred: removed lines red, added lines green, both with an accent bar
+ *   in the gutter, and added lines grow as the arguments stream in. A write shows its content as it arrives: for an
+ *   existing file the region that differs from the old content, for a new file just the content.
  * - Once the call has run, the removed lines go and the panel shows the file as it now is on disk; the changed lines
  *   keep the gutter bar until the next prompt.
  * - The header holds the path (relative to the working directory), the status of the call — writing…, queued (Claude
  *   Code runs a response's calls once the response is complete), applying…, applied, failed, or not applied — and ✕.
- * - It always shows the file currently being edited: an edit of another file switches the preview to it. Of calls
- *   written side by side, it follows the one written last.
- * - The mouse wheel scrolls; once the user scrolls, following pauses until the next edit call starts. alt+g moves the
+ * - A bash or codemode call shows its command or script instead, with line numbers, syntax highlighting, and the bar in
+ *   the gutter, as the model writes it; below a rule follows the output while it runs, then the final result: for
+ *   codemode the nested tool calls with their status and the script's output. Escape sequences are stripped, the last
+ *   2000 lines kept. The view follows the end, like a terminal: the command stays in view as long as it and the output
+ *   fit, a long command shows its end above the output's start, and a long output its tail; the header names the tool
+ *   and the command's first line, and the status: writing…, queued, running…, exit 0 or exit N, timed out, aborted,
+ *   failed, or not run (bash); done or failed (codemode). Calls a codemode script makes itself are not followed; the
+ *   script's view lists them. Commands the user runs with ! are not shown.
+ * - It always shows the call written last: an edit of another file switches the preview to it, a bash call to the
+ *   command, an edit after it back to the file.
+ * - The mouse wheel scrolls; once the user scrolls, following pauses until the next call starts. alt+g moves the
  *   keyboard into the panel and back; there ↑↓ PgUp/PgDn Home/End scroll, Esc returns, x closes. ✕ closes too.
- * - It opens on its own at the session's first edit when the terminal has 144 columns, or 110 once the user opened it
- *   with /preview. Closed by the user, it stays closed, in later sessions too, until /preview opens it again; that
- *   preference is kept in ~/.pi/agent/file-preview.json. /preview opens and closes it.
+ * - It opens on its own at the session's first edit, write, bash, or codemode call when the terminal has 144 columns,
+ *   or 110 once the user opened it with /preview. Closed by the user, it stays closed, in later sessions too, until
+ *   /preview opens it again; that preference is kept in ~/.pi/agent/file-preview.json. /preview opens and closes it.
  * - Only in Pi's fullscreen TUI with at least 110 columns; otherwise there is no preview (/preview says why), and
  *   subagents and print mode do nothing. Files over 2 MB and binary files show a one-line note instead.
  *
  * The live view reads the calls' arguments from the message stream (message_update) and the file as it was before the
  * call; after the call it re-reads the file and marks the lines from the edit tool's patch, or from the lines where old
- * and new content differ. The panel splits Pi's fullscreen layout through tui.setLayoutRoot(); when that layout is not
- * the one this was built against (a VStack of transcript and dock, Pi 1.6), the preview does not open.
+ * and new content differ. Output comes from tool_execution_update (bash: the tail of the output so far, codemode: its
+ * nested calls) and the result; bash's exit code from its structured result or its "Command exited with code N". The
+ * panel splits Pi's fullscreen layout through tui.setLayoutRoot(); when that layout is not the one this was built
+ * against (a VStack of transcript and dock, Pi 1.6), the preview does not open.
  */
 
 import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
@@ -54,6 +64,9 @@ const AUTO_OPEN_COLUMNS = 144;
 /** The preview redraws at most this often while a call's arguments arrive. */
 const LIVE_FRAME_MS = 80;
 const TAB = "    ";
+/** Output kept of a bash or codemode call, in lines and characters per line. */
+const OUTPUT_MAX_LINES = 2000;
+const OUTPUT_MAX_CHARS = 1000;
 const PREFS_FILE = path.join(getAgentDir(), "file-preview.json");
 
 interface Prefs {
@@ -73,10 +86,23 @@ interface Snapshot {
 	fmt?: { theme: Theme; width: number; lines: string[] };
 }
 
-/** An edit or write call from the moment the model starts writing it. */
+type Tool = "edit" | "write" | "bash" | "codemode";
+
+const TOOLS: ReadonlySet<string> = new Set<Tool>(["edit", "write", "bash", "codemode"]);
+
+function isTool(name: unknown): name is Tool {
+	return typeof name === "string" && TOOLS.has(name);
+}
+
+/** A call that runs something: a bash command or a codemode script. */
+function isRun(tool: Tool): boolean {
+	return tool === "bash" || tool === "codemode";
+}
+
+/** A call from the moment the model starts writing it. */
 interface LiveEdit {
 	id: string;
-	tool: "edit" | "write";
+	tool: Tool;
 	/** The arguments as streamed so far, JSON that may stop anywhere; parsed when needed. */
 	json: string;
 	args: Record<string, unknown>;
@@ -85,8 +111,11 @@ interface LiveEdit {
 	running: boolean;
 	/** Order of the calls as the model wrote them; the preview follows the highest. */
 	seq: number;
-	/** The file before the call. */
+	/** The file before the call; for bash and codemode the command or script, as a snapshot to highlight. */
 	file?: Snapshot;
+	/** bash and codemode: the output so far, cleaned, and how the call ended (exit 0, failed, …). */
+	output?: string[];
+	outcome?: string;
 	/** The file after the call, and the lines (0-based rows) it changed. */
 	after?: Snapshot;
 	focus?: { from: number; to: number };
@@ -101,7 +130,8 @@ interface EditArg {
 }
 
 interface Row {
-	kind: " " | "-" | "+";
+	/** A line of the file or command, removed, added, a line of output, or the rule above the output. */
+	kind: " " | "-" | "+" | "o" | "r";
 	num: number;
 	text: string;
 	/** Index of the line in the snapshot, for its highlighted form. */
@@ -114,6 +144,8 @@ interface Layout {
 	rows: Row[];
 	/** Rows of the change to centre. */
 	focus?: { from: number; to: number };
+	/** Keep the end of the focus at the bottom, like a terminal. */
+	tail?: boolean;
 	note?: string;
 }
 
@@ -174,8 +206,8 @@ function readSnapshot(abs: string): Snapshot {
 	}
 }
 
-/** The arguments of a live call as far as they have arrived, in the form of Pi's edit and write tools. */
-function liveArgs(entry: LiveEdit): { path: string; edits: EditArg[]; content?: string } {
+/** The arguments of a live call as far as they have arrived. */
+function argsOf(entry: LiveEdit): Record<string, unknown> {
 	if (!entry.parsed) {
 		entry.parsed = true;
 		try {
@@ -185,7 +217,12 @@ function liveArgs(entry: LiveEdit): { path: string; edits: EditArg[]; content?: 
 			// keep the arguments that parsed last
 		}
 	}
-	const args = entry.args;
+	return entry.args;
+}
+
+/** The arguments of a live call as far as they have arrived, in the form of Pi's edit and write tools. */
+function liveArgs(entry: LiveEdit): { path: string; edits: EditArg[]; content?: string } {
+	const args = argsOf(entry);
 	const text = (value: unknown) => (typeof value === "string" ? value : undefined);
 	const one = (e: Record<string, unknown>) => ({ oldText: text(e.oldText ?? e.old_string), newText: text(e.newText ?? e.new_string) });
 	const edits = Array.isArray(args.edits)
@@ -201,6 +238,74 @@ function pathOf(entry: LiveEdit): string {
 	const args = liveArgs(entry);
 	if (!args.path || (entry.streaming && Object.keys(entry.args).length < 2)) return "";
 	return args.path;
+}
+
+/** Whether the preview can show the call: a bash or codemode call at once, an edit or write once its path is known. */
+function ready(entry: LiveEdit): boolean {
+	return isRun(entry.tool) || pathOf(entry) !== "";
+}
+
+/** The command of a bash call or the script of a codemode call, as far as it has arrived. */
+function runText(entry: LiveEdit): string {
+	const value = argsOf(entry)[entry.tool === "bash" ? "command" : "code"];
+	return typeof value === "string" ? value.replace(/\r\n?/g, "\n") : "";
+}
+
+// --- Command output ------------------------------------------------------------------------------------------------
+
+/** Terminal output as plain lines: escape sequences gone, of a line redrawn with \r its last state, the last lines. */
+function outputLines(text: string): string[] {
+	// eslint-disable-next-line no-control-regex
+	const plain = text.replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?|\x1b\[[0-?]*[ -/]*[@-~]|\x1b[ -/]*[0-~]?/g, "");
+	return splitLines(plain)
+		.slice(-OUTPUT_MAX_LINES)
+		.map((line) => {
+			const trimmed = line.replace(/\r+$/, "");
+			const shown = trimmed.slice(trimmed.lastIndexOf("\r") + 1);
+			return clean(shown.length > OUTPUT_MAX_CHARS ? shown.slice(0, OUTPUT_MAX_CHARS) : shown);
+		});
+}
+
+/** The texts of a tool result's content blocks; an image as [image]. */
+function resultTexts(result: unknown): string[] {
+	const content = (result as { content?: unknown } | undefined)?.content;
+	if (!Array.isArray(content)) return [];
+	return content.map((b: { type?: unknown; text?: unknown } | null) =>
+		b?.type === "text" && typeof b.text === "string" ? b.text : b?.type === "image" ? "[image]" : "",
+	);
+}
+
+const CALL_ICON: Record<string, string> = { running: "…", ok: "✓", error: "✗", cancelled: "⊘" };
+
+/**
+ * The output of a bash or codemode call, from an update while it runs or from its result: for bash the text without
+ * the closing "Command exited with code N", which the header shows; for codemode the nested calls from the details,
+ * then the script's output without the "Script completed" header.
+ */
+function runOutput(tool: Tool, result: unknown): string[] {
+	const texts = resultTexts(result);
+	if (tool === "bash") return outputLines(texts.join("\n").replace(/\n*Command exited with code \d+\s*$/, ""));
+	if (/^Script (completed|failed)\n/.test(texts[0] ?? "")) texts.shift();
+	const calls = (result as { details?: { calls?: unknown } } | undefined)?.details?.calls;
+	const lines = Array.isArray(calls)
+		? calls.map((c: { name?: unknown; args?: unknown; status?: unknown } | null) =>
+				`${CALL_ICON[String(c?.status)] ?? "·"} ${String(c?.name ?? "?")}${c?.args ? ` ${String(c.args)}` : ""}`,
+			)
+		: [];
+	const text = texts.filter((t) => t !== "").join("\n").trim();
+	return outputLines([...lines, ...(lines.length > 0 && text ? [""] : []), ...(text ? [text] : [])].join("\n"));
+}
+
+/** How a bash call ended: exit N, timed out, aborted, or failed (blocked, no exit code). */
+function bashOutcome(isError: boolean, result: unknown): string {
+	const code = (result as { structuredContent?: { exit_code?: unknown } } | undefined)?.structuredContent?.exit_code;
+	if (typeof code === "number") return `exit ${code}`;
+	const text = resultTexts(result).join("\n");
+	const exit = text.match(/Command exited with code (\d+)\s*$/);
+	if (exit) return `exit ${exit[1]}`;
+	if (!isError) return "exit 0";
+	if (/Command timed out after [^\n]*$/.test(text)) return "timed out";
+	return /Command aborted\s*$/.test(text) ? "aborted" : "failed";
 }
 
 // --- Preview layouts -----------------------------------------------------------------------------------------------
@@ -316,6 +421,18 @@ function composeFile(file: Snapshot, marks?: Set<number>, focus?: Layout["focus"
 	return { rows: file.lines.map((_, i) => contextRow(file, i, 0, marks)), focus };
 }
 
+/** A command or script with the bar in the gutter, the cursor while it is written, then a rule and its output. */
+function composeRun(code: Snapshot, streaming: boolean, output: string[] | undefined): Layout {
+	const lines = streaming ? (code.content ?? "").split("\n") : code.lines;
+	const rows: Row[] = lines.map((text, i) => ({ kind: " ", num: i + 1, text, src: i, mark: true }));
+	if (streaming && rows.length > 0) rows[rows.length - 1].cursor = true;
+	if (output) {
+		rows.push({ kind: "r", num: 0, text: "" });
+		for (const text of output) rows.push({ kind: "o", num: 0, text });
+	}
+	return { rows, focus: { from: rows.length - 1, to: rows.length - 1 }, tail: true };
+}
+
 // --- Changed lines -------------------------------------------------------------------------------------------------
 
 function parsePatch(patch: string): Hunk[] {
@@ -413,17 +530,22 @@ function renderRows(theme: Theme, layout: Layout, file: Snapshot | undefined, wi
 	const hl = file && file.content !== null ? highlighted(file, theme) : [];
 	if (file && (file.fmt?.theme !== theme || file.fmt.width !== textWidth)) file.fmt = { theme, width: textWidth, lines: [] };
 	const bar = theme.fg("accent", "▌");
+	const cursor = theme.fg("accent", "▍");
 	return layout.rows.map((r) => {
+		if (r.kind === "r") return `${border} ${theme.fg("dim", "─".repeat(Math.max(1, width - 3)))}`;
+		if (r.kind === "o") return `${border} ${theme.fg("toolOutput", truncateToWidth(r.text, Math.max(1, width - 2), "…"))}`;
 		const num = `${String(r.num).padStart(numWidth)} `;
 		if (r.kind === " ") {
 			let text: string;
-			if (file?.fmt && r.src !== undefined) text = file.fmt.lines[r.src] ??= truncateToWidth(hl[r.src] ?? clean(r.text), textWidth, "…");
+			const line = r.src !== undefined ? hl[r.src] : undefined;
+			if (r.cursor) text = truncateToWidth(line ?? clean(r.text), Math.max(1, textWidth - 1), "…") + cursor;
+			else if (file?.fmt && r.src !== undefined) text = file.fmt.lines[r.src] ??= truncateToWidth(hl[r.src] ?? clean(r.text), textWidth, "…");
 			else text = truncateToWidth(clean(r.text), textWidth, "…");
 			return `${border} ${theme.fg(r.mark ? "accent" : "dim", num)}${r.mark ? bar : " "} ${text}`;
 		}
 		const color = r.kind === "+" ? "toolDiffAdded" : "toolDiffRemoved";
 		const text = truncateToWidth(clean(r.text), Math.max(1, r.cursor ? textWidth - 1 : textWidth), "…");
-		return `${border} ${theme.fg(color, num)}${bar}${theme.fg(color, `${r.kind}${text}`)}${r.cursor ? theme.fg("accent", "▍") : ""}`;
+		return `${border} ${theme.fg(color, num)}${bar}${theme.fg(color, `${r.kind}${text}`)}${r.cursor ? cursor : ""}`;
 	});
 }
 
@@ -434,24 +556,30 @@ function spread(left: string, right: string, width: number): string {
 	return `${cut}${" ".repeat(Math.max(1, width - visibleWidth(cut) - visibleWidth(right)))}${right}`;
 }
 
-type Status = "writing…" | "queued" | "applying…" | "applied" | "failed" | "not applied";
-
-const STATUS_COLOR: Record<Status, "accent" | "muted" | "success" | "error"> = {
+/** The colour of a call's status; exit N other than 0 is an error. */
+const STATUS_COLOR: Record<string, "accent" | "muted" | "success" | "error" | "warning"> = {
 	"writing…": "accent",
 	queued: "muted",
 	"applying…": "muted",
+	"running…": "accent",
 	applied: "success",
-	failed: "error",
+	done: "success",
+	"exit 0": "success",
+	aborted: "warning",
 	"not applied": "muted",
+	"not run": "muted",
 };
 
-function headerLine(theme: Theme, width: number, title: string | undefined, status: Status | undefined, note: string | undefined, focused: boolean): string {
+function headerLine(theme: Theme, width: number, v: View, focused: boolean): string {
 	const border = theme.fg("border", "│");
-	const name = title ?? "File preview";
-	const left = `${border} ${theme.bold(focused ? theme.fg("accent", name) : name)}`;
+	const name = v.title ?? "File preview";
+	const sub = v.subtitle ? ` ${theme.fg("muted", v.subtitle)}` : "";
+	const left = `${border} ${theme.bold(focused ? theme.fg("accent", name) : name)}${sub}`;
+	const note = v.layout.note;
+	const status = v.status;
 	const right =
 		(note ? `${theme.fg(note.startsWith("oldText") ? "warning" : "muted", note)}  ` : "") +
-		(status ? `${theme.fg(STATUS_COLOR[status], `● ${status}`)}  ` : "") +
+		(status ? `${theme.fg(STATUS_COLOR[status] ?? "error", `● ${status}`)}  ` : "") +
 		`${theme.fg("muted", "✕")} `;
 	return spread(left, right, width);
 }
@@ -516,7 +644,9 @@ class PanelScroll extends ScrollView {
 
 interface View {
 	title?: string;
-	status?: Status;
+	/** For bash and codemode: the command's first line. */
+	subtitle?: string;
+	status?: string;
 	file?: Snapshot;
 	layout: Layout;
 	streaming: boolean;
@@ -559,10 +689,21 @@ export default function (pi: ExtensionAPI) {
 		if (viewCache?.version === version) return viewCache.view;
 		const entry = current;
 		let result: View = { layout: { rows: [] }, streaming: false };
-		const raw = entry ? pathOf(entry) : "";
-		if (entry && raw) {
+		const raw = entry && !isRun(entry.tool) ? pathOf(entry) : "";
+		if (entry && isRun(entry.tool)) {
+			const code = runText(entry);
+			if (entry.file?.content !== code) {
+				entry.file = { abs: entry.tool === "bash" ? "command.sh" : "script.js", exists: true, content: code, lines: splitLines(code) };
+			}
+			const status = entry.stopped
+				? "not run"
+				: (entry.outcome ?? (entry.streaming ? "writing…" : entry.running ? "running…" : "queued"));
+			const first = code.split("\n").find((l) => l.trim() !== "") ?? "";
+			const layout = composeRun(entry.file, entry.streaming, entry.output);
+			result = { title: entry.tool, subtitle: clean(first.trim()), status, file: entry.file, layout, streaming: entry.streaming };
+		} else if (entry && raw) {
 			const abs = resolvePath(cwd, raw);
-			const status: Status = entry.failed
+			const status = entry.failed
 				? "failed"
 				: entry.stopped
 					? "not applied"
@@ -591,9 +732,9 @@ export default function (pi: ExtensionAPI) {
 		return result;
 	}
 
-	/** Follows the call written last whose path is known, and forgets the calls that are over and not followed. */
+	/** Follows the call written last that can be shown, and forgets the calls that are over and not followed. */
 	function pick(): void {
-		for (const entry of live.values()) if ((!current || entry.seq > current.seq) && pathOf(entry)) current = entry;
+		for (const entry of live.values()) if ((!current || entry.seq > current.seq) && ready(entry)) current = entry;
 		for (const [id, entry] of live) if (entry !== current && (entry.done || entry.failed || entry.stopped)) live.delete(id);
 		version++;
 	}
@@ -629,14 +770,19 @@ export default function (pi: ExtensionAPI) {
 			tui.requestRender();
 		}
 
-		/** Centres the focused rows: the whole change when it fits, else its end while it is written, else its start. */
+		/**
+		 * Centres the focused rows: the whole change when it fits, else its end while it is written, else its start. A
+		 * command keeps its last row at the bottom.
+		 */
 		function follow(v: View): void {
 			const f = v.layout.focus;
 			if (paused || !f) return;
 			scroll.jump(() => {
 				const height = scroll.viewportHeight || Math.max(5, tui.terminal.rows - 6);
 				const size = f.to - f.from + 1;
-				const top = size <= height - 4 ? f.from - Math.floor((height - size) / 2) : v.streaming ? f.to - height + 3 : f.from - 2;
+				const top = v.layout.tail
+					? f.to - height + 1
+					: size <= height - 4 ? f.from - Math.floor((height - size) / 2) : v.streaming ? f.to - height + 3 : f.from - 2;
 				return Math.max(0, top);
 			});
 		}
@@ -648,7 +794,7 @@ export default function (pi: ExtensionAPI) {
 				headerWidth = width;
 				try {
 					const v = view();
-					const lines = [headerLine(theme(), width, v.title, v.status, v.layout.note, focused)];
+					const lines = [headerLine(theme(), width, v, focused)];
 					if (focused) {
 						const help = "↑↓ PgUp/PgDn Home/End scroll · Esc back · x close";
 						lines.push(`${theme().fg("border", "│")} ${theme().fg("dim", truncateToWidth(help, Math.max(1, width - 2), "…"))}`);
@@ -701,7 +847,7 @@ export default function (pi: ExtensionAPI) {
 					const key = `${version}:${width}`;
 					if (bodyCache?.key !== key || bodyCache.theme !== t) {
 						const v = view();
-						lines = v.title ? renderRows(t, v.layout, v.file, width) : v.status ? [] : [`${border} ${t.fg("muted", "No file edited yet.")}`];
+						lines = v.title ? renderRows(t, v.layout, v.file, width) : v.status ? [] : [`${border} ${t.fg("muted", "Nothing edited or run yet.")}`];
 						bodyCache = { key, theme: t, lines };
 						follow(v);
 					}
@@ -752,7 +898,7 @@ export default function (pi: ExtensionAPI) {
 					if (panel?.root === root) tui.requestRender();
 				}, LIVE_FRAME_MS);
 			},
-			/** A new edit call started: follow again. */
+			/** A new call started: follow again. */
 			resume() {
 				paused = false;
 			},
@@ -847,11 +993,13 @@ export default function (pi: ExtensionAPI) {
 		entry.after = after;
 		entry.focus = added.length > 0 ? { from: Math.min(...added) - 1, to: Math.max(...added) - 1 } : at !== undefined ? { from: at - 1, to: at - 1 } : undefined;
 		// Calls of the same file still to run see it as it is now.
-		for (const other of live.values()) if (other !== entry && !other.done && other.file?.abs === abs) other.file = readSnapshot(abs);
+		for (const other of live.values()) {
+			if (other !== entry && !other.done && !isRun(other.tool) && other.file?.abs === abs) other.file = readSnapshot(abs);
+		}
 	}
 
 	/** The entry of a call, created with the next sequence number when it is new. */
-	function entryOf(id: string, tool: "edit" | "write", ctx: ExtensionContext, streaming: boolean): { entry: LiveEdit; started: boolean } {
+	function entryOf(id: string, tool: Tool, ctx: ExtensionContext, streaming: boolean): { entry: LiveEdit; started: boolean } {
 		const known = live.get(id);
 		if (known) return { entry: known, started: false };
 		const entry: LiveEdit = { id, tool, json: "", args: {}, parsed: true, streaming, running: false, seq: ++liveSeq };
@@ -860,12 +1008,17 @@ export default function (pi: ExtensionAPI) {
 		return { entry, started: true };
 	}
 
-	/** The call ended: applied, or failed. */
-	function finish(id: string, isError: boolean, details: unknown): void {
+	/** The call ended: applied or failed, a command or script with its output and outcome. */
+	function finish(id: string, isError: boolean, result: unknown): void {
 		const entry = live.get(id);
 		if (!entry || entry.done || entry.failed) return;
-		if (isError) entry.failed = true;
-		else applied(entry, details);
+		if (isRun(entry.tool)) {
+			entry.output = runOutput(entry.tool, result);
+			entry.outcome = entry.tool === "bash" ? bashOutcome(isError, result) : isError ? "failed" : "done";
+			entry.done = true;
+			entry.streaming = false;
+		} else if (isError) entry.failed = true;
+		else applied(entry, (result as { details?: unknown } | undefined)?.details);
 		entry.running = false;
 		changed(false);
 		panel?.frame(true);
@@ -911,7 +1064,7 @@ export default function (pi: ExtensionAPI) {
 		const block = (update.toolCall ?? (Array.isArray(content) ? content[update.contentIndex ?? -1] : undefined)) as
 			| { id?: string; name?: string; arguments?: Record<string, unknown>; partialJson?: unknown }
 			| undefined;
-		if (!block?.id || (block.name !== "edit" && block.name !== "write")) return;
+		if (!block?.id || !isTool(block.name)) return;
 		const { entry, started } = entryOf(block.id, block.name, ctx, true);
 		if (!entry.streaming) return;
 		if (update.type === "toolcall_end") {
@@ -943,24 +1096,26 @@ export default function (pi: ExtensionAPI) {
 		changed(false);
 	}));
 
+	// Calls a codemode script makes (parentToolCallId) are left out: the panel keeps showing the script.
 	pi.on("tool_call", safe((event, ctx) => {
-		if (event.toolName !== "write" && event.toolName !== "edit") return;
+		if (!isTool(event.toolName) || event.parentToolCallId) return;
 		const { entry } = entryOf(event.toolCallId, event.toolName, ctx, false);
 		entry.args = event.input as Record<string, unknown>;
 		entry.parsed = true;
 		entry.streaming = false;
 		// The file as it is right before the call runs: an earlier call may have changed it since it was read.
-		const raw = liveArgs(entry).path;
+		const raw = isRun(entry.tool) ? "" : liveArgs(entry).path;
 		if (raw) entry.file = readSnapshot(resolvePath(ctx.cwd, raw));
 		changed(false);
 	}));
 
 	// Also a call whose arguments did not stream (another provider, or a whole message) gets its preview here.
 	pi.on("tool_execution_start", safe((event, ctx) => {
-		if ((event.toolName !== "edit" && event.toolName !== "write") || event.parentToolCallId) return;
+		if (!isTool(event.toolName) || event.parentToolCallId) return;
 		const { entry, started } = entryOf(event.toolCallId, event.toolName, ctx, false);
 		entry.streaming = false;
 		entry.running = true;
+		if (isRun(entry.tool)) entry.output ??= [];
 		if (event.args && typeof event.args === "object" && Object.keys(event.args).length > 0) {
 			entry.args = event.args as Record<string, unknown>;
 			entry.parsed = true;
@@ -968,12 +1123,24 @@ export default function (pi: ExtensionAPI) {
 		changed(started);
 	}));
 
+	// bash sends the tail of its output so far, codemode its nested calls.
+	pi.on("tool_execution_update", safe((event) => {
+		const entry = event.parentToolCallId ? undefined : live.get(event.toolCallId);
+		if (!entry || !isRun(entry.tool) || entry.done) return;
+		entry.streaming = false;
+		entry.running = true;
+		entry.output = runOutput(entry.tool, event.partialResult);
+		changed(false);
+	}));
+
 	pi.on("tool_result", safe((event) => {
-		if (event.toolName === "edit" || event.toolName === "write") finish(event.toolCallId, event.isError, event.details);
+		if (!isTool(event.toolName) || event.parentToolCallId) return;
+		const { content, details, structuredContent } = event;
+		finish(event.toolCallId, event.isError, { content, details, structuredContent });
 	}));
 
 	pi.on("tool_execution_end", safe((event) => {
-		finish(event.toolCallId, event.isError, (event.result as { details?: unknown } | undefined)?.details);
+		if (!event.parentToolCallId) finish(event.toolCallId, event.isError, event.result);
 	}));
 
 	// Nothing runs any more: what is still written or queued was never run.

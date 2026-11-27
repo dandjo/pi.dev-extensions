@@ -33,7 +33,7 @@ names `extensions/`, which holds one file per extension.
 | `subagents.ts`              | Adds the `agent` tool: subagents in their own Pi process, on a tier or a model of choice  | —                                                                |
 | `btw.ts`                    | `/btw`: a side question about the session that stays out of the conversation              | —                                                                |
 | `scheduled-tasks.ts`        | `/cron` and the cron tools: prompts on a schedule within the session                      | —                                                                |
-| `file-preview.ts`           | `/preview`: a live view beside the conversation of the file the model edits               | —                                                                |
+| `file-preview.ts`           | `/preview`: a live view beside the conversation of the file edited or command run         | —                                                                |
 | `background-agents.ts`      | The agent panel below the prompt: ↓ to the agents, Enter opens one, Ctrl+B to background  | `subagents.ts`                                                   |
 | `network-resilience.ts`     | Claude Code's handling of dropped connections: stall notice, restart, network wait        | —                                                                |
 | `auto-continue.ts`          | Waits out a used-up usage limit, quota, or rate limit and continues after the reset       | —                                                                |
@@ -1715,9 +1715,10 @@ Code's `CronCreate`, `CronList`, and `CronDelete`).
 
 ## file-preview
 
-`/preview` shows the file the model is editing, live, in a panel beside the
-conversation: the whole file with line numbers and syntax highlighting, and
-nothing around it but a header with the path, the state of the call, and `✕`.
+`/preview` shows the file the model is editing, or the command it runs, live,
+in a panel beside the conversation: the whole file with line numbers and syntax
+highlighting, and nothing around it but a header with the path, the state of
+the call, and `✕`.
 
 - While the model writes an `edit` or `write` call, before it runs, the place
   it edits stands in the middle of the panel: the lines it removes in red, the
@@ -1732,15 +1733,24 @@ nothing around it but a header with the path, the state of the call, and `✕`.
   or `not applied`, and notes such as `oldText not found` or `new file`.
 - Once the call has run, the removed lines go and the panel shows the file as
   it is now on disk; the changed lines keep their bar until your next prompt.
-- It always shows the file being edited: an edit of another file switches to
-  it, and of calls written side by side it follows the one written last.
+- A `bash` or `codemode` call shows its command or script the same way, as
+  the model writes it, and below a rule its output while it runs, like a
+  terminal that keeps the end in view; for `codemode` the tools the script
+  calls, then its output. The header names the tool and the command's first
+  line, and reads `writing…`, `queued`, `running…`, then `exit 0` or `exit N`,
+  `timed out`, `aborted`, `failed`, or `not run` (`done` or `failed` for
+  `codemode`). Calls a `codemode` script makes itself do not take over the
+  panel. Commands you run with `!` are not shown.
+- It always shows the call written last: an edit of another file switches to
+  it, a `bash` call to the command, the next edit back to the file.
 - Mouse: the wheel scrolls; then the panel stops following until the next
-  edit starts. `✕` closes it.
+  call starts. `✕` closes it.
 - Keyboard: `alt+g` moves into the panel and back (and opens it when closed).
   There ↑↓ PgUp/PgDn Home/End scroll, Esc returns to the editor, `x` closes.
-- The panel opens on its own at the session's first edit when the terminal
-  has 144 columns, or 110 once you have opened it with `/preview`. Closed, it
-  stays closed, in later sessions too, until `/preview` opens it again.
+- The panel opens on its own at the session's first `edit`, `write`, `bash`,
+  or `codemode` call when the terminal has 144 columns, or 110 once you have
+  opened it with `/preview`. Closed, it stays closed, in later sessions too,
+  until `/preview` opens it again.
   `/preview` toggles it. It needs the fullscreen terminal and 110 columns;
   below that there is no preview, and `/preview` says why. It works in any
   directory, with or without git.
