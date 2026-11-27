@@ -150,7 +150,7 @@ interface Layout {
 	focus?: { from: number; to: number };
 	/** Keep the end of the focus at the bottom, like a terminal. */
 	tail?: boolean;
-	/** Wrap long lines of the text (a command or script) instead of cutting them, each to at most MAX_WRAP_ROWS rows. */
+	/** Wrap long lines of a command or script instead of cutting them, each to at most MAX_WRAP_ROWS rows. */
 	wrap?: boolean;
 	note?: string;
 }
