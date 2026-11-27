@@ -1451,7 +1451,10 @@ export default function (pi: ExtensionAPI) {
 		if (panel || autoTried || ctx.mode !== "tui" || !tuiRef) return;
 		autoTried = true;
 		const need = prefs.panel === "opened" ? PANEL_MIN_COLUMNS : AUTO_OPEN_COLUMNS;
-		if (prefs.panel !== "closed" && tuiRef.terminal.columns >= need && (await repoOf(ctx.cwd)) && openPanel(ctx)) panel?.live(true);
+		if (prefs.panel !== "closed" && tuiRef.terminal.columns >= need && (await repoOf(ctx.cwd)) && openPanel(ctx)) {
+			// The check above narrowed panel to null; TypeScript does not see that openPanel() set it.
+			(panel as ReturnType<typeof createPanel> | null)?.live(true);
+		}
 	}
 
 	function liveChanged(ctx: ExtensionContext, started: boolean): void {
