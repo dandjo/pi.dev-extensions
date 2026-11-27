@@ -641,10 +641,10 @@ class Transcript {
 
 /**
  * Framed, scrollable boxes for the extensions that show more than a notification can hold: overlays for /agents,
- * /cron, and /memory, and the frame and scrolling of the boxes /btw and the /diff dialog show above the prompt.
+ * /cron, and /memory, and the frame and scrolling of the box /btw shows above the prompt.
  *
- * btw.ts, claude-remote-control.ts, diff.ts, memory.ts, scheduled-tasks.ts, subagents.ts carry a copy of this block, or
- * of a part of it: change them alike.
+ * btw.ts, claude-remote-control.ts, memory.ts, scheduled-tasks.ts, subagents.ts carry a copy of this block, or of a
+ * part of it: change them alike.
  */
 /** Rows the body of an overlay may use: the overlay's height cap minus the frame and help lines. */
 function bodyRows(tui: TUI): number {
@@ -1207,7 +1207,7 @@ export default function (pi: ExtensionAPI) {
 		return scroll ? { doc, scroll } : undefined;
 	}
 
-	/** Finds the ScrollView whose child is doc in Pi's layout, which diff.ts may have split. */
+	/** Finds the ScrollView whose child is doc in Pi's layout, which file-preview.ts may have split. */
 	function scrollViewOf(node: unknown, doc: Component, depth: number): ScrollLike | undefined {
 		if (!node || typeof node !== "object" || depth > 8) return undefined;
 		const n = node as { children?: unknown[]; entries?: Array<{ component?: unknown }>; scrollToEnd?: unknown; updateLayout?: unknown };

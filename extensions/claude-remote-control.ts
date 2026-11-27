@@ -1310,10 +1310,10 @@ function toClaudeResponse(
 
 /**
  * Framed, scrollable boxes for the extensions that show more than a notification can hold: overlays for /agents,
- * /cron, and /memory, and the frame and scrolling of the boxes /btw and the /diff dialog show above the prompt.
+ * /cron, and /memory, and the frame and scrolling of the box /btw shows above the prompt.
  *
- * background-agents.ts, btw.ts, diff.ts, memory.ts, scheduled-tasks.ts, subagents.ts carry a copy of this block, or of
- * a part of it: change them alike.
+ * background-agents.ts, btw.ts, memory.ts, scheduled-tasks.ts, subagents.ts carry a copy of this block, or of a part of
+ * it: change them alike.
  */
 /** Draws a rounded frame around `body`, with `title` in the top edge and `help` (the keys) as its last line. */
 function frame(theme: Theme, width: number, title: string, body: string[], help: string): string[] {

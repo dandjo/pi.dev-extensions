@@ -1554,10 +1554,10 @@ Usage notes:
 
 /**
  * Framed, scrollable boxes for the extensions that show more than a notification can hold: overlays for /agents,
- * /cron, and /memory, and the frame and scrolling of the boxes /btw and the /diff dialog show above the prompt.
+ * /cron, and /memory, and the frame and scrolling of the box /btw shows above the prompt.
  *
- * background-agents.ts, btw.ts, claude-remote-control.ts, diff.ts, memory.ts, scheduled-tasks.ts carry a copy of this
- * block, or of a part of it: change them alike.
+ * background-agents.ts, btw.ts, claude-remote-control.ts, memory.ts, scheduled-tasks.ts carry a copy of this block, or
+ * of a part of it: change them alike.
  */
 const OVERLAY_OPTIONS = { anchor: "center", width: "90%", maxHeight: "90%", margin: 1 } as const;
 

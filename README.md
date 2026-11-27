@@ -33,7 +33,7 @@ names `extensions/`, which holds one file per extension.
 | `subagents.ts`              | Adds the `agent` tool: subagents in their own Pi process, on a tier or a model of choice  | —                                                                |
 | `btw.ts`                    | `/btw`: a side question about the session that stays out of the conversation              | —                                                                |
 | `scheduled-tasks.ts`        | `/cron` and the cron tools: prompts on a schedule within the session                      | —                                                                |
-| `diff.ts`                   | `/diff`: a panel beside the conversation with the changes, live, and each turn's edits    | git                                                              |
+| `file-preview.ts`           | `/preview`: a live view beside the conversation of the file the model edits               | —                                                                |
 | `background-agents.ts`      | The agent panel below the prompt: ↓ to the agents, Enter opens one, Ctrl+B to background  | `subagents.ts`                                                   |
 | `network-resilience.ts`     | Claude Code's handling of dropped connections: stall notice, restart, network wait        | —                                                                |
 | `auto-continue.ts`          | Waits out a used-up usage limit, quota, or rate limit and continues after the reset       | —                                                                |
@@ -84,7 +84,7 @@ others while Pi runs goes through Pi's event bus instead:
 ## Set up Pi
 
 Follow the steps in order — together they are the complete setup: Pi itself,
-the Claude subscription, all thirty-two extensions, and the browser
+the Claude subscription, all thirty-three extensions, and the browser
 connection. Every step except the Chrome switch in step 4 is a shell command,
 so an agent can carry them out as well.
 
@@ -184,7 +184,7 @@ Install this repository as a Pi package:
 pi install git:github.com/dandjo/pi.dev-extensions
 ```
 
-Pi clones it into `~/.pi/agent/git/` and loads all thirty-two extensions
+Pi clones it into `~/.pi/agent/git/` and loads all thirty-three extensions
 from there; `pi list` shows the package. [package-update](#package-update)
 brings new versions at every start, new and renamed extensions included, and
 reloads Pi once it is idle; `/update` fetches them at once. There is no build
@@ -278,7 +278,8 @@ Start Pi in a project, or run `/reload` in a running session:
 - "Run `sleep 60` in a subagent" lists the foreground agent in the panel as
   well; Ctrl+B moves it to the background, and its report arrives later.
 - `/btw what was my first request?` answers in an overlay.
-- `/diff` in a git project opens the diff panel beside the conversation.
+- "Add a comment to the README" opens the file preview beside the
+  conversation, with the edit coming in as the model writes it.
 - `/rc` shows a link and a QR code, and the session appears under Code in the
   Claude app; a message sent from there arrives in the terminal.
 - "Open example.com in the browser" opens a tab in your Chrome.
@@ -1599,7 +1600,7 @@ Claude Code, the prompt writes to the agent shown, and Esc interrupts it.
   a call of it; until then it has Pi's plain form, its name and arguments.
   The view follows the end while the agent works
   and scrolls like the conversation (wheel, PgUp PgDn), beside the
-  [diff](#diff) panel too. The panel shows the name of the agent or of
+  [file preview](#file-preview) too. The panel shows the name of the agent or of
   `main` in bold, whichever conversation is shown; ↓ Enter (`main`) shows the
   conversation again, at the scroll position it had.
 - While an agent is shown, the prompt writes to it. A working agent reads
@@ -1712,65 +1713,47 @@ Code's `CronCreate`, `CronList`, and `CronDelete`).
   most 50. They are stored in the session and restored on resume.
   `CLAUDE_CODE_DISABLE_CRON=1` turns all of it off.
 
-## diff
+## file-preview
 
-`/diff` shows the changes the way Claude Code's
-[diff panel and dialog](https://code.claude.com/docs/en/interactive-mode#review-changes-with-%2Fdiff)
-do.
+`/preview` shows the file the model is editing, live, in a panel beside the
+conversation: the whole file with line numbers and syntax highlighting, and
+nothing around it but a header with the path, the state of the call, and `✕`.
 
-- In the fullscreen terminal, in a git repository, and with at least 110
-  columns, it opens a panel beside the conversation that stays open while you
-  work. The panel refreshes after every `edit`, `write`, and `bash` call and
-  lists the changed files with their added and removed lines, each file's diff
-  under the list. Test and generated files, and the changes from before this
-  session, are folded into one line each.
-- Live: while the model writes an `edit` or `write` call, before it runs, the
-  call shows at the top of the panel as it arrives: the lines it removes and
-  adds, at their place in the file with two lines around them, and the line
-  number once its `oldText` is found in the file. A `write` shows the new
-  content from its first changed line, and once it is complete, the lines it
-  replaces too. Long changes show their last lines while they are written. The
-  call's file reads `editing…` in the list, and its preview reads `writing…`,
-  `queued` until it runs (Claude Code runs a response's calls once it is
-  complete), `applying…`, and `applied`, until the refresh after it shows the
-  real diff. With `claude-bridge` the arguments arrive piece by piece through
-  [claude-sdk-stream-only](#claude-sdk-stream-only); without it, a long text
-  arrives whole when the model has written it.
-- Then the panel follows the change: it selects the file and scrolls to the
-  hunk, which keeps an accent bar in the gutter until your next prompt; the
-  file gets a `•` in the list. Of calls that run side by side it follows the
-  one written last. Scrolling the panel or picking a file pauses following
-  until your next prompt; `f`, or the `follow` label at the right of the second
-  line, switches it off and on, also for later sessions.
-- Mouse: click a file to jump to its diff; click `ask`, right of a file's name
-  above its diff, to attach that diff to your next prompt (it reads `asked ✓`
-  until you send it); click the source label to step through `Current` and the
-  turn views; click the base label to switch between this session's changes,
-  all uncommitted changes, and everything since the branch split from the
-  default branch; click a folded line to unfold it, `✕` to close. The wheel
-  scrolls.
-- Keyboard: `alt+g` moves into the panel and back. There ↑↓ pick a file,
-  PgUp/PgDn scroll, Tab switches the source, `b` the base, `a` asks, `e`
-  unfolds, `f` follows, `r` refreshes, Esc returns to the editor, `x` closes.
-- The panel opens on its own when the model starts the session's first edit
-  and the terminal has 144 columns, or 110 once you have opened it with
-  `/diff`. Closed, it stays closed, in later sessions too, until `/diff` opens
-  it again. `/diff` toggles it.
-- Otherwise `/diff` opens a bordered block above the prompt with the same
-  views: ↑↓ select, Enter opens a file's diff, `a` asks, Tab switches the
-  source, `b` the base, `r` refreshes, Esc goes back and closes.
-- `T1`, `T2`, … each show the edits of one prompt's run, from its `edit` and
-  `write` calls; changes made through `bash` appear only under `Current`.
-  "This session's changes" compares against the files as they were when Pi
-  started, kept as temporary copies of the files that were already changed
-  then.
-- The live preview reads the calls' arguments from Pi's message stream
-  (`message_update`) and the file as it was before the call.
-- The panel state, the base per repository, and following are stored in
-  `~/.pi/agent/diff-panel.json`. The panel splits Pi's fullscreen layout with
-  `tui.setLayoutRoot()`, which is not a documented extension interface: when a
-  Pi update changes that layout, `/diff` falls back to the block above the
-  prompt.
+- While the model writes an `edit` or `write` call, before it runs, the place
+  it edits stands in the middle of the panel: the lines it removes in red, the
+  lines it adds in green, both with a bar in the gutter, and the added lines
+  grow as the model writes them. A `write` shows its content as it arrives:
+  for an existing file the part that differs from the old content, for a new
+  file all of it. With `claude-bridge` the arguments arrive piece by piece
+  through [claude-sdk-stream-only](#claude-sdk-stream-only); without it, a
+  long text arrives whole when the model has written it.
+- The header reads `writing…`, `queued` until the call runs (Claude Code runs
+  a response's calls once it is complete), `applying…`, `applied`, `failed`,
+  or `not applied`, and notes such as `oldText not found` or `new file`.
+- Once the call has run, the removed lines go and the panel shows the file as
+  it is now on disk; the changed lines keep their bar until your next prompt.
+- It always shows the file being edited: an edit of another file switches to
+  it, and of calls written side by side it follows the one written last.
+- Mouse: the wheel scrolls; then the panel stops following until the next
+  edit starts. `✕` closes it.
+- Keyboard: `alt+g` moves into the panel and back (and opens it when closed).
+  There ↑↓ PgUp/PgDn Home/End scroll, Esc returns to the editor, `x` closes.
+- The panel opens on its own at the session's first edit when the terminal
+  has 144 columns, or 110 once you have opened it with `/preview`. Closed, it
+  stays closed, in later sessions too, until `/preview` opens it again.
+  `/preview` toggles it. It needs the fullscreen terminal and 110 columns;
+  below that there is no preview, and `/preview` says why. It works in any
+  directory, with or without git.
+- Long lines are cut with `…`. Files over 2 MB and binary files show a
+  one-line note; files over 512 KB are shown without highlighting. The marks
+  after an edit come from the edit tool's patch, so a line the patch counts
+  as unchanged, such as a moved `}`, gets no bar.
+- The live view reads the calls' arguments from Pi's message stream
+  (`message_update`) and the file as it was before the call. Whether the
+  panel is closed is stored in `~/.pi/agent/file-preview.json`. The panel
+  splits Pi's fullscreen layout with `tui.setLayoutRoot()`, which is not a
+  documented extension interface: when a Pi update changes that layout, the
+  preview does not open.
 
 ## claude-remote-control
 
@@ -2017,7 +2000,8 @@ others wait for Pi while Pi waits for the answer, until the run is aborted.
   fine-grained tool streaming the API holds a long argument, such as an edit's
   text, back until it is complete; Claude Code asks for it only where a feature
   flag of its own allows it. With it, Pi gets a tool call's arguments as the
-  model writes them, and the [diff](#diff) panel shows the change coming.
+  model writes them, and the [file preview](#file-preview) shows the change
+  coming.
 - Applies to Pi alone, not to the shell. A value set before Pi starts is
   kept: `CLAUDE_CODE_ENABLE_FINE_GRAINED_TOOL_STREAMING=0` turns the streamed
   arguments off.

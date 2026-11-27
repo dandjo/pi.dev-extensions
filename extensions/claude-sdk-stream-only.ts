@@ -12,7 +12,7 @@
  * The API streams a tool call's input piece by piece only with fine-grained tool streaming (eager_input_streaming on
  * the tool); without it, it holds a long value such as an edit's text back until the value is complete. Claude Code
  * asks for it where a feature flag of its own allows it, and always with CLAUDE_CODE_ENABLE_FINE_GRAINED_TOOL_STREAMING.
- * Pi then gets the arguments of a call as they are written, which diff.ts shows live.
+ * Pi then gets the arguments of a call as they are written, which file-preview.ts shows live.
  *
  * The provider builds the environment of every Claude Code process it starts from Pi's, at the start of each query,
  * after all extensions are loaded. Setting the variables here therefore applies them to Pi alone, not to the shell. A
