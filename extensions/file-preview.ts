@@ -14,12 +14,13 @@
  *   writes it; long lines wrap, each to at most 8 rows (cut with …, or while written showing its end); below a rule
  *   follows the output while it runs, then the final result: for codemode the nested tool calls with their status and
  *   the script's output. Escape sequences are stripped, the last 2000 lines kept. While the command is written the view
- *   keeps its end in sight; once written it stays at the top, the command first and the output below it. An output
- *   longer than the panel shows its start and its end, with a line in between saying how many lines are hidden; the
- *   first wheel turn or key shows all of it to scroll through, until the next call starts. The header names the tool
- *   and the command's first line, and the status: writing…, queued, running…, exit 0 or exit N, timed out, aborted,
- *   failed, or not run (bash); done or failed (codemode). Calls a codemode script makes itself are not followed; the
- *   script's view lists them. Commands the user runs with ! are not shown.
+ *   keeps its end in sight; once written it stays at the top, the command first and the output below it. When command
+ *   and output do not fit, the command takes at most a third of the panel (its start, then a line saying how many of
+ *   its lines are hidden), or more when the output leaves room, and an output longer than the rest shows its start and
+ *   its end, with such a line in between; the first wheel turn or key shows all of it to scroll through, until the next
+ *   call starts. The header names the tool and the command's first line, and the status: writing…, queued, running…,
+ *   exit 0 or exit N, timed out, aborted, failed, or not run (bash); done or failed (codemode). Calls a codemode script
+ *   makes itself are not followed; the script's view lists them. Commands the user runs with ! are not shown.
  * - It always shows the call written last: an edit of another file switches the preview to it, a bash call to the
  *   command, an edit after it back to the file.
  * - The mouse wheel scrolls; once the user scrolls, following pauses until the next call starts. alt+g moves the
@@ -757,12 +758,20 @@ class PanelScroll extends ScrollView {
 	}
 }
 
-/** Output rows a command keeps at least when it is cut, even when the command itself fills the panel. */
-const MIN_OUTPUT_ROWS = 7;
+/** Rows the output keeps at least when the view is cut, however small the panel. */
+const MIN_OUTPUT_ROWS = 3;
+
+/** A muted panel line saying how many lines are hidden. */
+function hiddenLine(theme: Theme, width: number, hidden: number, what: string): string {
+	const note = `⋯ ${hidden} ${hidden === 1 ? "line" : "lines"} ${what} hidden, scroll to show them`;
+	return `${theme.fg("border", "│")} ${theme.fg("muted", truncateToWidth(note, Math.max(1, width - 2), "…"))}`;
+}
 
 /**
- * The panel lines of a command's view cut to `height` rows: the command, then the start and the end of the output with
- * a line in the middle that says how many lines are hidden. Unchanged when it fits, or when it is no command's view.
+ * The panel lines of a command's view cut to `height` rows, once it has output that does not fit: the command takes
+ * at most a third (its start, then a line saying how many of its lines are hidden), or more when the output leaves
+ * room; the output the rest, its start and its end with a line in between when it is longer. Unchanged when it fits,
+ * or when it is no command's view or has no output yet.
  */
 function cutOutput(theme: Theme, layout: Layout, lines: string[], height: number, width: number): string[] {
 	const rule = layout.rows.findIndex((r) => r.kind === "r");
@@ -770,14 +779,20 @@ function cutOutput(theme: Theme, layout: Layout, lines: string[], height: number
 	const count = rule < 0 ? 0 : layout.rows.length - rule - 1;
 	if (rule < 0 || lines.length < count + 1 || lines.length <= height) return lines;
 	const start = lines.length - count;
-	const room = Math.max(MIN_OUTPUT_ROWS, height - start);
-	if (count <= room) return lines;
+	const commandLines = start - 1;
+	let command = lines.slice(0, commandLines);
+	const budget = Math.max(1, Math.floor(height / 3), height - 1 - count);
+	if (commandLines > budget) {
+		const keep = Math.max(0, budget - 1);
+		command = [...command.slice(0, keep), hiddenLine(theme, width, commandLines - keep, "of the command")];
+	}
+	const rest = [lines[start - 1], ...lines.slice(start)];
+	const room = Math.max(MIN_OUTPUT_ROWS, height - command.length - 1);
+	if (count <= room) return [...command, ...rest];
 	const head = Math.floor((room - 1) / 2);
 	const tail = room - 1 - head;
-	const hidden = count - head - tail;
-	const note = `⋯ ${hidden} ${hidden === 1 ? "line" : "lines"} hidden, scroll to show them`;
-	const marker = `${theme.fg("border", "│")} ${theme.fg("muted", truncateToWidth(note, Math.max(1, width - 2), "…"))}`;
-	return [...lines.slice(0, start + head), marker, ...lines.slice(lines.length - tail)];
+	const output = [...lines.slice(start, start + head), hiddenLine(theme, width, count - head - tail, "of the output"), ...lines.slice(lines.length - tail)];
+	return [...command, lines[start - 1], ...output];
 }
 
 // --- Extension -----------------------------------------------------------------------------------------------------
